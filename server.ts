@@ -5126,7 +5126,6 @@ function getProviderBaselinePricing(providerType: string): { input: number; outp
   return DEFAULT_PRICING['gemini-2.5-flash'];
 }
 
-ensureDefaultPricing();
 
 async function enqueueJob(type: string, payload: any) {
   return await enqueueRuntimeJob(type, payload);
