@@ -3,6 +3,7 @@ import path from 'path';
 import { setTimeout as sleep } from 'timers/promises';
 import { Storage } from '@google-cloud/storage';
 import { checkpointSqlite } from '../db';
+import { IS_MEMORY } from '../platform/config';
 
 function getConfig() {
   const bucket = (process.env.GCS_SQLITE_BUCKET || '').trim();
@@ -24,8 +25,7 @@ function artifacts(sqlitePath: string, prefix: string) {
 }
 
 export function isSqliteGcsSyncEnabled() {
-  const { isSqliteMemory } = require('../db');
-  if (isSqliteMemory()) return false;
+  if (IS_MEMORY) return false;
   return Boolean(getConfig().bucket);
 }
 
