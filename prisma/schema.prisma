@@ -1,0 +1,769 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Org {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  users    User[]
+  roles    Role[]
+  projects Project[]
+  runs     Run[]
+
+  @@map("orgs")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  orgId        String   @map("org_id")
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+  lastLoginAt  DateTime? @map("last_login_at")
+
+  org   Org   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  roles UserRole[]
+  sessions Session[]
+
+  @@map("users")
+}
+
+model Role {
+  id        String   @id @default(uuid())
+  orgId     String   @map("org_id")
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  org   Org @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  users UserRole[]
+
+  @@unique([orgId, name])
+  @@map("roles")
+}
+
+model UserRole {
+  userId String @map("user_id")
+  roleId String @map("role_id")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model Project {
+  id          String   @id @default(uuid())
+  orgId       String   @map("org_id")
+  name        String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  org     Org @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  apiKeys ProjectApiKey[]
+  runs    Run[]
+  documents Document[]
+  knowledgebaseIndexes KnowledgebaseIndex[]
+
+  @@index([orgId])
+  @@map("projects")
+}
+
+model ProjectApiKey {
+  id         String    @id @default(uuid())
+  projectId  String    @map("project_id")
+  name       String
+  keyHash    String    @map("key_hash")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastUsedAt DateTime? @map("last_used_at")
+  revokedAt  DateTime? @map("revoked_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([revokedAt])
+  @@map("project_api_keys")
+}
+
+model Run {
+  id          String   @id @default(uuid())
+  orgId       String   @map("org_id")
+  projectId   String   @map("project_id")
+  kind        String
+  name        String?
+  status      String
+  startedAt   DateTime @default(now()) @map("started_at")
+  endedAt     DateTime? @map("ended_at")
+  durationMs  Int?     @map("duration_ms")
+  environment String?  // dev|staging|prod
+  release     String?
+  traceId     String   @map("trace_id")
+  parentRunId String?  @map("parent_run_id")
+  tags        Json?    @map("tags_jsonb")
+  error       Json?    @map("error_jsonb")
+
+  // Aggregates (updated on ingest)
+  promptTokens     Int     @default(0) @map("prompt_tokens")
+  completionTokens Int     @default(0) @map("completion_tokens")
+  totalCostUsd     Decimal @default(0.0) @map("total_cost_usd") @db.Decimal(18, 6)
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  org     Org     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  parent  Run?    @relation("RunParent", fields: [parentRunId], references: [id], onDelete: SetNull)
+  children Run[]  @relation("RunParent")
+  events  RunEvent[]
+
+  @@index([projectId, startedAt(sort: Desc)])
+  @@index([traceId])
+  @@map("runs")
+}
+
+model RunEvent {
+  id           String   @id // client-provided event_id or server uuid
+  runId        String   @map("run_id")
+  ts           DateTime @default(now())
+  type         String
+  spanId       String?  @map("span_id")
+  parentSpanId String?  @map("parent_span_id")
+  name         String?
+  status       String?
+  durationMs   Int?     @map("duration_ms")
+  inputText    String?  @map("input_text")
+  outputText   String?  @map("output_text")
+  error        Json?    @map("error_jsonb")
+  attributes   Json?    @map("attributes_jsonb")
+
+  run Run @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, ts])
+  @@index([type])
+  @@map("run_events")
+}
+
+model ModelPricing {
+  id        String   @id @default(uuid())
+  model     String   @unique
+  inputUsd  Decimal  @map("input_usd") @db.Decimal(18, 6)
+  outputUsd Decimal  @map("output_usd") @db.Decimal(18, 6)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("model_pricing")
+}
+
+model Document {
+  id          String   @id @default(uuid())
+  projectId   String   @map("project_id")
+  name        String
+  description String?
+  filePath    String?  @map("file_path")
+  content     String
+  mimeType    String   @map("mime_type")
+  fileSize    Int?     @map("file_size")
+  tags        Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  chunks  DocumentChunk[]
+
+  @@index([projectId])
+  @@map("documents")
+}
+
+model DocumentChunk {
+  id          String   @id @default(uuid())
+  documentId  String   @map("document_id")
+  chunkIndex  Int      @map("chunk_index")
+  content     String
+  charCount   Int      @map("char_count")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  vector   DocumentVector?
+
+  @@index([documentId])
+  @@map("document_chunks")
+}
+
+model DocumentVector {
+  id         String    @id @default(uuid())
+  chunkId    String    @unique @map("chunk_id")
+  embedding  Json
+  provider   String
+  model      String
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  chunk DocumentChunk @relation(fields: [chunkId], references: [id], onDelete: Cascade)
+
+  @@index([chunkId])
+  @@map("document_vectors")
+}
+
+model KnowledgebaseIndex {
+  id              String   @id @default(uuid())
+  projectId       String   @map("project_id")
+  name            String
+  slug            String   @unique
+  description     String?
+  embeddingConfig Json     @map("embedding_config")
+  status          String   @default("active")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  searches  KnowledgebaseSearch[]
+
+  @@index([projectId])
+  @@map("knowledgebase_indexes")
+}
+
+model KnowledgebaseSearch {
+  id            String   @id @default(uuid())
+  indexId       String   @map("index_id")
+  agentId       String?  @map("agent_id")
+  query         String
+  resultsCount  Int      @map("results_count")
+  latencyMs     Int      @map("latency_ms")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  index KnowledgebaseIndex @relation(fields: [indexId], references: [id], onDelete: Cascade)
+
+  @@index([indexId])
+  @@map("knowledgebase_searches")
+}
+
+model OrchestratorProject {
+  id          Int      @id @default(autoincrement())
+  name        String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  agents    OrchestratorAgent[]
+  crews     OrchestratorCrew[]
+  workflows OrchestratorWorkflow[]
+  link      OrchestratorProjectLink?
+
+  @@map("orchestrator_projects")
+}
+
+model OrchestratorSetting {
+  key   String @id
+  value String
+
+  @@map("orchestrator_settings")
+}
+
+model OrchestratorProjectLink {
+  projectId         Int      @id @map("project_id")
+  platformProjectId String   @map("platform_project_id")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @default(now()) @map("updated_at")
+
+  project OrchestratorProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("orchestrator_project_links")
+}
+
+model OrchestratorAgent {
+  id               Int       @id @default(autoincrement())
+  name             String
+  role             String
+  agentRole        String    @default("") @map("agent_role")
+  status           String    @default("idle")
+  goal             String
+  backstory        String?
+  systemPrompt     String?   @map("system_prompt")
+  model            String    @default("gemini-3-flash-preview")
+  provider         String    @default("google")
+  temperature      Float?
+  maxTokens        Int?      @map("max_tokens")
+  memoryWindow     Int?      @map("memory_window")
+  maxIterations    Int?      @map("max_iterations")
+  toolsEnabled     Boolean   @default(true) @map("tools_enabled")
+  retryPolicy      String?   @map("retry_policy")
+  timeoutMs        Int?      @map("timeout_ms")
+  isExposed        Boolean   @default(false) @map("is_exposed")
+  projectId        Int?      @map("project_id")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @default(now()) @map("updated_at")
+
+  project     OrchestratorProject?          @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  tools       OrchestratorAgentTool[]
+  crewLinks   OrchestratorCrewAgent[]
+  mcpTools    OrchestratorAgentMcpTool[]
+  mcpBundles  OrchestratorAgentMcpBundle[]
+  crewCoordFor OrchestratorCrew[]           @relation("OrchestratorCrewCoordinator")
+  tasks       OrchestratorTask[]
+  executions  OrchestratorAgentExecution[]
+  delegations OrchestratorAgentDelegation[]
+  runtimeSessions OrchestratorAgentSession[]
+  toolExecutions  OrchestratorToolExecution[]
+
+  @@index([projectId])
+  @@map("orchestrator_agents")
+}
+
+model OrchestratorCrew {
+  id                 Int      @id @default(autoincrement())
+  name               String
+  process            String   @default("sequential")
+  coordinatorAgentId Int?     @map("coordinator_agent_id")
+  projectId          Int?     @map("project_id")
+  isExposed          Boolean  @default(false) @map("is_exposed")
+  description        String?
+  maxRuntimeMs       Int?     @map("max_runtime_ms")
+  maxCostUsd         Float?   @map("max_cost_usd")
+  maxToolCalls       Int?     @map("max_tool_calls")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @default(now()) @map("updated_at")
+
+  coordinatorAgent OrchestratorAgent?       @relation("OrchestratorCrewCoordinator", fields: [coordinatorAgentId], references: [id], onDelete: SetNull)
+  project          OrchestratorProject?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  agents           OrchestratorCrewAgent[]
+  tasks            OrchestratorTask[]
+  executions       OrchestratorCrewExecution[]
+
+  @@index([projectId])
+  @@map("orchestrator_crews")
+}
+
+model OrchestratorWorkflow {
+  id          Int      @id @default(autoincrement())
+  name        String
+  description String?
+  status      String   @default("draft")
+  triggerType String   @default("manual") @map("trigger_type")
+  graph       String
+  version     Int      @default(1)
+  updatedAt   DateTime @default(now()) @map("updated_at")
+  projectId   Int?     @map("project_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  project  OrchestratorProject?          @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  versions OrchestratorWorkflowVersion[]
+  runs     OrchestratorWorkflowRun[]
+
+  @@index([projectId])
+  @@map("orchestrator_workflows")
+}
+
+model OrchestratorWorkflowVersion {
+  id            Int      @id @default(autoincrement())
+  workflowId    Int      @map("workflow_id")
+  versionNumber Int      @map("version_number")
+  name          String
+  description   String?
+  status        String   @default("draft")
+  triggerType   String   @default("manual") @map("trigger_type")
+  graph         String
+  changeKind    String   @default("update") @map("change_kind")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  workflow OrchestratorWorkflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@index([workflowId])
+  @@map("orchestrator_workflow_versions")
+}
+
+model OrchestratorCredential {
+  id        Int      @id @default(autoincrement())
+  provider  String   @unique
+  name      String?
+  keyName   String?  @map("key_name")
+  category  String   @default("general")
+  apiKey    String   @map("api_key")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@map("orchestrator_credentials")
+}
+
+model OrchestratorLlmProvider {
+  id        Int      @id @default(autoincrement())
+  name      String
+  provider  String
+  apiBase   String?  @map("api_base")
+  apiKey    String?  @map("api_key")
+  isDefault Boolean  @default(false) @map("is_default")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@map("orchestrator_llm_providers")
+}
+
+model OrchestratorTool {
+  id          Int      @id @default(autoincrement())
+  name        String
+  description String
+  category    String   @default("General")
+  type        String   @default("custom")
+  config      String?
+  version     Int      @default(1)
+  updatedAt   DateTime @default(now()) @map("updated_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  versions    OrchestratorToolVersion[]
+  agents      OrchestratorAgentTool[]
+  exposed     OrchestratorMcpExposedTool?
+  bundleLinks OrchestratorMcpBundleTool[]
+  agentMcp    OrchestratorAgentMcpTool[]
+  executions  OrchestratorToolExecution[]
+
+  @@map("orchestrator_tools")
+}
+
+model OrchestratorToolVersion {
+  id            Int      @id @default(autoincrement())
+  toolId        Int      @map("tool_id")
+  versionNumber Int      @map("version_number")
+  name          String
+  description   String
+  category      String   @default("General")
+  type          String   @default("custom")
+  config        String?
+  changeKind    String   @default("update") @map("change_kind")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  tool OrchestratorTool @relation(fields: [toolId], references: [id], onDelete: Cascade)
+
+  @@index([toolId])
+  @@map("orchestrator_tool_versions")
+}
+
+model OrchestratorAgentTool {
+  agentId    Int      @map("agent_id")
+  toolId     Int      @map("tool_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  agent OrchestratorAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  tool  OrchestratorTool  @relation(fields: [toolId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, toolId])
+  @@map("orchestrator_agent_tools")
+}
+
+model OrchestratorCrewAgent {
+  crewId     Int      @map("crew_id")
+  agentId    Int      @map("agent_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  crew  OrchestratorCrew  @relation(fields: [crewId], references: [id], onDelete: Cascade)
+  agent OrchestratorAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@id([crewId, agentId])
+  @@map("orchestrator_crew_agents")
+}
+
+model OrchestratorTask {
+  id             Int      @id @default(autoincrement())
+  description    String
+  expectedOutput String   @map("expected_output")
+  agentId        Int?     @map("agent_id")
+  crewId         Int?     @map("crew_id")
+  status         String   @default("pending")
+  result         String?
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @default(now()) @map("updated_at")
+
+  agent OrchestratorAgent? @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  crew  OrchestratorCrew?  @relation(fields: [crewId], references: [id], onDelete: Cascade)
+
+  @@index([crewId])
+  @@index([agentId])
+  @@map("orchestrator_tasks")
+}
+
+model OrchestratorMcpExposedTool {
+  toolId       Int      @id @map("tool_id")
+  exposedName  String   @unique @map("exposed_name")
+  description  String?
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @default(now()) @map("updated_at")
+
+  tool OrchestratorTool @relation(fields: [toolId], references: [id], onDelete: Cascade)
+  versions OrchestratorMcpExposedToolVersion[]
+
+  @@map("orchestrator_mcp_exposed_tools")
+}
+
+model OrchestratorMcpBundle {
+  id          Int      @id @default(autoincrement())
+  name        String
+  slug        String   @unique
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @default(now()) @map("updated_at")
+
+  tools      OrchestratorMcpBundleTool[]
+  versions   OrchestratorMcpBundleVersion[]
+  agentLinks OrchestratorAgentMcpBundle[]
+
+  @@map("orchestrator_mcp_bundles")
+}
+
+model OrchestratorMcpExposedToolVersion {
+  id            Int      @id @default(autoincrement())
+  toolId        Int      @map("tool_id")
+  versionNumber Int      @map("version_number")
+  exposedName   String?  @map("exposed_name")
+  description   String?
+  isExposed     Boolean  @default(true) @map("is_exposed")
+  changeKind    String   @default("update") @map("change_kind")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  tool OrchestratorMcpExposedTool @relation(fields: [toolId], references: [toolId], onDelete: Cascade)
+
+  @@index([toolId])
+  @@map("orchestrator_mcp_exposed_tool_versions")
+}
+
+model OrchestratorMcpBundleVersion {
+  id            Int      @id @default(autoincrement())
+  bundleId      Int      @map("bundle_id")
+  versionNumber Int      @map("version_number")
+  name          String
+  slug          String
+  description   String?
+  toolIds       String?  @map("tool_ids")
+  changeKind    String   @default("update") @map("change_kind")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  bundle OrchestratorMcpBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+
+  @@index([bundleId])
+  @@map("orchestrator_mcp_bundle_versions")
+}
+
+model OrchestratorMcpBundleTool {
+  bundleId    Int      @map("bundle_id")
+  toolId      Int      @map("tool_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  bundle OrchestratorMcpBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  tool   OrchestratorTool      @relation(fields: [toolId], references: [id], onDelete: Cascade)
+
+  @@id([bundleId, toolId])
+  @@map("orchestrator_mcp_bundle_tools")
+}
+
+model OrchestratorAgentMcpTool {
+  agentId     Int      @map("agent_id")
+  toolId      Int      @map("tool_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  agent OrchestratorAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  tool  OrchestratorTool  @relation(fields: [toolId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, toolId])
+  @@map("orchestrator_agent_mcp_tools")
+}
+
+model OrchestratorAgentMcpBundle {
+  agentId     Int      @map("agent_id")
+  bundleId    Int      @map("bundle_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  agent  OrchestratorAgent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  bundle OrchestratorMcpBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, bundleId])
+  @@map("orchestrator_agent_mcp_bundles")
+}
+
+model OrchestratorAgentExecution {
+  id                Int      @id @default(autoincrement())
+  agentId           Int?     @map("agent_id")
+  status            String   @default("completed")
+  executionKind     String   @default("standard") @map("execution_kind")
+  parentExecutionId Int?     @map("parent_execution_id")
+  delegationTitle   String?  @map("delegation_title")
+  promptTokens      Int      @default(0) @map("prompt_tokens")
+  completionTokens  Int      @default(0) @map("completion_tokens")
+  totalCost         Float    @default(0.0) @map("total_cost")
+  input             String?
+  output            String?
+  task              String?
+  retryOf           Int?     @map("retry_of")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  agent    OrchestratorAgent?            @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  parent   OrchestratorAgentExecution?   @relation("OrchestratorAgentExecutionParent", fields: [parentExecutionId], references: [id], onDelete: SetNull)
+  children OrchestratorAgentExecution[]  @relation("OrchestratorAgentExecutionParent")
+  delegations OrchestratorAgentDelegation[] @relation("OrchestratorAgentDelegationParent")
+  delegatedChildLinks OrchestratorAgentDelegation[] @relation("OrchestratorAgentDelegationChild")
+  toolExecutions OrchestratorToolExecution[]
+
+  @@index([agentId])
+  @@index([status])
+  @@index([parentExecutionId])
+  @@map("orchestrator_agent_executions")
+}
+
+model OrchestratorAgentDelegation {
+  id               Int      @id @default(autoincrement())
+  parentExecutionId Int     @map("parent_execution_id")
+  childExecutionId Int?     @map("child_execution_id")
+  childJobId       Int?     @map("child_job_id")
+  agentId          Int      @map("agent_id")
+  role             String   @default("delegate")
+  title            String?
+  status           String   @default("queued")
+  task             String?
+  result           String?
+  error            String?
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @default(now()) @map("updated_at")
+
+  parentExecution OrchestratorAgentExecution @relation("OrchestratorAgentDelegationParent", fields: [parentExecutionId], references: [id], onDelete: Cascade)
+  childExecution  OrchestratorAgentExecution? @relation("OrchestratorAgentDelegationChild", fields: [childExecutionId], references: [id], onDelete: SetNull)
+  agent           OrchestratorAgent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  childJob        OrchestratorJobQueue?      @relation(fields: [childJobId], references: [id], onDelete: SetNull)
+
+  @@index([parentExecutionId])
+  @@index([agentId])
+  @@index([childExecutionId])
+  @@index([childJobId])
+  @@map("orchestrator_agent_delegations")
+}
+
+model OrchestratorCrewExecution {
+  id               Int      @id @default(autoincrement())
+  crewId           Int?     @map("crew_id")
+  status           String   @default("running")
+  initialInput     String?  @map("initial_input")
+  retryOf          Int?     @map("retry_of")
+  logs             String?
+  promptTokens     Int      @default(0) @map("prompt_tokens")
+  completionTokens Int      @default(0) @map("completion_tokens")
+  totalCost        Float    @default(0.0) @map("total_cost")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  crew OrchestratorCrew? @relation(fields: [crewId], references: [id], onDelete: SetNull)
+  logEntries OrchestratorCrewExecutionLog[]
+
+  @@index([crewId])
+  @@index([status])
+  @@map("orchestrator_crew_executions")
+}
+
+model OrchestratorToolExecution {
+  id               Int      @id @default(autoincrement())
+  toolId           Int?     @map("tool_id")
+  agentId          Int?     @map("agent_id")
+  agentExecutionId Int?     @map("agent_execution_id")
+  toolName         String   @map("tool_name")
+  toolType         String?  @map("tool_type")
+  status           String   @default("running")
+  args             String?
+  result           String?
+  error            String?
+  durationMs       Int?     @map("duration_ms")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  tool           OrchestratorTool?           @relation(fields: [toolId], references: [id], onDelete: SetNull)
+  agent          OrchestratorAgent?          @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  agentExecution OrchestratorAgentExecution? @relation(fields: [agentExecutionId], references: [id], onDelete: SetNull)
+
+  @@index([toolId])
+  @@index([agentId])
+  @@index([agentExecutionId])
+  @@index([status])
+  @@map("orchestrator_tool_executions")
+}
+
+model OrchestratorAgentSession {
+  id         String   @id
+  agentId    Int      @map("agent_id")
+  userId     String?  @map("user_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @default(now()) @map("updated_at")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+
+  agent  OrchestratorAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  memory OrchestratorAgentSessionMemory[]
+
+  @@index([agentId])
+  @@map("orchestrator_agent_sessions")
+}
+
+model OrchestratorAgentSessionMemory {
+  sessionId  String   @map("session_id")
+  key        String
+  value      String
+  updatedAt  DateTime @default(now()) @map("updated_at")
+
+  session OrchestratorAgentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@id([sessionId, key])
+  @@map("orchestrator_agent_session_memory")
+}
+
+model OrchestratorCrewExecutionLog {
+  id          Int      @id @default(autoincrement())
+  executionId Int      @map("execution_id")
+  timestamp   DateTime @default(now())
+  type        String
+  payload     String?
+
+  execution OrchestratorCrewExecution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  @@index([executionId])
+  @@map("orchestrator_crew_execution_logs")
+}
+
+model OrchestratorJobQueue {
+  id         Int      @id @default(autoincrement())
+  type       String
+  payload    String?
+  status     String   @default("pending")
+  result     String?
+  error      String?
+  createdAt  DateTime @default(now()) @map("created_at")
+  startedAt  DateTime? @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+
+  delegations OrchestratorAgentDelegation[]
+
+  @@index([status])
+  @@map("orchestrator_job_queue")
+}
+
+model OrchestratorWorkflowRun {
+  id            Int      @id @default(autoincrement())
+  workflowId    Int      @map("workflow_id")
+  status        String   @default("running")
+  triggerType   String   @default("manual") @map("trigger_type")
+  input         String?
+  output        String?
+  logs          String   @default("[]")
+  graphSnapshot String?  @map("graph_snapshot")
+  retryOf       Int?     @map("retry_of")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @map("updated_at")
+
+  workflow OrchestratorWorkflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@index([workflowId])
+  @@index([status])
+  @@map("orchestrator_workflow_runs")
+}
