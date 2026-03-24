@@ -39,32 +39,34 @@ async function start() {
   try {
     const agentCount = await prisma.orchestratorAgent.count();
     if (agentCount === 0) {
-      console.log('PostgreSQL appears empty. Checking for initial data in SQLite...');
+      console.log('PostgreSQL appears empty. Searching for initial data in SQLite across mounts...');
       const Database = (await import('better-sqlite3')).default;
       
-      // Try common SQLite filenames found in the mount
-      const candidates = [
-        sqlitePath,
-        path.join(path.dirname(sqlitePath), 'database.sqlite')
-      ];
-
+      const searchDirs = ['/mnt', path.dirname(sqlitePath), process.cwd()];
       let sourceDbPath = null;
-      for (const cand of candidates) {
-        if (fs.existsSync(cand)) {
-          try {
-            const db = new Database(cand, { readonly: true });
-            const tableCheck = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='agents'").get();
-            if (tableCheck) {
-              const sqliteAgentCount = (db.prepare('SELECT count(*) as count FROM agents').get() as any)?.count || 0;
-              if (sqliteAgentCount > 0) {
-                sourceDbPath = cand;
-                console.log(`Initial data found in ${path.basename(cand)} (${sqliteAgentCount} agents).`);
-                db.close();
-                break;
+
+      for (const startDir of searchDirs) {
+        if (sourceDbPath) break;
+        if (!fs.existsSync(startDir)) continue;
+
+        const files = getAllFiles(startDir);
+        for (const file of files) {
+          if (file.endsWith('.db') || file.endsWith('.sqlite')) {
+            try {
+              const db = new Database(file, { readonly: true });
+              const tableCheck = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='agents'").get();
+              if (tableCheck) {
+                const count = (db.prepare('SELECT count(*) as count FROM agents').get() as any)?.count || 0;
+                if (count > 0) {
+                  sourceDbPath = file;
+                  console.log(`Initial data found in ${file} (${count} agents).`);
+                  db.close();
+                  break;
+                }
               }
-            }
-            db.close();
-          } catch (e) {}
+              db.close();
+            } catch (e) {}
+          }
         }
       }
 
@@ -72,7 +74,6 @@ async function start() {
         console.log(`Running one-time migration from ${sourceDbPath}...`);
         const { execSync } = await import('child_process');
         try {
-          // Temporarily set SQLITE_PATH to the discovered source
           const env = { ...process.env, SQLITE_PATH: sourceDbPath, SQLITE_OPT_NO_JOURNAL: 'true' };
           execSync('npm run orchestrator:migrate', { stdio: 'inherit', env });
           execSync('npm run runtime:migrate', { stdio: 'inherit', env });
@@ -81,7 +82,7 @@ async function start() {
           console.error('Initial seeding failed during execution:', err);
         }
       } else {
-        console.log('No existing agent data found in SQLite candidates.');
+        console.log('No existing agent data found in any SQLite databases across scanned directories.');
       }
     }
   } catch (err) {
@@ -92,6 +93,23 @@ async function start() {
 
   const { startServer } = await import('../server.js');
   await startServer();
+}
+
+function getAllFiles(dirPath: string, arrayOfFiles: string[] = []) {
+  const files = fs.readdirSync(dirPath);
+  files.forEach(function(file) {
+    const fullPath = path.join(dirPath, file);
+    try {
+      if (fs.statSync(fullPath).isDirectory()) {
+        if (file !== 'node_modules' && file !== '.git') {
+          arrayOfFiles = getAllFiles(fullPath, arrayOfFiles);
+        }
+      } else {
+        arrayOfFiles.push(fullPath);
+      }
+    } catch (e) {}
+  });
+  return arrayOfFiles;
 }
 
 start().catch((e) => {
