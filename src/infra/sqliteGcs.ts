@@ -24,6 +24,8 @@ function artifacts(sqlitePath: string, prefix: string) {
 }
 
 export function isSqliteGcsSyncEnabled() {
+  const { isSqliteMemory } = require('../db');
+  if (isSqliteMemory()) return false;
   return Boolean(getConfig().bucket);
 }
 

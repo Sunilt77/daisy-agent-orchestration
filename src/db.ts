@@ -3,6 +3,8 @@ import fs from 'fs';
 import path from 'path';
 
 function resolveSqlitePath() {
+  if (process.env.SQLITE_MEMORY === 'true') return ':memory:';
+  if (process.env.DATABASE_URL && !process.env.FORCE_SQLITE_FILE) return ':memory:';
   if (process.env.SQLITE_PATH) return path.resolve(process.env.SQLITE_PATH);
   // Keep test data isolated so test cleanup never wipes the local app DB.
   if (process.env.VITEST === 'true' || process.env.NODE_ENV === 'test') {
@@ -12,17 +14,25 @@ function resolveSqlitePath() {
 }
 
 const SQLITE_PATH = resolveSqlitePath();
+const IS_MEMORY = SQLITE_PATH === ':memory:';
 
-const SQLITE_DIR = path.dirname(SQLITE_PATH);
-fs.mkdirSync(SQLITE_DIR, { recursive: true });
+if (!IS_MEMORY) {
+  const SQLITE_DIR = path.dirname(SQLITE_PATH);
+  fs.mkdirSync(SQLITE_DIR, { recursive: true });
+}
 
 const db = new Database(SQLITE_PATH);
+
+export function isSqliteMemory() {
+  return IS_MEMORY;
+}
 
 export function getSqlitePath() {
   return SQLITE_PATH;
 }
 
 export function checkpointSqlite(mode: 'PASSIVE' | 'FULL' | 'RESTART' | 'TRUNCATE' = 'PASSIVE') {
+  if (IS_MEMORY) return;
   try {
     db.pragma(`wal_checkpoint(${mode})`);
   } catch (e) {
@@ -32,7 +42,9 @@ export function checkpointSqlite(mode: 'PASSIVE' | 'FULL' | 'RESTART' | 'TRUNCAT
 }
 
 export function initDb() {
-  db.pragma('journal_mode = WAL');
+  if (!IS_MEMORY) {
+    db.pragma('journal_mode = WAL');
+  }
   db.pragma('foreign_keys = ON');
   db.exec(`
     CREATE TABLE IF NOT EXISTS projects (

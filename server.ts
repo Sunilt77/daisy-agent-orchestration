@@ -66,24 +66,7 @@ const PORT = Number(process.env.PORT || 3000);
 type CancelToken = { canceled: boolean; reason?: string };
 type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'canceled';
 
-// Initialize Database
-initDb();
-
-function ensureDefaultPricing() {
-  const upsert = db.prepare(`
-    INSERT INTO model_pricing (model, input_usd, output_usd)
-    VALUES (?, ?, ?)
-    ON CONFLICT(model) DO UPDATE SET
-      input_usd = excluded.input_usd,
-      output_usd = excluded.output_usd
-  `);
-  const tx = db.transaction(() => {
-    for (const [model, price] of Object.entries(DEFAULT_PRICING)) {
-      upsert.run(model, price.input, price.output);
-    }
-  });
-  tx();
-}
+// pricing logic moved inside startServer
 
 
 // Initialize AgentOps
@@ -7451,13 +7434,36 @@ function scheduleRetention() {
 }
 
 async function startServer() {
+  // Initialize Database first
+  initDb();
+
+  function ensureDefaultPricing() {
+    const upsert = db.prepare(`
+      INSERT INTO model_pricing (model, input_usd, output_usd)
+      VALUES (?, ?, ?)
+      ON CONFLICT(model) DO UPDATE SET
+        input_usd = excluded.input_usd,
+        output_usd = excluded.output_usd
+    `);
+    const tx = db.transaction(() => {
+      for (const [model, price] of Object.entries(DEFAULT_PRICING)) {
+        upsert.run(model, price.input, price.output);
+      }
+    });
+    tx();
+  }
+
   try {
-    await getPrisma().orchestratorAgent.updateMany({
+    const prisma = getPrisma();
+    await prisma.orchestratorAgent.updateMany({
       data: { status: 'idle' },
     });
     await refreshPersistentMirror();
+    
+    // Now that mirror is synced, ensure pricing is there (it writes to memory db)
+    ensureDefaultPricing();
   } catch (e) {
-    console.error('Failed to refresh persistent orchestrator mirror from Postgres:', e);
+    console.error('Failed to initialize database mirror from Postgres:', e);
   }
 
   recoverStaleExecutionState();
