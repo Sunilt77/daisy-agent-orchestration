@@ -8,7 +8,11 @@ const sqlitePath = path.resolve(process.env.SQLITE_PATH || './orchestrator.db');
 
 async function migrate() {
   console.log(`Migrating data from ${sqlitePath} to PostgreSQL...`);
-  const db = new Database(sqlitePath);
+  const db = new Database(sqlitePath, { readonly: true });
+
+  if (process.env.SQLITE_OPT_NO_JOURNAL === 'true') {
+     db.pragma('journal_mode = OFF');
+  }
 
   // Helper to convert SQLite timestamp to JS Date
   const date = (val: any) => (val ? new Date(val) : new Date());

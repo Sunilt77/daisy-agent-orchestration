@@ -6,18 +6,27 @@ async function start() {
   process.env.SQLITE_PATH = sqlitePath;
 
   // Debug: list mount directory if available
-  const mountDir = path.dirname(sqlitePath);
   try {
     const fs = await import('fs');
-    if (fs.existsSync(mountDir)) {
-      console.log(`Debug: Listing contents of mount directory: ${mountDir}`);
-      const files = fs.readdirSync(mountDir);
-      console.log(`Debug: Files found: ${JSON.stringify(files)}`);
-    } else {
-      console.log(`Debug: Mount directory ${mountDir} does not exist.`);
+    const mountRoot = '/mnt';
+    if (fs.existsSync(mountRoot)) {
+      console.log(`Debug: Listing contents of mount root: ${mountRoot}`);
+      const mountDirs = fs.readdirSync(mountRoot);
+      console.log(`Debug: Mount dirs: ${JSON.stringify(mountDirs)}`);
+      
+      for (const dir of mountDirs) {
+        const fullDir = path.join(mountRoot, dir);
+        try {
+          const stats = fs.statSync(fullDir);
+          if (stats.isDirectory()) {
+            const subfiles = fs.readdirSync(fullDir);
+            console.log(`Debug: Files in ${fullDir}: ${JSON.stringify(subfiles)}`);
+          }
+        } catch (e) {}
+      }
     }
   } catch (err: any) {
-    console.log(`Debug: Could not list mount directory ${mountDir}:`, err.message);
+    console.log(`Debug: Directory listing failed:`, err.message);
   }
 
   process.env.AUTO_START = 'false';
@@ -33,16 +42,21 @@ async function start() {
     if (agentCount === 0) {
       console.log('PostgreSQL appears empty. Checking for initial data in SQLite...');
       const Database = (await import('better-sqlite3')).default;
-      const db = new Database(sqlitePath);
+      
+      // Optimization for GCSFuse: open with journaling off to avoid .db-journal/.db-shm errors
+      const db = new Database(sqlitePath, { readonly: true });
+      db.pragma('journal_mode = OFF'); 
+      
       const sqliteAgentCount = (db.prepare('SELECT count(*) as count FROM agents').get() as any)?.count || 0;
+      db.close();
+
       if (sqliteAgentCount > 0) {
         console.log(`Found ${sqliteAgentCount} agents in SQLite. Running one-time migration...`);
-        // We can't easily run the tsx scripts from inside this process without exec, 
-        // but we can import the migrate logic if we refactor it or just use child_process.
         const { execSync } = await import('child_process');
         try {
-          execSync('npm run orchestrator:migrate', { stdio: 'inherit' });
-          execSync('npm run runtime:migrate', { stdio: 'inherit' });
+          // Use env to tell migration scripts to also use non-journaling for safety
+          execSync('npm run orchestrator:migrate', { stdio: 'inherit', env: { ...process.env, SQLITE_OPT_NO_JOURNAL: 'true' } });
+          execSync('npm run runtime:migrate', { stdio: 'inherit', env: { ...process.env, SQLITE_OPT_NO_JOURNAL: 'true' } });
           console.log('Initial seeding completed successfully.');
         } catch (err) {
           console.error('Initial seeding failed during execution:', err);
