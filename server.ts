@@ -6019,7 +6019,14 @@ async function runAgent(
                         const openai = new OpenAI({ 
                             apiKey: currentApiKey,
                             baseURL: config.apiBase,
-                            defaultHeaders: { 'User-Agent': 'curl/8.7.1' }
+                            fetch: async (url: string | Request | URL, init?: RequestInit) => {
+                                const headers = new Headers(init?.headers);
+                                Array.from(headers.keys()).forEach(k => {
+                                    if (k.toLowerCase().startsWith('x-stainless')) headers.delete(k);
+                                });
+                                headers.set('User-Agent', 'curl/8.7.1');
+                                return fetch(url, { ...init, headers });
+                            }
                         });
                         const completion = await withRetry(() => withTimeout(openai.chat.completions.create({
                             messages: [{ role: "system", content: systemPrompt }, { role: "user", content: iterationContext }],
