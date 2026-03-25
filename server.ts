@@ -1458,7 +1458,7 @@ app.get('/api/providers/:id/models', async (req, res) => {
 
     let models: { id: string, name: string }[] = [];
 
-    if (config.providerType === 'openai' || config.providerType === 'openai-compatible') {
+    if (config.providerType === 'openai' || config.providerType === 'openai-compatible' || config.providerType === 'litellm') {
       const openai = new OpenAI({ apiKey: config.apiKey, baseURL: config.apiBase });
       const response = await openai.models.list();
       models = response.data.map(m => ({ id: m.id, name: m.id }));
@@ -2110,7 +2110,7 @@ app.post('/api/tools/autobuild', async (req, res) => {
         config: { responseMimeType: 'application/json' }
       }));
       text = response.text;
-    } else if (config.providerType === 'openai' || config.providerType === 'openai-compatible') {
+    } else if (config.providerType === 'openai' || config.providerType === 'openai-compatible' || config.providerType === 'litellm') {
       const openai = new OpenAI({ apiKey, baseURL: config.apiBase });
       const response = await withRetry(() => openai.chat.completions.create({
         model: model,
@@ -5242,7 +5242,7 @@ function getModelPricing(model: string): { input: number; output: number } {
 
 function getProviderBaselinePricing(providerType: string): { input: number; output: number } {
   const p = String(providerType || '').toLowerCase();
-  if (p === 'openai' || p === 'openai-compatible') return DEFAULT_PRICING['gpt-4o-mini'];
+  if (p === 'openai' || p === 'openai-compatible' || p === 'litellm') return DEFAULT_PRICING['gpt-4o-mini'];
   if (p === 'anthropic') return DEFAULT_PRICING['claude-3-5-haiku-20241022'];
   return DEFAULT_PRICING['gemini-1.5-flash'];
 }
@@ -6015,7 +6015,7 @@ async function runAgent(
                 llmSpan.setAttribute('llm.provider', providerType);
                 llmSpan.setAttribute('llm.model', model);
                 try {
-                    if (providerType === 'openai' || providerType === 'openai-compatible') {
+                    if (providerType === 'openai' || providerType === 'openai-compatible' || providerType === 'litellm') {
                         const openai = new OpenAI({ 
                             apiKey: currentApiKey,
                             baseURL: config.apiBase // Optional base URL

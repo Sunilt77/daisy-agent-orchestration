@@ -40,7 +40,8 @@ export default function ProvidersPage() {
     { id: 'google', name: 'Google Gemini' },
     { id: 'openai', name: 'OpenAI' },
     { id: 'anthropic', name: 'Anthropic' },
-    { id: 'openai-compatible', name: 'OpenAI Compatible (e.g. Ollama, vLLM)' }
+    { id: 'openai-compatible', name: 'OpenAI Compatible (e.g. Ollama, vLLM)' },
+    { id: 'litellm', name: 'LiteLLM Proxy / Enterprise' }
   ];
 
   useEffect(() => {
