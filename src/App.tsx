@@ -38,6 +38,46 @@ const PageLoader = () => (
 );
 
 export default function App() {
+  // Add global error handler to catch unhandled errors
+  useEffect(() => {
+    const originalConsoleError = console.error;
+    console.error = (...args) => {
+      // Log to console as usual
+      originalConsoleError(...args);
+      
+      // Log to a visible element on the page for debugging
+      const errorDiv = document.getElementById('global-error-log');
+      if (errorDiv) {
+        const errorMsg = args.map(arg => 
+          typeof arg === 'string' ? arg : 
+          arg instanceof Error ? `${arg.name}: ${arg.message}\n${arg.stack}` : 
+          JSON.stringify(arg)
+        ).join(' ');
+        errorDiv.innerHTML += `<div style="color:red;margin:10px 0;padding:10px;border:1px solid red;white-space:pre-wrap">${errorMsg}</div>`;
+      }
+    };
+
+    // Create error log element if it doesn't exist
+    if (!document.getElementById('global-error-log')) {
+      const div = document.createElement('div');
+      div.id = 'global-error-log';
+      div.style.position = 'fixed';
+      div.style.bottom = '0';
+      div.style.left = '0';
+      div.style.right = '0';
+      div.style.maxHeight = '50vh';
+      div.style.overflow = 'auto';
+      div.style.backgroundColor = 'rgba(255,255,255,0.9)';
+      div.style.zIndex = '9999';
+      div.style.padding = '10px';
+      document.body.appendChild(div);
+    }
+
+    return () => {
+      console.error = originalConsoleError;
+    };
+  }, []);
+
   return (
     <Router>
       <AuthProvider>
