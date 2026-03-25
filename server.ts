@@ -1459,7 +1459,7 @@ app.get('/api/providers/:id/models', async (req, res) => {
     let models: { id: string, name: string }[] = [];
 
     if (config.providerType === 'openai' || config.providerType === 'openai-compatible' || config.providerType === 'litellm') {
-      const openai = new OpenAI({ apiKey: config.apiKey, baseURL: config.apiBase });
+      const openai = new OpenAI({ apiKey: config.apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
       const response = await openai.models.list();
       models = response.data.map(m => ({ id: m.id, name: m.id }));
     } else if (config.providerType === 'anthropic') { // Original condition, assuming config.type is not available here
@@ -2111,7 +2111,7 @@ app.post('/api/tools/autobuild', async (req, res) => {
       }));
       text = response.text;
     } else if (config.providerType === 'openai' || config.providerType === 'openai-compatible' || config.providerType === 'litellm') {
-      const openai = new OpenAI({ apiKey, baseURL: config.apiBase });
+      const openai = new OpenAI({ apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
       const response = await withRetry(() => openai.chat.completions.create({
         model: model,
         messages: [{ role: 'user', content: prompt }],
@@ -4048,7 +4048,7 @@ app.post('/api/agents/autobuild', async (req, res) => {
             }));
             text = response.text;
         } else if (config.providerType === 'openai') {
-            const openai = new OpenAI({ apiKey, baseURL: config.apiBase });
+            const openai = new OpenAI({ apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
             const response = await withRetry(() => openai.chat.completions.create({
                 model: model,
                 messages: [{ role: 'user', content: prompt }],
@@ -4221,7 +4221,7 @@ app.post('/api/crews/autobuild', async (req, res) => {
             }));
             text = response.text;
         } else if (config.providerType === 'openai') {
-            const openai = new OpenAI({ apiKey, baseURL: config.apiBase });
+            const openai = new OpenAI({ apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
             const response = await withRetry(() => openai.chat.completions.create({
                 model: model,
                 messages: [{ role: 'user', content: prompt }],
@@ -6018,7 +6018,8 @@ async function runAgent(
                     if (providerType === 'openai' || providerType === 'openai-compatible' || providerType === 'litellm') {
                         const openai = new OpenAI({ 
                             apiKey: currentApiKey,
-                            baseURL: config.apiBase // Optional base URL
+                            baseURL: config.apiBase,
+                            defaultHeaders: { 'User-Agent': 'curl/8.7.1' }
                         });
                         const completion = await withRetry(() => withTimeout(openai.chat.completions.create({
                             messages: [{ role: "system", content: systemPrompt }, { role: "user", content: iterationContext }],
