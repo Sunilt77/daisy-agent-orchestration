@@ -17,6 +17,7 @@ interface McpBundle {
   name: string;
   slug: string;
   description?: string | null;
+  is_exposed: boolean;
   tool_count: number;
   tools: Array<{
     tool_id: number;
@@ -394,6 +395,23 @@ export default function McpPage() {
     }
   };
 
+  const toggleBundleExposure = async (bundleId: number, exposed: boolean) => {
+    try {
+      const res = await fetch(`/api/mcp/bundles/${bundleId}/exposure`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_exposed: exposed })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.error || 'Failed to update exposure status');
+      }
+      await load();
+    } catch (e: any) {
+      setLoadError(e.message || 'Failed to update bundle exposure');
+    }
+  };
+
   const restoreMcpVersion = async (type: 'bundle' | 'tool', entityId: number, versionId: number) => {
     setRestoringVersionId(versionId);
     try {
@@ -533,6 +551,10 @@ export default function McpPage() {
                         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-600">
                           <span className="rounded-full bg-white/80 px-2 py-1 border border-indigo-100">{bundle.tool_count} tools</span>
                           <span>•</span>
+                          <span className={`rounded-full px-2 py-1 border ${bundle.is_exposed ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                            {bundle.is_exposed ? 'Exposed' : 'Not Exposed'}
+                          </span>
+                          <span>•</span>
                           <code className="max-w-full truncate bg-white border border-indigo-200 px-2 py-0.5 rounded font-mono">{streamable}</code>
                         </div>
                       </div>
@@ -548,6 +570,12 @@ export default function McpPage() {
                           className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200"
                         >
                           Connect
+                        </button>
+                        <button
+                          onClick={() => toggleBundleExposure(bundle.id, !bundle.is_exposed)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${bundle.is_exposed ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}
+                        >
+                          {bundle.is_exposed ? 'Hide' : 'Expose'}
                         </button>
                         <button
                           onClick={() => void deleteBundle(bundle.id)}

@@ -1018,6 +1018,7 @@ app.get('/api/mcp/bundles', async (_req, res) => {
       description: b.description,
       created_at: b.createdAt,
       updated_at: b.updatedAt,
+      is_exposed: Boolean(b.isExposed),
       tools: toolsByBundle.get(b.id) || [],
       tool_count: (toolsByBundle.get(b.id) || []).length,
     })));
@@ -1055,8 +1056,33 @@ app.get('/api/mcp/bundles/:id/versions', (req, res) => {
   res.json({ bundle, versions, dependencies });
 });
 
+app.put('/api/mcp/bundles/:id/exposure', async (req, res) => {
+  const bundleId = Number(req.params.id);
+  const { is_exposed } = req.body || {};
+  if (!Number.isFinite(bundleId)) return res.status(400).json({ error: 'Invalid bundle id' });
+  
+  try {
+    const prisma = getPrisma();
+    const bundle = await prisma.orchestratorMcpBundle.findUnique({ where: { id: bundleId } });
+    if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
+    
+    await prisma.orchestratorMcpBundle.update({
+      where: { id: bundleId },
+      data: {
+        isExposed: Boolean(is_exposed),
+        updatedAt: new Date(),
+      },
+    });
+    
+    await refreshPersistentMirror();
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/mcp/bundles', async (req, res) => {
-  const { name, slug, description, tool_ids } = req.body || {};
+  const { name, slug, description, tool_ids, is_exposed } = req.body || {};
   const parsedIds = Array.isArray(tool_ids) ? [...new Set(tool_ids.map((v: any) => Number(v)).filter((n: number) => Number.isFinite(n)))] : [];
   if (!parsedIds.length) return res.status(400).json({ error: 'tool_ids must include at least one tool' });
   const cleanName = typeof name === 'string' && name.trim() ? name.trim() : 'MCP Bundle';
@@ -1064,6 +1090,8 @@ app.post('/api/mcp/bundles', async (req, res) => {
     .replace(/[^a-z0-9_-]/gi, '_')
     .toLowerCase();
   if (!cleanSlug) return res.status(400).json({ error: 'Invalid slug' });
+  // Default exposure to true if not specified
+  const isExposed = is_exposed !== false;
 
   try {
     const prisma = getPrisma();
@@ -1082,6 +1110,7 @@ app.post('/api/mcp/bundles', async (req, res) => {
           name: cleanName,
           description: typeof description === 'string' ? description : null,
           updatedAt: new Date(),
+          isExposed: isExposed,
         },
       });
     } else {
@@ -1090,6 +1119,7 @@ app.post('/api/mcp/bundles', async (req, res) => {
           name: cleanName,
           slug: cleanSlug,
           description: typeof description === 'string' ? description : null,
+          isExposed: isExposed,
         },
       });
       bundleId = created.id;
@@ -5866,8 +5896,10 @@ async function runAgent(
           } else if (accessPolicy.mcp_mode === 'allowlist') {
             const allowedMcpTools = new Set(accessPolicy.allowed_mcp_tool_ids);
             const allowedMcpBundles = new Set(accessPolicy.allowed_mcp_bundle_ids);
+            // Only filter exposed tools by allowlist, allow unexposed tools
             directMcpTools = directMcpTools.filter((t) => allowedMcpTools.has(Number(t.tool_id)));
-            mcpBundles = mcpBundles.filter((b) => allowedMcpBundles.has(Number(b.id)));
+            // Allow all bundles attached to the agent regardless of exposure status
+            // mcpBundles = mcpBundles.filter((b) => allowedMcpBundles.has(Number(b.id)));
           }
 
           for (const mcpTool of directMcpTools) {
