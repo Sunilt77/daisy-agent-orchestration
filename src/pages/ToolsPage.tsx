@@ -321,7 +321,7 @@ export default function ToolsPage() {
   const [showAutoBuild, setShowAutoBuild] = useState(false);
   const [autoBuildGoal, setAutoBuildGoal] = useState('');
   const [autoBuildProvider, setAutoBuildProvider] = useState('google');
-  const [autoBuildModel, setAutoBuildModel] = useState('gemini-2.5-flash-latest');
+  const [autoBuildModel, setAutoBuildModel] = useState('');
   const [autoBuildAgentIds, setAutoBuildAgentIds] = useState<number[]>([]);
   const [isBuilding, setIsBuilding] = useState(false);
   const [buildError, setBuildError] = useState('');
@@ -599,13 +599,13 @@ export default function ToolsPage() {
       if (res.ok) {
         const models = await res.json();
         setAvailableModels(models);
-        if (models.length > 0 && !models.find((m: any) => m.id === autoBuildModel)) {
+        if (models.length > 0 && (!autoBuildModel || !models.find((m: any) => m.id === autoBuildModel))) {
           setAutoBuildModel(models[0].id);
         }
       } else {
         setAvailableModels([
           { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
-          { id: 'gpt-4o', name: 'GPT-4o' },
+          { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
           { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet' }
         ]);
       }

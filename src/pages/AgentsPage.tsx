@@ -1046,15 +1046,9 @@ export default function AgentsPage() {
         }
       }
 
-      // If no models were fetched successfully or res.ok was false, use defaults
+      // NO HARDCODED FALLBACKS HERE - let the backend handle it or show empty
       if (models.length === 0) {
-        models = [
-          { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
-          { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
-          { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash (Experimental)' },
-          { id: 'gpt-4o', name: 'GPT-4o' },
-          { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet' }
-        ];
+        console.warn("No models returned from provider fetching.");
       }
 
       setAvailableModels(models);
@@ -1067,7 +1061,7 @@ export default function AgentsPage() {
           }
         } else {
           if (!models.find(m => m.id === formData.model)) {
-            setFormData(prev => ({ ...prev, model: models[0].id }));
+            setFormData(prev => ({ ...prev, model: models[0]?.id || '' }));
           }
         }
       }
@@ -1309,8 +1303,8 @@ export default function AgentsPage() {
       goal: '',
       backstory: '',
       system_prompt: '',
-      model: 'gemini-1.5-flash',
-      provider: 'google',
+      model: '',
+      provider: providers.length > 0 ? providers[0].id : '',
       temperature: '',
       max_tokens: '',
       memory_window: '',

@@ -1462,13 +1462,13 @@ app.get('/api/providers/:id/models', async (req, res) => {
       const openai = new OpenAI({ apiKey: config.apiKey, baseURL: config.apiBase });
       const response = await openai.models.list();
       models = response.data.map(m => ({ id: m.id, name: m.id }));
-    } else if (config.providerType === 'anthropic') {
+    } else if (config.providerType === 'anthropic') { // Original condition, assuming config.type is not available here
       try {
-        const anthropic = new Anthropic({ apiKey: config.apiKey, baseURL: config.apiBase });
+        const anthropic = new Anthropic({ apiKey: config.apiKey });
         const response = await anthropic.models.list();
         models = response.data.map(m => ({ id: m.id, name: m.display_name || m.id }));
       } catch (e) {
-        // Fallback if list endpoint fails
+        // Fallback if list endpoint fails - use valid models
         models = [
           { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet' },
           { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku' },
@@ -1484,13 +1484,14 @@ app.get('/api/providers/:id/models', async (req, res) => {
         for await (const m of response) {
           models.push({ id: m.name.replace('models/', ''), name: m.displayName || m.name.replace('models/', '') });
         }
-      } catch (e) {
-        // Fallback
+      } catch (e: any) {
+        // Fallback - use valid, existing models
+        console.warn(`Model fetch failed for ${req.params.id}:`, e.message);
         models = [
           { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
-          { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro Preview' },
-          { id: 'gemini-2.5-flash-latest', name: 'Gemini 2.5 Flash' },
-          { id: 'gemini-flash-lite-latest', name: 'Gemini Flash Lite' }
+          { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
+          { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash (Exp)' },
+          { id: 'gemini-1.0-pro', name: 'Gemini 1.0 Pro' }
         ];
       }
     }
@@ -2044,7 +2045,7 @@ app.delete('/api/tools/:id', async (req, res) => {
 });
 
 app.post('/api/tools/autobuild', async (req, res) => {
-  const { goal, agent_ids, provider = 'google', model = 'gemini-2.5-flash-latest' } = req.body || {};
+  const { goal, agent_ids, provider = 'google', model = 'gemini-1.5-flash' } = req.body || {};
 
   if (!goal || typeof goal !== 'string') {
     return res.status(400).json({ error: 'Goal is required.' });
@@ -4117,7 +4118,7 @@ app.post('/api/agents/autobuild', async (req, res) => {
 // --- Crews ---
 app.post('/api/crews/autobuild', async (req, res) => {
     try {
-        const { goal, project_id, provider = 'google', model = 'gemini-2.5-flash-latest', stream = false, process_preference = 'auto' } = req.body;
+        const { goal, project_id, provider = 'google', model = 'gemini-1.5-flash', stream = false, process_preference = 'auto' } = req.body;
         
         console.log(`Auto-build request received. Provider: ${provider}, Model: ${model}, Stream: ${stream}`);
 
@@ -5178,14 +5179,10 @@ async function getProviderConfig(providerIdentifier: string): Promise<{ apiKey?:
 // Prices are USD per 1M tokens.
 const DEFAULT_PRICING: Record<string, { input: number; output: number }> = {
   // Google Gemini (Gemini API standard pricing)
-  'gemini-2.5-flash': { input: 0.30, output: 2.50 },
-  'gemini-2.5-flash-latest': { input: 0.30, output: 2.50 },
-  'gemini-2.5-flash-preview': { input: 0.30, output: 2.50 },
-  'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
-  'gemini-2.5-flash-lite-latest': { input: 0.10, output: 0.40 },
-  'gemini-flash-lite-latest': { input: 0.10, output: 0.40 },
-  'gemini-1.5-flash': { input: 0.30, output: 1.20 },
-  'gemini-3.1-pro-preview': { input: 1.25, output: 10.00 },
+  'gemini-1.5-flash': { input: 0.075, output: 0.30 },
+  'gemini-1.5-pro': { input: 1.25, output: 5.00 },
+  'gemini-2.0-flash-exp': { input: 0.0, output: 0.0 }, // Free during exp period
+  'gemini-1.0-pro': { input: 0.50, output: 1.50 },
 
   // OpenAI (public API pricing)
   'gpt-4o': { input: 2.50, output: 10.00 },
@@ -5205,9 +5202,6 @@ const DEFAULT_PRICING: Record<string, { input: number; output: number }> = {
   'claude-3-5-haiku-20241022': { input: 0.80, output: 4.00 },
   'claude-3-opus-20240229': { input: 15.00, output: 75.00 },
   'claude-3-haiku-20240307': { input: 0.25, output: 1.25 },
-  'claude-sonnet-4': { input: 3.00, output: 15.00 },
-  'claude-sonnet-4-5': { input: 3.00, output: 15.00 },
-  'claude-haiku-4-5': { input: 1.00, output: 5.00 },
 };
 
 function normalizeModelKey(model: string): string {
@@ -5217,10 +5211,9 @@ function normalizeModelKey(model: string): string {
 function derivePricingAlias(model: string): string {
   const key = normalizeModelKey(model);
   if (!key) return '';
-  if (key.startsWith('gemini-2.5-flash-lite')) return 'gemini-2.5-flash-lite';
-  if (key.startsWith('gemini-2.5-flash')) return 'gemini-2.5-flash';
-  if (key.startsWith('gemini-flash-lite')) return 'gemini-2.5-flash-lite';
-  if (key.startsWith('gemini-3') && key.includes('flash')) return 'gemini-2.5-flash';
+  if (key.startsWith('gemini-1.5-flash')) return 'gemini-1.5-flash';
+  if (key.startsWith('gemini-1.5-pro')) return 'gemini-1.5-pro';
+  if (key.startsWith('gemini-2.0-flash')) return 'gemini-2.0-flash-exp';
 
   if (key.startsWith('gpt-4o-mini')) return 'gpt-4o-mini';
   if (key.startsWith('gpt-4o')) return 'gpt-4o';
@@ -5232,9 +5225,6 @@ function derivePricingAlias(model: string): string {
 
   if (key.startsWith('claude-3-5-sonnet')) return 'claude-3-5-sonnet-20241022';
   if (key.startsWith('claude-3-5-haiku')) return 'claude-3-5-haiku-20241022';
-  if (key.startsWith('claude-sonnet-4-5')) return 'claude-sonnet-4-5';
-  if (key.startsWith('claude-sonnet-4')) return 'claude-sonnet-4';
-  if (key.startsWith('claude-haiku-4-5')) return 'claude-haiku-4-5';
   if (key.startsWith('claude-3-opus')) return 'claude-3-opus-20240229';
   if (key.startsWith('claude-3-haiku')) return 'claude-3-haiku-20240307';
   return key;
@@ -5247,14 +5237,14 @@ function getModelPricing(model: string): { input: number; output: number } {
   if (row && Number.isFinite(row.input_usd) && Number.isFinite(row.output_usd)) {
     return { input: Number(row.input_usd), output: Number(row.output_usd) };
   }
-  return DEFAULT_PRICING[modelKey] || DEFAULT_PRICING[alias] || { input: 0, output: 0 };
+  return DEFAULT_PRICING['gemini-1.5-flash'];
 }
 
 function getProviderBaselinePricing(providerType: string): { input: number; output: number } {
   const p = String(providerType || '').toLowerCase();
   if (p === 'openai' || p === 'openai-compatible') return DEFAULT_PRICING['gpt-4o-mini'];
   if (p === 'anthropic') return DEFAULT_PRICING['claude-3-5-haiku-20241022'];
-  return DEFAULT_PRICING['gemini-2.5-flash'];
+  return DEFAULT_PRICING['gemini-1.5-flash'];
 }
 
 

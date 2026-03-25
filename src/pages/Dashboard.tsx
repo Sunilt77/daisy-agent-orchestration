@@ -473,14 +473,15 @@ export default function Dashboard() {
     <div>
       <div className="flex justify-between items-end mb-12">
         <motion.div 
-          initial={{ opacity: 0, x: -20 }}
+          initial={{ opacity: 0, x: -30 }}
           animate={{ opacity: 1, x: 0 }}
+          className="max-w-3xl"
         >
-          <h1 className="text-4xl font-extrabold tracking-tight text-slate-900 mb-2">
-            Swarm <span className="text-gradient">Command</span>
+          <h1 className="text-5xl lg:text-6xl font-black tracking-tight text-slate-900 mb-4">
+            Swarm <span className="bg-linear-to-r from-brand-600 to-violet-600 bg-clip-text text-transparent">Command</span>
           </h1>
-          <p className="text-slate-600 font-medium max-w-xl">
-            Monitor, steer, and amplify an emergent agent network with live orchestration telemetry.
+          <p className="text-lg text-slate-600 font-semibold leading-relaxed">
+            Monitor, steer, and amplify an emergent agent network with live orchestration telemetry. Optimized for hyper-scale operations.
           </p>
         </motion.div>
         <motion.div 
@@ -506,144 +507,165 @@ export default function Dashboard() {
       </div>
 
       <motion.section
-        initial={{ opacity: 0, y: 18 }}
+        initial={{ opacity: 0, y: 30 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.45, ease: 'easeOut', delay: 0.02 }}
-        className="swarm-hero mb-10 p-8 lg:p-10"
+        transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1], delay: 0.1 }}
+        className="swarm-hero mb-12 p-10 lg:p-14 relative overflow-hidden ring-1 ring-white/10 shadow-2xl"
       >
-        <div className="flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between mb-8">
-          <div className="max-w-2xl">
-            <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-4 py-1.5 text-[11px] font-black uppercase tracking-[0.3em] text-cyan-200 shadow-lg shadow-cyan-500/10">
-              <Sparkles size={12} className="animate-pulse" />
-              Emergent Operations Layer
+        <div className="absolute top-0 right-0 w-[600px] h-[600px] bg-brand-500/10 blur-[120px] rounded-full -mr-48 -mt-48 transition-all duration-1000 group-hover:bg-brand-500/20" />
+        
+        <div className="flex flex-col gap-10 xl:flex-row xl:items-start xl:justify-between mb-12 relative z-10">
+          <div className="max-w-3xl">
+            <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-5 py-2 text-[12px] font-black uppercase tracking-[0.35em] text-cyan-300 shadow-xl shadow-cyan-500/20">
+              <Sparkles size={14} className="animate-pulse text-cyan-400" />
+              Intelligence Orchestration Layer
             </div>
-            <h2 className="text-3xl font-black tracking-tight text-white sm:text-4xl lg:text-5xl leading-[1.1]">
-              Intelligence dashboard for delegated crews and real-time execution.
+            <h2 className="text-4xl font-black tracking-tight text-white sm:text-5xl lg:text-7xl leading-[1.05] drop-shadow-2xl">
+              Real-time monitoring for <span className="bg-linear-to-r from-cyan-400 to-brand-400 bg-clip-text text-transparent">delegated crews</span>.
             </h2>
-            <p className="mt-4 max-w-xl text-sm lg:text-base leading-relaxed text-slate-300 font-medium">
-              This surface turns your runtime into a living map: orchestration pulse, execution waves, workforce state, and fast control lanes.
+            <p className="mt-8 max-w-2xl text-lg lg:text-xl leading-relaxed text-slate-300 font-semibold antialiased">
+              Turning complex runtimes into a living map: orchestration pulse, execution waves, workforce state, and high-frequency control lanes.
             </p>
           </div>
 
-          <div className="grid w-full max-w-xl grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="grid w-full max-w-2xl grid-cols-1 gap-6 sm:grid-cols-2">
             {orchestrationLanes.map((lane) => (
-              <div key={lane.label} className="telemetry-tile p-5 group hover:bg-white/[0.08] transition-colors">
-                <div className="flex items-start justify-between gap-3">
+              <div key={lane.label} className="telemetry-tile p-6 group hover:bg-white/[0.12] transition-all duration-300 border-white/10 hover:border-white/20 hover:shadow-2xl hover:shadow-brand-500/10">
+                <div className="flex items-start justify-between gap-4">
                   <div>
-                    <div className="text-[10px] uppercase font-black tracking-[0.25em] text-slate-400">{lane.label}</div>
-                    <div className="mt-2 text-3xl font-black text-white group-hover:text-brand-200 transition-colors">{lane.value}</div>
+                    <div className="text-[11px] uppercase font-black tracking-[0.25em] text-slate-400 group-hover:text-slate-300 transition-colors">{lane.label}</div>
+                    <div className="mt-3 text-4xl font-black text-white group-hover:text-brand-300 transition-all tracking-tighter">{lane.value}</div>
                   </div>
-                  <div className="network-grid w-16 p-1 rounded-lg">
+                  <div className="network-grid w-20 p-1.5 rounded-xl bg-white/5 border border-white/5">
                     {Array.from({ length: 9 }).map((_, index) => (
-                      <span key={index} className={`h-2.5 rounded-full transition-all duration-500 ${index < Math.max(1, Math.round(lane.width / 12)) ? 'bg-white shadow-[0_0_8px_rgba(255,255,255,0.5)]' : 'bg-white/10'}`} />
+                      <span key={index} className={`h-3 rounded-full transition-all duration-700 ${index < Math.max(1, Math.round(lane.width / 12)) ? 'bg-white shadow-[0_0_12px_rgba(255,255,255,0.7)]' : 'bg-white/10'}`} />
                     ))}
                   </div>
                 </div>
-                <div className="mt-5 h-2.5 overflow-hidden rounded-full bg-white/5 border border-white/5">
+                <div className="mt-6 h-3 overflow-hidden rounded-full bg-white/10 border border-white/10 p-[1px]">
                   <motion.div 
                     initial={{ width: 0 }}
                     animate={{ width: `${Math.max(6, lane.width)}%` }}
-                    className={`h-full rounded-full bg-linear-to-r ${lane.tone} shadow-[0_0_12px_rgba(255,255,255,0.2)]`} 
+                    className={`h-full rounded-full bg-linear-to-r ${lane.tone} shadow-[0_0_20px_rgba(255,255,255,0.3)]`} 
                   />
                 </div>
-                <div className="mt-3 text-[11px] font-medium text-slate-400 group-hover:text-slate-300 transition-colors">{lane.hint}</div>
+                <div className="mt-4 text-[12px] font-bold text-slate-400 group-hover:text-slate-200 transition-colors flex items-center gap-2">
+                  <div className="w-1.5 h-1.5 rounded-full bg-brand-400 animate-pulse" />
+                  {lane.hint}
+                </div>
               </div>
             ))}
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-4 relative z-10">
           {quickAccessTiles.map((tile) => (
             <Link
               key={tile.label}
               to={tile.to}
-              className={`group rounded-[2rem] border ${tile.border} bg-white/[0.06] p-5 backdrop-blur-md transition-all hover:-translate-y-1.5 hover:bg-white/[0.1] hover:shadow-[0_24px_70px_rgba(8,15,40,0.4)]`}
+              className={`group rounded-[2.5rem] border ${tile.border} bg-white/[0.08] p-6 backdrop-blur-xl transition-all duration-300 hover:-translate-y-2 hover:bg-white/[0.15] hover:shadow-[0_32px_80px_rgba(0,0,0,0.5)] border-white/10 hover:border-white/30`}
             >
-              <div className="mb-4 flex items-center justify-between">
-                <div className={`rounded-2xl border border-white/10 p-3 ${tile.iconTone} shadow-lg shadow-white/5 group-hover:shadow-white/10 group-hover:scale-110 transition-all`}>
-                  <tile.icon size={20} />
+              <div className="mb-5 flex items-center justify-between">
+                <div className={`rounded-2xl border border-white/10 p-4 ${tile.iconTone} shadow-xl group-hover:shadow-2xl group-hover:scale-110 transition-all duration-300`}>
+                  <tile.icon size={24} />
                 </div>
-                <div className="rounded-full bg-white/5 p-2 transition-colors group-hover:bg-brand-500/20">
-                  <ArrowRight size={14} className="text-slate-500 transition-transform group-hover:translate-x-1 group-hover:text-brand-200" />
+                <div className="rounded-full bg-white/10 p-2.5 transition-colors group-hover:bg-brand-500/30">
+                  <ArrowRight size={16} className="text-slate-400 transition-transform group-hover:translate-x-1.5 group-hover:text-brand-300" />
                 </div>
               </div>
-              <div className="text-lg font-black text-white tracking-tight">{tile.label}</div>
-              <div className="mt-2 text-xs leading-relaxed font-semibold text-slate-400 group-hover:text-slate-200">{tile.hint}</div>
+              <div className="text-xl font-black text-white tracking-tight group-hover:text-brand-100 transition-colors">{tile.label}</div>
+              <div className="mt-3 text-[13px] leading-relaxed font-bold text-slate-400 group-hover:text-slate-200 transition-colors">{tile.hint}</div>
             </Link>
           ))}
         </div>
       </motion.section>
 
-      <motion.div
-        initial={{ opacity: 0, y: 18 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.45, ease: 'easeOut' }}
-        className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4 mb-10"
-      >
-        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile p-5 relative overflow-hidden group">
-          <div className="absolute -top-8 -right-8 w-24 h-24 rounded-full bg-brand-400/20 blur-2xl group-hover:bg-brand-400/30 transition-colors" />
-          <div className="relative">
-            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Agents Online</div>
-            <div className="flex items-end justify-between">
-              <div className="text-4xl font-black text-white">{agents.length}</div>
-              <div className="p-2 rounded-xl bg-brand-500/10 text-brand-300 group-hover:scale-110 transition-transform">
-                <Bot size={20} />
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.2 }}
+          className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-6 mb-12"
+        >
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-brand-500/20 shadow-2xl">
+            <div className="absolute -top-8 -right-8 w-32 h-32 rounded-full bg-brand-500/10 blur-3xl group-hover:bg-brand-500/20 transition-all duration-500" />
+            <div className="relative">
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-brand-300/80 mb-3">Agents Online</div>
+              <div className="flex items-end justify-between">
+                <div className="text-5xl font-black text-white tracking-tighter">{agents.length}</div>
+                <div className="p-3 rounded-2xl bg-brand-500/20 text-brand-300 border border-brand-500/30 group-hover:rotate-12 transition-all">
+                  <Bot size={24} />
+                </div>
+              </div>
+              <div className="text-[12px] font-bold text-slate-300 mt-4 flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)] animate-pulse" />
+                {dashboardInsights.runningAgents} currently active
               </div>
             </div>
-            <div className="text-[11px] font-bold text-slate-400 mt-2 flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              {dashboardInsights.runningAgents} currently active
-            </div>
-          </div>
-        </motion.div>
+          </motion.div>
 
-        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile p-5 relative overflow-hidden group">
-          <div className="absolute -bottom-8 -left-8 w-24 h-24 rounded-full bg-accent-400/20 blur-2xl group-hover:bg-accent-400/30 transition-colors" />
-          <div className="relative">
-            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Crew Matrix</div>
-            <div className="flex items-end justify-between">
-              <div className="text-4xl font-black text-white">{crews.length}</div>
-              <div className="p-2 rounded-xl bg-accent-500/10 text-accent-300 group-hover:scale-110 transition-transform">
-                <Users size={20} />
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-accent-500/20 shadow-2xl">
+            <div className="absolute -bottom-10 -left-10 w-32 h-32 rounded-full bg-accent-500/10 blur-3xl group-hover:bg-accent-500/20 transition-all duration-500" />
+            <div className="relative">
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-accent-300/80 mb-3">Crew Matrix</div>
+              <div className="flex items-end justify-between">
+                <div className="text-5xl font-black text-white tracking-tighter">{crews.length}</div>
+                <div className="p-3 rounded-2xl bg-accent-500/20 text-accent-300 border border-accent-500/30 group-hover:rotate-12 transition-all">
+                  <Users size={24} />
+                </div>
+              </div>
+              <div className="text-[12px] font-bold text-slate-400 mt-4 flex items-center gap-2">
+                <div className="w-3 h-3 rounded bg-accent-500/30" />
+                {dashboardInsights.exposedCrews} exposed via API/MCP
               </div>
             </div>
-            <div className="text-[11px] font-bold text-slate-400 mt-2">{dashboardInsights.exposedCrews} exposed via API/MCP</div>
-          </div>
-        </motion.div>
+          </motion.div>
 
-        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile p-5 group">
-          <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">24H Throughput</div>
-          <div className="flex items-end justify-between">
-            <div className="text-4xl font-black text-white">{dashboardInsights.execution24h}</div>
-            <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-300 group-hover:scale-110 transition-transform">
-              <TrendingUp size={20} />
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-emerald-500/20 shadow-2xl">
+            <div className="relative">
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-emerald-300/80 mb-3">24H Throughput</div>
+              <div className="flex items-end justify-between">
+                <div className="text-5xl font-black text-white tracking-tighter">{dashboardInsights.execution24h}</div>
+                <div className="p-3 rounded-2xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 group-hover:rotate-12 transition-all">
+                  <TrendingUp size={24} />
+                </div>
+              </div>
+              <div className="text-[12px] font-bold text-slate-400 mt-4 flex items-center gap-2">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                Recent executions today
+              </div>
             </div>
-          </div>
-          <div className="text-[11px] font-bold text-slate-400 mt-2">Recent executions today</div>
-        </motion.div>
+          </motion.div>
 
-        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile p-5 group">
-          <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Token Flow</div>
-          <div className="flex items-end justify-between">
-            <div className="text-4xl font-black text-white">{(dashboardInsights.totalPrompt + dashboardInsights.totalCompletion).toLocaleString()}</div>
-            <div className="p-2 rounded-xl bg-indigo-500/10 text-indigo-300 group-hover:scale-110 transition-transform">
-              <Cpu size={20} />
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-indigo-500/20 shadow-2xl">
+            <div className="relative">
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-indigo-300/80 mb-3">Token Flow</div>
+              <div className="flex items-end justify-between">
+                <div className="text-4xl font-black text-white tracking-tighter leading-none">{(dashboardInsights.totalPrompt + dashboardInsights.totalCompletion).toLocaleString()}</div>
+                <div className="p-3 rounded-2xl bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 group-hover:rotate-12 transition-all">
+                  <Cpu size={24} />
+                </div>
+              </div>
+              <div className="text-[11px] font-bold text-slate-400 mt-4 truncate flex items-center gap-2">
+                <span className="text-indigo-300">P</span> {dashboardInsights.totalPrompt.toLocaleString()}
+                <span className="mx-1 text-slate-600">|</span>
+                <span className="text-violet-300">C</span> {dashboardInsights.totalCompletion.toLocaleString()}
+              </div>
             </div>
-          </div>
-          <div className="text-[11px] font-bold text-slate-400 mt-2 truncate">P {dashboardInsights.totalPrompt.toLocaleString()} / C {dashboardInsights.totalCompletion.toLocaleString()}</div>
-        </motion.div>
+          </motion.div>
 
-        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile p-5 group">
-          <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Cost Envelope</div>
-          <div className="flex items-end justify-between">
-            <div className="text-4xl font-black text-emerald-400 tracking-tighter">${dashboardInsights.totalCost.toFixed(4)}</div>
-            <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-300 group-hover:scale-110 transition-transform">
-              <DollarSign size={20} />
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-emerald-500/20 shadow-2xl">
+            <div className="relative">
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-emerald-300/80 mb-3">Cost Envelope</div>
+              <div className="flex items-end justify-between">
+                <div className="text-4xl font-black text-emerald-400 tracking-tighter">${dashboardInsights.totalCost.toFixed(4)}</div>
+                <div className="p-3 rounded-2xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 group-hover:rotate-12 transition-all">
+                  <DollarSign size={24} />
+                </div>
+              </div>
+              <div className="text-[12px] font-bold text-slate-400 mt-4">Avg latency {dashboardInsights.avgLatency}s</div>
             </div>
-          </div>
-          <div className="text-[11px] font-bold text-slate-400 mt-2">Avg latency {dashboardInsights.avgLatency}s</div>
+          </motion.div>
         </motion.div>
-      </motion.div>
 
       <div className="panel-chrome rounded-[2.5rem] p-8 mb-10 overflow-hidden relative">
         <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-brand-500/5 blur-[120px] rounded-full -mr-64 -mt-64" />

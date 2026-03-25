@@ -75,7 +75,7 @@ export default function CrewsPage() {
   const [buildError, setBuildError] = useState('');
   const [buildEvents, setBuildEvents] = useState<{message: string, type: 'status' | 'error' | 'done', id?: number}[]>([]);
   const [autoBuildProvider, setAutoBuildProvider] = useState('google');
-  const [autoBuildModel, setAutoBuildModel] = useState('gemini-1.5-flash');
+  const [autoBuildModel, setAutoBuildModel] = useState('');
   const [autoBuildProcessPreference, setAutoBuildProcessPreference] = useState<'auto' | 'sequential' | 'hierarchical'>('auto');
   const [autoBuildProjectId, setAutoBuildProjectId] = useState('');
 
@@ -137,18 +137,13 @@ export default function CrewsPage() {
         }
       }
 
+      // NO HARDCODED FALLBACKS
       if (models.length === 0) {
-        models = [
-          { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
-          { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
-          { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash (Experimental)' },
-          { id: 'gpt-4o', name: 'GPT-4o' },
-          { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet' }
-        ];
+        console.warn("No models returned from provider fetching for crew auto-build.");
       }
 
       setAvailableModels(models);
-      if (models.length > 0 && !models.find(m => m.id === autoBuildModel)) {
+      if (models.length > 0 && (!autoBuildModel || !models.find(m => m.id === autoBuildModel))) {
           setAutoBuildModel(models[0].id);
       }
     } catch (e) {

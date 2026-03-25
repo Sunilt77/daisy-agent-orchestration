@@ -57,7 +57,7 @@ export default function TaskAgentEditor({
   const [agentRole, setAgentRole] = useState(agent?.role || '');
   const [agentGoal, setAgentGoal] = useState(agent?.goal || '');
   const [agentBackstory, setAgentBackstory] = useState(agent?.backstory || '');
-  const [agentModel, setAgentModel] = useState(agent?.model || 'gemini-2.5-flash');
+  const [agentModel, setAgentModel] = useState(agent?.model || 'gemini-1.5-flash');
   const [agentProvider, setAgentProvider] = useState(agent?.provider || 'google');
   const [isSavingAgent, setIsSavingAgent] = useState(false);
 
