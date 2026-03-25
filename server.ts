@@ -1514,6 +1514,45 @@ app.get('/api/providers/:id/models', async (req, res) => {
   }
 });
 
+app.post('/api/providers/test', async (req, res) => {
+  try {
+    const { provider, api_base, api_key } = req.body;
+    if (!api_key) return res.status(400).json({ error: 'API Key is required to test connection.' });
+
+    let modelsCount = 0;
+    if (provider === 'openai' || provider === 'openai-compatible' || provider === 'litellm') {
+      const openai = new OpenAI({ 
+          apiKey: api_key, 
+          baseURL: api_base,
+          fetch: async (url: string | Request | URL, init?: RequestInit) => {
+              const headers = new Headers(init?.headers);
+              Array.from(headers.keys()).forEach(k => {
+                  if (k.toLowerCase().startsWith('x-stainless')) headers.delete(k);
+              });
+              headers.set('User-Agent', 'curl/8.7.1');
+              if (provider === 'litellm') headers.set('x-litellm-api-key', api_key);
+              return fetch(url, { ...init, headers });
+          }
+      });
+      const response = await openai.models.list();
+      modelsCount = response.data.length;
+    } else if (provider === 'anthropic') {
+      const anthropic = new Anthropic({ apiKey: api_key });
+      const response = await anthropic.models.list();
+      modelsCount = response.data.length;
+    } else {
+      const ai = new GoogleGenAI({ apiKey: api_key });
+      const response = await ai.models.list();
+      for await (const _m of response) { modelsCount++; }
+    }
+    res.json({ success: true, message: `Connection successful! Found ${modelsCount} models.` });
+  } catch (e: any) {
+    let errorMsg = e.message || String(e);
+    if (errorMsg.includes('404')) errorMsg += ' (Check if your API Base URL accidentally includes /chat/completions or is missing /v1)';
+    res.status(400).json({ error: errorMsg });
+  }
+});
+
 async function validateMCPConfig(config: any) {
     const { serverUrl, apiKey, credentialId, transportType, customHeaders } = config || {};
     if (!serverUrl) throw new Error('serverUrl is required for MCP tools.');

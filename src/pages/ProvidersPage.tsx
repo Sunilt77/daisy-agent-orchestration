@@ -27,6 +27,7 @@ export default function ProvidersPage() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [providersPage, setProvidersPage] = useState(1);
   const [providersPageSize, setProvidersPageSize] = useState(9);
+  const [testStatus, setTestStatus] = useState<{ type: 'success' | 'error' | 'testing', message: string } | null>(null);
   
   const [formData, setFormData] = useState({
     name: '',
@@ -84,6 +85,7 @@ export default function ProvidersPage() {
     setFormData({ name: '', provider: 'openai', api_base: '', api_key: '', is_default: false });
     setIsCreating(false);
     setEditingId(null);
+    setTestStatus(null);
   };
 
   const startEdit = (provider: Provider) => {
@@ -96,6 +98,41 @@ export default function ProvidersPage() {
       });
       setEditingId(provider.id);
       setIsCreating(true);
+      setTestStatus(null);
+  };
+
+  const handleTestConnection = async () => {
+    if (!formData.api_key && !editingId) {
+        setTestStatus({ type: 'error', message: 'API Key is required to test connection.' });
+        return;
+    }
+    
+    if (formData.api_base?.endsWith('/chat/completions') || formData.api_base?.endsWith('/models')) {
+        setTestStatus({ type: 'error', message: 'Warning: API Base should usually end in /v1, not a specific endpoint path like /chat/completions.' });
+        return;
+    }
+
+    setTestStatus({ type: 'testing', message: 'Testing connection...' });
+    try {
+        if (editingId && !formData.api_key) {
+            setTestStatus({ type: 'error', message: 'Please temporarily re-enter your API key to test the connection.' });
+            return;
+        }
+
+        const res = await fetch('/api/providers/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(formData)
+        });
+        const data = await safeJson(res) || {};
+        if (res.ok) {
+            setTestStatus({ type: 'success', message: data.message || 'Connection successful!' });
+        } else {
+            setTestStatus({ type: 'error', message: data.error || 'Connection failed.' });
+        }
+    } catch (e: any) {
+        setTestStatus({ type: 'error', message: e.message || 'Network error occurred.' });
+    }
   };
 
   const deleteProvider = async (id: number) => {
@@ -211,7 +248,25 @@ export default function ProvidersPage() {
                 </p>
             </div>
 
-            <div className="flex justify-end gap-3 pt-2">
+            <div className="flex justify-end gap-3 pt-2 items-center">
+              {testStatus && (
+                <div className={`mr-auto px-3 py-1.5 rounded-lg text-xs font-medium ${
+                    testStatus.type === 'success' ? 'bg-green-50 text-green-700 border border-green-200' :
+                    testStatus.type === 'error' ? 'bg-red-50 text-red-700 border border-red-200' :
+                    'bg-blue-50 text-blue-700 border border-blue-200 animate-pulse'
+                }`}>
+                    {testStatus.type === 'testing' ? 'Testing...' : testStatus.message}
+                </div>
+              )}
+              
+              <button 
+                type="button"
+                onClick={handleTestConnection}
+                disabled={testStatus?.type === 'testing'}
+                className="bg-slate-100 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-200 disabled:opacity-50"
+              >
+                Test Connection
+              </button>
               <button 
                 type="button"
                 onClick={resetForm}
