@@ -1669,41 +1669,50 @@ function getToolDependencies(toolId: number) {
   };
 }
 
-function getToolUsageStats(toolId: number) {
-  const summary = db.prepare(`
-    SELECT
-      COUNT(*) as total_runs,
-      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_runs,
-      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_runs,
-      AVG(duration_ms) as avg_duration_ms,
-      MAX(created_at) as last_used_at
-    FROM tool_executions
-    WHERE tool_id = ?
-  `).get(toolId) as any;
-  const recentExecutions = db.prepare(`
-    SELECT
-      te.id,
-      te.tool_name,
-      te.status,
-      te.duration_ms,
-      te.created_at,
-      te.error,
-      te.agent_execution_id,
-      a.id as agent_id,
-      a.name as agent_name
-    FROM tool_executions te
-    LEFT JOIN agents a ON a.id = te.agent_id
-    WHERE te.tool_id = ?
-    ORDER BY te.id DESC
-    LIMIT 20
-  `).all(toolId) as any[];
+async function getToolUsageStats(toolId: number) {
+  const prisma = getPrisma();
+  const summary = await prisma.orchestratorToolExecution.aggregate({
+    where: { toolId },
+    _count: { _all: true },
+    _avg: { durationMs: true },
+    _max: { createdAt: true }
+  });
+
+  const statusCounts = await prisma.orchestratorToolExecution.groupBy({
+    by: ['status'],
+    where: { toolId },
+    _count: { _all: true }
+  });
+
+  const failedRuns = statusCounts.find(s => s.status === 'failed')?._count._all || 0;
+  const completedRuns = statusCounts.find(s => s.status === 'completed')?._count._all || 0;
+
+  const recentExecutions = await prisma.orchestratorToolExecution.findMany({
+    where: { toolId },
+    include: {
+      agent: { select: { id: true, name: true } }
+    },
+    orderBy: { id: 'desc' },
+    take: 20
+  });
+
   return {
-    total_runs: Number(summary?.total_runs || 0),
-    failed_runs: Number(summary?.failed_runs || 0),
-    completed_runs: Number(summary?.completed_runs || 0),
-    avg_duration_ms: summary?.avg_duration_ms != null ? Math.round(Number(summary.avg_duration_ms)) : null,
-    last_used_at: summary?.last_used_at || null,
-    recent_executions: recentExecutions,
+    total_runs: summary._count._all || 0,
+    failed_runs: failedRuns,
+    completed_runs: completedRuns,
+    avg_duration_ms: summary._avg.durationMs != null ? Math.round(summary._avg.durationMs) : null,
+    last_used_at: summary._max.createdAt ? summary._max.createdAt.toISOString() : null,
+    recent_executions: recentExecutions.map(te => ({
+      ...te,
+      tool_id: te.toolId,
+      agent_id: te.agentId,
+      agent_execution_id: te.agentExecutionId,
+      tool_name: te.toolName,
+      tool_type: te.toolType,
+      duration_ms: te.durationMs,
+      created_at: te.createdAt.toISOString(),
+      agent_name: te.agent?.name
+    })),
   };
 }
 
@@ -1719,7 +1728,7 @@ app.get('/api/tools/:id/dependencies', async (req, res) => {
     if (!tool) return res.status(404).json({ error: 'Tool not found' });
     const dependencies = getToolDependencies(toolId);
     const versionCount = await prisma.orchestratorToolVersion.count({ where: { toolId } });
-    const usage = getToolUsageStats(toolId);
+    const usage = await getToolUsageStats(toolId);
     res.json({
       tool: {
         id: tool.id,
@@ -1837,12 +1846,13 @@ app.post('/api/tools/:id/restore/:versionId', async (req, res) => {
   }
 });
 
-app.get('/api/tools/:id/usage', (req, res) => {
+app.get('/api/tools/:id/usage', async (req, res) => {
   const toolId = Number(req.params.id);
   if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
   const tool = db.prepare('SELECT id, name FROM tools WHERE id = ?').get(toolId) as any;
   if (!tool) return res.status(404).json({ error: 'Tool not found' });
-  res.json({ tool, usage: getToolUsageStats(toolId) });
+  const usage = await getToolUsageStats(toolId);
+  res.json({ tool, usage });
 });
 
 function inferToolCategory(name: any, description: any, type: any, config: any, requestedCategory: any) {
@@ -2554,10 +2564,16 @@ app.delete('/api/agents/:id', async (req, res) => {
     });
     await prisma.orchestratorTask.deleteMany({ where: { agentId } });
     await prisma.orchestratorAgent.delete({ where: { id: agentId } });
+    await prisma.orchestratorAgentExecution.deleteMany({ where: { agentId } });
+    await prisma.orchestratorToolExecution.deleteMany({ where: { agentId } });
+    await prisma.orchestratorAgentSession.deleteMany({ where: { agentId } });
     await refreshPersistentMirror();
-    db.prepare('DELETE FROM agent_executions WHERE agent_id = ?').run(agentId);
-    db.prepare('DELETE FROM tool_executions WHERE agent_id = ?').run(agentId);
-    db.prepare('DELETE FROM agent_sessions WHERE agent_id = ?').run(agentId);
+    // Mirror to SQLite
+    try {
+      db.prepare('DELETE FROM agent_executions WHERE agent_id = ?').run(agentId);
+      db.prepare('DELETE FROM tool_executions WHERE agent_id = ?').run(agentId);
+      db.prepare('DELETE FROM agent_sessions WHERE agent_id = ?').run(agentId);
+    } catch {}
     console.log(`Agent ${agentId} deleted successfully`);
     res.json({ success: true });
   } catch (e: any) {
@@ -2667,31 +2683,78 @@ app.get('/api/projects/:id', async (req, res) => {
   }
 });
 
-app.get('/api/projects/:id/traces', (req, res) => {
-  const projectId = req.params.id;
-  
-  // Get all agent executions for agents in this project
-  const executions = db.prepare(`
-    SELECT ae.*, a.name as agent_name, a.role as agent_role 
-    FROM agent_executions ae
-    JOIN agents a ON ae.agent_id = a.id
-    WHERE a.project_id = ?
-    ORDER BY ae.created_at DESC
-  `).all(projectId);
-  
-  res.json(executions);
+app.get('/api/projects/:id/traces', async (req, res) => {
+  try {
+    const projectId = Number(req.params.id);
+    if (!Number.isFinite(projectId)) return res.status(400).json({ error: 'Invalid project id' });
+
+    const executions = await getPrisma().orchestratorAgentExecution.findMany({
+      where: {
+        agent: {
+          projectId: projectId
+        }
+      },
+      include: {
+        agent: {
+          select: { name: true, role: true }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    res.json(executions.map(ae => ({
+      ...ae,
+      agent_id: ae.agentId,
+      agent_name: ae.agent?.name,
+      agent_role: ae.agent?.role,
+      created_at: ae.createdAt.toISOString(),
+      execution_kind: ae.executionKind,
+      parent_execution_id: ae.parentExecutionId,
+      delegation_title: ae.delegationTitle,
+      prompt_tokens: ae.promptTokens,
+      completion_tokens: ae.completionTokens,
+      total_cost: ae.totalCost,
+      retry_of: ae.retryOf
+    })));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.get('/api/projects/:id/tool-traces', (req, res) => {
-  const projectId = req.params.id;
-  const rows = db.prepare(`
-    SELECT te.*, a.name as agent_name, a.role as agent_role
-    FROM tool_executions te
-    JOIN agents a ON te.agent_id = a.id
-    WHERE a.project_id = ?
-    ORDER BY te.created_at DESC
-  `).all(projectId);
-  res.json(rows);
+app.get('/api/projects/:id/tool-traces', async (req, res) => {
+  try {
+    const projectId = Number(req.params.id);
+    if (!Number.isFinite(projectId)) return res.status(400).json({ error: 'Invalid project id' });
+
+    const rows = await getPrisma().orchestratorToolExecution.findMany({
+      where: {
+        agent: {
+          projectId: projectId
+        }
+      },
+      include: {
+        agent: {
+          select: { name: true, role: true }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    res.json(rows.map(te => ({
+      ...te,
+      tool_id: te.toolId,
+      agent_id: te.agentId,
+      agent_execution_id: te.agentExecutionId,
+      tool_name: te.toolName,
+      tool_type: te.toolType,
+      duration_ms: te.durationMs,
+      agent_name: te.agent?.name,
+      agent_role: te.agent?.role,
+      created_at: te.createdAt.toISOString()
+    })));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // --- Workflows ---
@@ -3099,70 +3162,124 @@ app.delete('/api/projects/:id', async (req, res) => {
 });
 
 // --- Stats ---
-app.get('/api/stats', (req, res) => {
-    const totalAgents = db.prepare('SELECT COUNT(*) as count FROM agents').get() as any;
-    const totalCrews = db.prepare('SELECT COUNT(*) as count FROM crews').get() as any;
-    const totalExecutions = db.prepare('SELECT COUNT(*) as count FROM crew_executions').get() as any;
-    const totalCost = db.prepare('SELECT SUM(total_cost) as cost FROM crew_executions').get() as any;
-    const totalTokens = db.prepare('SELECT SUM(prompt_tokens) + SUM(completion_tokens) as tokens FROM crew_executions').get() as any;
-    
-    // Active agents (running executions)
-    const runningExecutions = db.prepare('SELECT crew_id FROM crew_executions WHERE status = "running"').all() as any[];
-    let activeAgents = 0;
-    if (runningExecutions.length > 0) {
-        const crewIds = runningExecutions.map(e => e.crew_id);
-        const placeholders = crewIds.map(() => '?').join(',');
-        const result = db.prepare(`SELECT COUNT(DISTINCT agent_id) as count FROM crew_agents WHERE crew_id IN (${placeholders})`).get(...crewIds) as any;
-        activeAgents = result.count || 0;
-    }
+app.get('/api/stats', async (req, res) => {
+    try {
+        const prisma = getPrisma();
+        const [totalAgents, totalCrews, crewStats] = await Promise.all([
+            prisma.orchestratorAgent.count(),
+            prisma.orchestratorCrew.count(),
+            prisma.orchestratorCrewExecution.aggregate({
+                _count: { _all: true },
+                _sum: { totalCost: true, promptTokens: true, completionTokens: true }
+            })
+        ]);
 
-    res.json({
-        agents: totalAgents.count,
-        crews: totalCrews.count,
-        executions: totalExecutions.count,
-        total_cost: totalCost.cost || 0,
-        total_tokens: totalTokens.tokens || 0,
-        active_agents: activeAgents
-    });
+        const activeAgentExecs = await prisma.orchestratorAgentExecution.groupBy({
+            by: ['agentId'],
+            where: { status: 'running' },
+            _count: { _all: true }
+        });
+
+        res.json({
+            agents: totalAgents,
+            crews: totalCrews,
+            executions: crewStats._count._all || 0,
+            total_cost: crewStats._sum.totalCost || 0,
+            total_tokens: (crewStats._sum.promptTokens || 0) + (crewStats._sum.completionTokens || 0),
+            active_agents: activeAgentExecs.length
+        });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
-app.get('/api/analytics/failures', (req, res) => {
-  const topFailingTools = db.prepare(`
-    SELECT tool_name, COUNT(*) as failures
-    FROM tool_executions
-    WHERE status = 'failed'
-    GROUP BY tool_name
-    ORDER BY failures DESC
-    LIMIT 8
-  `).all();
+app.get('/api/analytics/failures', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const topFailingTools = await prisma.orchestratorToolExecution.groupBy({
+      by: ['toolName'],
+      where: { status: 'failed' },
+      _count: { _all: true },
+      orderBy: { _count: { toolName: 'desc' } },
+      take: 8
+    });
 
-  const timeoutHotspots = db.prepare(`
-    SELECT a.name as agent_name, COUNT(*) as timeout_failures
-    FROM agent_executions ae
-    JOIN agents a ON a.id = ae.agent_id
-    WHERE ae.status = 'failed' AND (LOWER(COALESCE(ae.output, '')) LIKE '%timeout%' OR LOWER(COALESCE(ae.input, '')) LIKE '%timeout%')
-    GROUP BY a.id, a.name
-    ORDER BY timeout_failures DESC
-    LIMIT 8
-  `).all();
+    const timeoutHotspotsRaw = await prisma.orchestratorAgentExecution.findMany({
+      where: {
+        status: 'failed',
+        OR: [
+          { output: { contains: 'timeout', mode: 'insensitive' } },
+          { input: { contains: 'timeout', mode: 'insensitive' } }
+        ]
+      },
+      include: {
+        agent: { select: { name: true } }
+      }
+    });
 
-  const tokenSpikes = db.prepare(`
-    SELECT ae.id, a.name as agent_name, ae.prompt_tokens, ae.completion_tokens,
-           (COALESCE(ae.prompt_tokens, 0) + COALESCE(ae.completion_tokens, 0)) as total_tokens,
-           ae.total_cost, ae.created_at
-    FROM agent_executions ae
-    JOIN agents a ON a.id = ae.agent_id
-    ORDER BY total_tokens DESC
-    LIMIT 12
-  `).all();
+    const hotspotsMap = new Map<string, number>();
+    for (const row of timeoutHotspotsRaw) {
+      if (row.agent?.name) {
+        hotspotsMap.set(row.agent.name, (hotspotsMap.get(row.agent.name) || 0) + 1);
+      }
+    }
 
-  res.json({ topFailingTools, timeoutHotspots, tokenSpikes });
+    const timeoutHotspots = Array.from(hotspotsMap.entries())
+      .map(([agent_name, timeout_failures]) => ({ agent_name, timeout_failures }))
+      .sort((a, b) => b.timeout_failures - a.timeout_failures)
+      .slice(0, 8);
+
+    const tokenSpikesRaw = await prisma.orchestratorAgentExecution.findMany({
+      include: {
+        agent: { select: { name: true } }
+      },
+      orderBy: { promptTokens: 'desc' },
+      take: 24 // Take more then sort by combined
+    });
+
+    const tokenSpikes = tokenSpikesRaw.map(ae => ({
+      id: ae.id,
+      agent_name: ae.agent?.name,
+      prompt_tokens: ae.promptTokens,
+      completion_tokens: ae.completionTokens,
+      total_tokens: (ae.promptTokens || 0) + (ae.completionTokens || 0),
+      total_cost: ae.totalCost,
+      created_at: ae.createdAt.toISOString()
+    })).sort((a, b) => b.total_tokens - a.total_tokens).slice(0, 12);
+
+    res.json({
+      topFailingTools: topFailingTools.map(t => ({ tool_name: t.toolName, failures: t._count._all })),
+      timeoutHotspots,
+      tokenSpikes
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // --- Direct Agent Execution (Exposed) ---
-app.get('/api/agents/:id/executions', (req, res) => {
-    const executions = db.prepare('SELECT * FROM agent_executions WHERE agent_id = ? ORDER BY created_at DESC').all(req.params.id);
-    res.json(executions);
+app.get('/api/agents/:id/executions', async (req, res) => {
+    try {
+        const agentId = Number(req.params.id);
+        const executions = await getPrisma().orchestratorAgentExecution.findMany({
+            where: { agentId },
+            orderBy: { createdAt: 'desc' }
+        });
+        res.json(executions.map(ae => ({
+            ...ae,
+            agent_id: ae.agentId,
+            created_at: ae.createdAt.toISOString(),
+            execution_kind: ae.executionKind,
+            parent_execution_id: ae.parentExecutionId,
+            delegation_title: ae.delegationTitle,
+            prompt_tokens: ae.promptTokens,
+            completion_tokens: ae.completionTokens,
+            total_cost: ae.totalCost,
+            retry_of: ae.retryOf
+        })));
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.get('/api/agents/:id/sessions', async (req, res) => {
@@ -4568,11 +4685,10 @@ app.delete('/api/crews/:id', async (req, res) => {
     try {
         const crewId = Number(req.params.id);
         const prisma = getPrisma();
-        await prisma.orchestratorCrewAgent.deleteMany({ where: { crewId } });
-        await prisma.orchestratorTask.deleteMany({ where: { crewId } });
-        await prisma.orchestratorCrew.delete({ where: { id: crewId } });
+        await prisma.orchestratorCrewExecution.deleteMany({ where: { crewId } });
         await refreshPersistentMirror();
-        db.prepare('DELETE FROM crew_executions WHERE crew_id = ?').run(crewId);
+        // Mirror to SQLite
+        try { db.prepare('DELETE FROM crew_executions WHERE crew_id = ?').run(crewId); } catch {}
         console.log(`Crew ${crewId} deleted successfully`);
         res.json({ success: true });
     } catch (e: any) {
@@ -7102,55 +7218,80 @@ app.post('/api/agents/:id/stop-all', async (req, res) => {
   res.json({ success: true, canceled_running_executions: runningExecs.length, canceled_pending_jobs: canceledQueued });
 });
 
-app.get('/api/task-control', (req, res) => {
+app.get('/api/task-control', async (req, res) => {
   try {
-    const runningAgentExecutions = db.prepare(`
-      SELECT ae.id, ae.agent_id, ae.task, ae.created_at, a.name as agent_name, a.role as agent_role
-      FROM agent_executions ae
-      JOIN agents a ON a.id = ae.agent_id
-      WHERE ae.status = 'running'
-      ORDER BY ae.created_at DESC
-    `).all();
+    const prisma = getPrisma();
+    const [runningAgentExecs, runningCrewExecs, pendingJobsRaw, failedAgentExecs, failedCrewExecs] = await Promise.all([
+      prisma.orchestratorAgentExecution.findMany({
+        where: { status: 'running' },
+        include: { agent: { select: { name: true, role: true } } },
+        orderBy: { createdAt: 'desc' }
+      }),
+      prisma.orchestratorCrewExecution.findMany({
+        where: { status: 'running' },
+        include: { crew: { select: { name: true, process: true } } },
+        orderBy: { createdAt: 'desc' }
+      }),
+      prisma.orchestratorJobQueue.findMany({
+        where: { status: 'pending' },
+        orderBy: { id: 'desc' },
+        take: 200
+      }),
+      prisma.orchestratorAgentExecution.findMany({
+        where: { status: 'failed' },
+        include: { agent: { select: { name: true } } },
+        orderBy: { createdAt: 'desc' },
+        take: 20
+      }),
+      prisma.orchestratorCrewExecution.findMany({
+        where: { status: 'failed' },
+        include: { crew: { select: { name: true } } },
+        orderBy: { createdAt: 'desc' },
+        take: 20
+      })
+    ]);
 
-    const runningCrewExecutions = db.prepare(`
-      SELECT ce.id, ce.crew_id, ce.initial_input, ce.created_at, c.name as crew_name, c.process
-      FROM crew_executions ce
-      JOIN crews c ON c.id = ce.crew_id
-      WHERE ce.status = 'running'
-      ORDER BY ce.created_at DESC
-    `).all();
+    const runningAgentExecutions = runningAgentExecs.map(ae => ({
+      id: ae.id,
+      agent_id: ae.agentId,
+      task: ae.task,
+      created_at: ae.createdAt.toISOString(),
+      agent_name: ae.agent?.name,
+      agent_role: ae.agent?.role
+    }));
 
-    const pendingJobsRaw = db.prepare(`
-      SELECT id, type, payload, status, created_at
-      FROM job_queue
-      WHERE status = 'pending'
-      ORDER BY id DESC
-      LIMIT 200
-    `).all() as any[];
+    const runningCrewExecutions = runningCrewExecs.map(ce => ({
+      id: ce.id,
+      crew_id: ce.crewId,
+      initial_input: ce.initialInput,
+      created_at: ce.createdAt.toISOString(),
+      crew_name: ce.crew?.name,
+      process: ce.crew?.process
+    }));
 
-    const pendingJobs = pendingJobsRaw.map((row) => {
-      let payload: any = {};
-      try { payload = row.payload ? JSON.parse(row.payload) : {}; } catch {}
-      return { ...row, payload };
-    });
+    const pendingJobs = pendingJobsRaw.map((row) => ({
+      id: row.id,
+      type: row.type,
+      status: row.status,
+      created_at: row.createdAt.toISOString(),
+      payload: row.payload ? JSON.parse(row.payload) : {}
+    }));
 
-    const failedAgentExecutions = db.prepare(`
-      SELECT ae.id, ae.agent_id, ae.task, ae.created_at, a.name as agent_name
-      FROM agent_executions ae
-      JOIN agents a ON a.id = ae.agent_id
-      WHERE ae.status = 'failed'
-      ORDER BY ae.created_at DESC
-      LIMIT 20
-    `).all();
+    const failedAgentExecutions = failedAgentExecs.map(ae => ({
+      id: ae.id,
+      agent_id: ae.agentId,
+      task: ae.task,
+      created_at: ae.createdAt.toISOString(),
+      agent_name: ae.agent?.name
+    }));
 
-    const failedCrewExecutions = db.prepare(`
-      SELECT ce.id, ce.crew_id, ce.initial_input, ce.created_at, c.name as crew_name
-      FROM crew_executions ce
-      JOIN crews c ON c.id = ce.crew_id
-      WHERE ce.status = 'failed'
-      ORDER BY ce.created_at DESC
-      LIMIT 20
-    `).all();
+    const failedCrewExecutions = failedCrewExecs.map(ce => ({
+      id: ce.id,
+      crew_id: ce.crewId,
+      initial_input: ce.initialInput,
+      created_at: ce.createdAt.toISOString(),
+      crew_name: ce.crew?.name
+    }));
 
     res.json({
       runningAgentExecutions,
@@ -7164,46 +7305,100 @@ app.get('/api/task-control', (req, res) => {
   }
 });
 
-app.post('/api/task-control/jobs/:id/cancel', (req, res) => {
+app.post('/api/task-control/jobs/:id/cancel', async (req, res) => {
   const jobId = Number(req.params.id);
   if (!Number.isFinite(jobId)) return res.status(400).json({ error: 'Invalid job id' });
-  const row = db.prepare('SELECT id, status FROM job_queue WHERE id = ?').get(jobId) as any;
+  const prisma = getPrisma();
+  const row = await prisma.orchestratorJobQueue.findUnique({ where: { id: jobId } });
   if (!row) return res.status(404).json({ error: 'Job not found' });
   if (row.status !== 'pending') return res.status(409).json({ error: 'Only pending jobs can be canceled' });
+  
+  await prisma.orchestratorJobQueue.update({
+    where: { id: jobId },
+    data: { status: 'canceled', error: 'Canceled by user', finishedAt: new Date() }
+  });
+  
+  // Mirror to SQLite
   db.prepare("UPDATE job_queue SET status = 'canceled', error = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?")
     .run('Canceled by user', jobId);
   res.json({ success: true });
 });
 
-app.post('/api/task-control/stop-running-agents', (req, res) => {
-  const running = db.prepare("SELECT id, agent_id FROM agent_executions WHERE status = 'running'").all() as any[];
+app.post('/api/task-control/stop-running-agents', async (req, res) => {
+  const prisma = getPrisma();
+  const running = await prisma.orchestratorAgentExecution.findMany({
+    where: { status: 'running' },
+    select: { id: true, agentId: true }
+  });
   for (const exec of running) {
     const token = getCancelToken(agentCancelTokens, Number(exec.id));
     token.canceled = true;
     token.reason = 'Canceled by user (bulk stop)';
   }
-  const canceled = db.prepare("UPDATE agent_executions SET status = 'canceled' WHERE status = 'running'").run().changes;
+  
+  const updateResult = await prisma.orchestratorAgentExecution.updateMany({
+    where: { status: 'running' },
+    data: { status: 'canceled' }
+  });
+  await prisma.orchestratorAgent.updateMany({
+    where: { status: 'running' },
+    data: { status: 'idle' }
+  });
+
+  // Mirror to SQLite
+  db.prepare("UPDATE agent_executions SET status = 'canceled' WHERE status = 'running'").run();
   db.prepare("UPDATE agents SET status = 'idle' WHERE status = 'running'").run();
-  res.json({ success: true, canceled_running_executions: canceled });
+  
+  res.json({ success: true, canceled_running_executions: updateResult.count });
 });
 
-app.post('/api/task-control/stop-running-crews', (req, res) => {
-  const running = db.prepare("SELECT id FROM crew_executions WHERE status = 'running'").all() as any[];
+app.post('/api/task-control/stop-running-crews', async (req, res) => {
+  const prisma = getPrisma();
+  const running = await prisma.orchestratorCrewExecution.findMany({
+    where: { status: 'running' },
+    select: { id: true }
+  });
   for (const exec of running) {
     const token = getCancelToken(crewCancelTokens, Number(exec.id));
     token.canceled = true;
     token.reason = 'Canceled by user (bulk stop)';
+    
+    await prisma.orchestratorCrewExecutionLog.create({
+      data: {
+        executionId: Number(exec.id),
+        type: 'canceled',
+        payload: JSON.stringify({ message: 'Canceled by user (bulk stop)' })
+      }
+    });
+    
+    // Mirror to SQLite
     db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
       .run(Number(exec.id), 'canceled', JSON.stringify({ message: 'Canceled by user (bulk stop)' }));
   }
-  const canceled = db.prepare("UPDATE crew_executions SET status = 'canceled' WHERE status = 'running'").run().changes;
-  res.json({ success: true, canceled_running_executions: canceled });
+  
+  const updateResult = await prisma.orchestratorCrewExecution.updateMany({
+    where: { status: 'running' },
+    data: { status: 'canceled' }
+  });
+  
+  // Mirror to SQLite
+  db.prepare("UPDATE crew_executions SET status = 'canceled' WHERE status = 'running'").run();
+  
+  res.json({ success: true, canceled_running_executions: updateResult.count });
 });
 
-app.post('/api/task-control/cancel-pending-jobs', (req, res) => {
-  const canceled = db.prepare("UPDATE job_queue SET status = 'canceled', error = ?, finished_at = CURRENT_TIMESTAMP WHERE status = 'pending'")
-    .run('Canceled by user (bulk stop)').changes;
-  res.json({ success: true, canceled_pending_jobs: canceled });
+app.post('/api/task-control/cancel-pending-jobs', async (req, res) => {
+  const prisma = getPrisma();
+  const updateResult = await prisma.orchestratorJobQueue.updateMany({
+    where: { status: 'pending' },
+    data: { status: 'canceled', error: 'Canceled by user (bulk stop)', finishedAt: new Date() }
+  });
+  
+  // Mirror to SQLite
+  db.prepare("UPDATE job_queue SET status = 'canceled', error = ?, finished_at = CURRENT_TIMESTAMP WHERE status = 'pending'")
+    .run('Canceled by user (bulk stop)');
+    
+  res.json({ success: true, canceled_pending_jobs: updateResult.count });
 });
 
 app.get('/api/agent-executions/:id/stream', async (req, res) => {
@@ -7404,13 +7599,27 @@ function scheduleRetention() {
   const runCleanup = async () => {
     const now = Date.now();
     if (Number.isFinite(localDays) && localDays > 0) {
-      const cutoff = new Date(now - localDays * 24 * 60 * 60 * 1000).toISOString();
+      const cutoffDate = new Date(now - localDays * 24 * 60 * 60 * 1000);
+      const cutoffIso = cutoffDate.toISOString();
       try {
-        db.prepare("DELETE FROM crew_execution_logs WHERE timestamp < ?").run(cutoff);
-        db.prepare("DELETE FROM crew_executions WHERE created_at < ? AND status != 'running'").run(cutoff);
-        db.prepare("DELETE FROM agent_executions WHERE created_at < ? AND status != 'running'").run(cutoff);
-        db.prepare("DELETE FROM tool_executions WHERE created_at < ? AND status != 'running'").run(cutoff);
-        db.prepare("DELETE FROM job_queue WHERE finished_at < ? AND status != 'running'").run(cutoff);
+        const prisma = getPrisma();
+        // Prune PostgreSQL (Primary)
+        await prisma.orchestratorCrewExecutionLog.deleteMany({ where: { timestamp: { lt: cutoffDate } } });
+        await prisma.orchestratorCrewExecution.deleteMany({ where: { createdAt: { lt: cutoffDate }, status: { not: 'running' } } });
+        await prisma.orchestratorAgentExecution.deleteMany({ where: { createdAt: { lt: cutoffDate }, status: { not: 'running' } } });
+        await prisma.orchestratorToolExecution.deleteMany({ where: { createdAt: { lt: cutoffDate }, status: { not: 'running' } } });
+        await prisma.orchestratorJobQueue.deleteMany({ where: { startedAt: { lt: cutoffDate }, status: { notIn: ['pending', 'running'] } } });
+
+        // Prune SQLite (Legacy Mirror)
+        try {
+          db.prepare("DELETE FROM crew_execution_logs WHERE timestamp < ?").run(cutoffIso);
+          db.prepare("DELETE FROM crew_executions WHERE created_at < ? AND status != 'running'").run(cutoffIso);
+          db.prepare("DELETE FROM agent_executions WHERE created_at < ? AND status != 'running'").run(cutoffIso);
+          db.prepare("DELETE FROM tool_executions WHERE created_at < ? AND status != 'running'").run(cutoffIso);
+          db.prepare("DELETE FROM job_queue WHERE finished_at < ? AND status != 'running'").run(cutoffIso);
+        } catch (sqliteErr) {
+          // Ignore legacy pruning errors if tables don't exist
+        }
       } catch (e) {
         console.error('Local retention cleanup failed:', e);
       }

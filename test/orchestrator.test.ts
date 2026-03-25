@@ -1,9 +1,33 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { app } from '../server';
-import db from '../src/db';
+import db, { initDb } from '../src/db';
+import { getPrisma } from '../src/platform/prisma';
 
-function wipeLocalDb() {
+async function wipeAllDbs() {
+  const prisma = getPrisma();
+  // Wipe Prisma (Primary)
+  await prisma.orchestratorAgentExecution.deleteMany({});
+  await prisma.orchestratorToolExecution.deleteMany({});
+  await prisma.orchestratorJobQueue.deleteMany({});
+  await prisma.orchestratorAgentDelegation.deleteMany({});
+  await prisma.orchestratorAgentTool.deleteMany({});
+  await prisma.orchestratorAgentMcpTool.deleteMany({});
+  await prisma.orchestratorAgentMcpBundle.deleteMany({});
+  await prisma.orchestratorCrewAgent.deleteMany({});
+  await prisma.orchestratorTask.deleteMany({});
+  await prisma.orchestratorAgent.deleteMany({});
+  await prisma.orchestratorCrew.deleteMany({});
+  await prisma.orchestratorTool.deleteMany({});
+  await prisma.orchestratorCredential.deleteMany({});
+  await prisma.orchestratorLlmProvider.deleteMany({});
+  await prisma.modelPricing.deleteMany({});
+  await prisma.orchestratorProjectLink.deleteMany({});
+  await prisma.orchestratorProject.deleteMany({});
+  await prisma.orchestratorSetting.deleteMany({});
+
+  // Wipe and Init SQLite (Mirror)
+  initDb();
   const tx = db.transaction(() => {
     db.pragma('foreign_keys = OFF');
     const tables = [
@@ -33,7 +57,7 @@ function wipeLocalDb() {
       'settings',
     ];
     for (const table of tables) {
-      db.prepare(`DELETE FROM ${table}`).run();
+      try { db.prepare(`DELETE FROM ${table}`).run(); } catch {}
     }
     db.pragma('foreign_keys = ON');
   });
@@ -41,8 +65,8 @@ function wipeLocalDb() {
 }
 
 describe.sequential('orchestrator local APIs', () => {
-  beforeEach(() => {
-    wipeLocalDb();
+  beforeEach(async () => {
+    await wipeAllDbs();
   });
 
   it('supports providers, credentials, pricing, and projects CRUD', async () => {
