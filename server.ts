@@ -5947,7 +5947,6 @@ async function runAgent(
           } catch (e) {
             console.warn('Failed to get bundle exposure status from SQLite:', e.message);
           }
-          }
 
           for (const mcpTool of directMcpTools) {
             scopedTools.push({
