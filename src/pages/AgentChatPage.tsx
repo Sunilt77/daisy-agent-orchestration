@@ -1,5 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { MessageSquare, Plus, Send, Bot, User, Loader2, GitBranch, ExternalLink, Search, Sparkles, Activity } from 'lucide-react';
+import {
+  MessageSquare, Plus, Send, Bot, User, Loader2, GitBranch, ExternalLink,
+  Search, Sparkles, Activity, CheckCircle2, XCircle, Clock, AlertTriangle,
+  ChevronDown, ChevronRight, Zap, Network, ArrowRight,
+} from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { loadPersisted, savePersisted } from '../utils/persistence';
 
@@ -23,7 +27,23 @@ type TraceEvent = {
   status?: string;
   execution_id?: number | null;
 };
-type ChatMessage = { role: 'user' | 'assistant'; content: string; ts?: string; debug?: MessageDebug; trace?: TraceEvent[] };
+type DelegationStatus = {
+  agentId: number;
+  agentName: string;
+  role: 'delegate' | 'synthesis';
+  title: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'canceled' | string;
+  result?: string;
+  error?: string;
+  executionId?: number | null;
+};
+type LiveDelegation = {
+  parentExecutionId: number;
+  supervisorStatus: string;
+  delegates: DelegationStatus[];
+  startedAt: number;
+};
+type ChatMessage = { role: 'user' | 'assistant'; content: string; ts?: string; debug?: MessageDebug; trace?: TraceEvent[]; delegation?: LiveDelegation };
 type DebugUsage = { prompt_tokens?: number; completion_tokens?: number; cost?: number } | null;
 type DebugStep = { stage?: string; status?: string; duration_ms?: number; error?: string | null; at?: string };
 type MessageDebug = {
@@ -73,17 +93,214 @@ function appendToolSnapshotTrace(existing: TraceEvent[], tools: any[]): TraceEve
   return [...base, ...mapped];
 }
 
-function summarizeDelegationTrace(delegations: any[]): TraceEvent[] {
-  return (Array.isArray(delegations) ? delegations : []).map((delegation: any) => ({
-    type: 'delegation',
-    message: `${delegation.role === 'synthesis' ? 'synthesis' : 'delegate'}:${delegation.title || delegation.agent_name || delegation.agent_id} • ${delegation.status || 'unknown'}`,
-    agent: delegation.agent_name || `Agent ${delegation.agent_id}`,
-    status: delegation.status || 'unknown',
-    result: delegation.result || delegation.error || '',
-    execution_id: delegation.child_execution_id ? Number(delegation.child_execution_id) : null,
-  }));
+function parseDelegationsToLive(delegations: any[], parentExecutionId: number, supervisorStatus: string): LiveDelegation {
+  return {
+    parentExecutionId,
+    supervisorStatus,
+    startedAt: Date.now(),
+    delegates: (Array.isArray(delegations) ? delegations : []).map((d: any) => ({
+      agentId: Number(d.agent_id || 0),
+      agentName: d.agent_name || `Agent ${d.agent_id}`,
+      role: d.role === 'synthesis' ? 'synthesis' : 'delegate',
+      title: d.title || d.agent_name || `Agent ${d.agent_id}`,
+      status: d.status || 'queued',
+      result: d.result || undefined,
+      error: d.error || undefined,
+      executionId: d.child_execution_id ? Number(d.child_execution_id) : null,
+    })),
+  };
 }
 
+// ─── Delegation Tree Visualizer ───────────────────────────────────────────────
+function DelegationStatusIcon({ status }: { status: string }) {
+  if (status === 'completed') return <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />;
+  if (status === 'failed') return <XCircle size={14} className="text-red-500 shrink-0" />;
+  if (status === 'canceled') return <AlertTriangle size={14} className="text-amber-500 shrink-0" />;
+  if (status === 'running') return <Loader2 size={14} className="text-brand-400 animate-spin shrink-0" />;
+  return <Clock size={14} className="text-slate-400 shrink-0" />;
+}
+
+function DelegateCard({ d, idx }: { d: DelegationStatus; idx: number; key?: React.Key }) {
+  const [open, setOpen] = useState(false);
+  const isSynth = d.role === 'synthesis';
+  const statusColor =
+    d.status === 'completed' ? 'border-emerald-500/40 bg-emerald-500/5' :
+    d.status === 'failed' ? 'border-red-500/40 bg-red-500/5' :
+    d.status === 'canceled' ? 'border-amber-500/30 bg-amber-500/5' :
+    d.status === 'running' ? 'border-brand-500/50 bg-brand-500/5 shadow-[0_0_16px_rgba(99,102,241,0.12)]' :
+    'border-slate-600/30 bg-slate-800/20';
+
+  return (
+    <div
+      className={`rounded-xl border px-3 py-2.5 transition-all duration-300 ${statusColor}`}
+      style={{ animationDelay: `${idx * 80}ms` }}
+    >
+      <div className="flex items-center gap-2">
+        <DelegationStatusIcon status={d.status} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5 min-w-0">
+            {isSynth && <Sparkles size={11} className="text-violet-400 shrink-0" />}
+            <span className="text-[12px] font-bold text-white truncate">{d.title}</span>
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-widest shrink-0 ${
+              isSynth ? 'bg-violet-500/20 text-violet-300' : 'bg-slate-700/50 text-slate-400'
+            }`}>
+              {isSynth ? 'synthesis' : 'delegate'}
+            </span>
+          </div>
+          <div className="text-[11px] text-slate-400 mt-0.5 font-semibold truncate">{d.agentName}</div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {d.executionId && (
+            <Link
+              to={`/agent-executions/${d.executionId}`}
+              className="text-[10px] text-brand-400 hover:text-brand-300 font-mono flex items-center gap-1"
+            >
+              <ExternalLink size={10} /> #{d.executionId}
+            </Link>
+          )}
+          {(d.result || d.error) && (
+            <button onClick={() => setOpen((v) => !v)} className="text-slate-500 hover:text-slate-300 transition-colors">
+              {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+            </button>
+          )}
+        </div>
+      </div>
+      {open && (d.result || d.error) && (
+        <div className={`mt-2 rounded-lg p-2 text-[11px] font-mono break-all leading-relaxed max-h-28 overflow-y-auto ${
+          d.error ? 'bg-red-950/40 text-red-300 border border-red-900/30' : 'bg-slate-950/40 text-slate-300 border border-slate-700/30'
+        }`}>
+          {d.error || d.result}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DelegationTree({ delegation, agents }: { delegation: LiveDelegation; agents: Agent[] }) {
+  const done = delegation.delegates.filter((d) => d.status === 'completed' || d.status === 'failed' || d.status === 'canceled').length;
+  const total = delegation.delegates.filter((d) => d.role === 'delegate').length;
+  const synthDone = delegation.delegates.filter((d) => d.role === 'synthesis' && d.status === 'completed').length;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  const supervisorStatus = delegation.supervisorStatus;
+
+  return (
+    <div className="mt-3 rounded-2xl border border-white/10 bg-slate-900/60 backdrop-blur-sm overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-white/10 bg-white/5">
+        <div className="flex items-center gap-2">
+          <Network size={14} className="text-brand-400" />
+          <span className="text-[12px] font-black text-white uppercase tracking-widest">Delegation Tree</span>
+        </div>
+        <div className="flex items-center gap-1.5 ml-auto">
+          <DelegationStatusIcon status={supervisorStatus} />
+          <span className="text-[11px] font-bold text-slate-300 capitalize">{supervisorStatus}</span>
+          <span className="text-[10px] text-slate-500 ml-2 font-mono">exec #{delegation.parentExecutionId}</span>
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      {total > 0 && (
+        <div className="px-4 py-2 border-b border-white/5 bg-black/20">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+              Delegates {done}/{total}
+              {synthDone > 0 && ' · Synthesis ✓'}
+            </span>
+            <span className="text-[11px] font-black text-brand-300">{pct}%</span>
+          </div>
+          <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+            <div
+              className="h-full rounded-full bg-linear-to-r from-brand-500 to-cyan-400 transition-all duration-700 shadow-[0_0_12px_rgba(99,102,241,0.5)]"
+              style={{ width: `${Math.max(4, pct)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Agents */}
+      <div className="p-3 space-y-2 max-h-72 overflow-y-auto">
+        {/* Supervisor row */}
+        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-brand-500/10 border border-brand-500/20">
+          <Zap size={13} className="text-brand-400 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <div className="text-[12px] font-black text-brand-200">Supervisor Agent</div>
+            <div className="text-[11px] text-slate-400">Coordinates and synthesizes results</div>
+          </div>
+          <DelegationStatusIcon status={supervisorStatus} />
+        </div>
+
+        {/* Arrow */}
+        {delegation.delegates.length > 0 && (
+          <div className="flex justify-center py-1">
+            <ArrowRight size={12} className="text-slate-600 rotate-90" />
+          </div>
+        )}
+
+        {/* Delegate + synthesis cards */}
+        {delegation.delegates.map((d, idx) => {
+          const delegateKey = `${d.agentId}-${idx}`;
+          return <DelegateCard key={delegateKey} d={d} idx={idx} />;
+        })}
+
+        {delegation.delegates.length === 0 && (
+          <div className="text-center py-4 text-[12px] text-slate-500">Waiting for delegates to be assigned…</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Trace Event Row ────────────────────────────────────────────────────────
+function TraceRow({ evt }: { evt: any; key?: React.Key }) {
+  if (evt.type === 'tool_call') return (
+    <div className="flex gap-2 text-[11px] border border-indigo-900/40 bg-indigo-950/30 rounded-lg px-2.5 py-1.5">
+      <span className="font-black text-indigo-400 shrink-0">TOOL↗</span>
+      <span className="font-mono text-indigo-200 truncate">{evt.tool}</span>
+      {evt.args && <span className="text-slate-500 truncate">{JSON.stringify(evt.args)}</span>}
+    </div>
+  );
+  if (evt.type === 'tool_result') return (
+    <div className="flex gap-2 text-[11px] border border-emerald-900/40 bg-emerald-950/30 rounded-lg px-2.5 py-1.5">
+      <span className="font-black text-emerald-400 shrink-0">TOOL✓</span>
+      <span className="font-mono text-emerald-200 truncate">{evt.tool}</span>
+      {evt.duration_ms != null && <span className="text-slate-500 ml-auto shrink-0">{evt.duration_ms}ms</span>}
+    </div>
+  );
+  if (evt.type === 'thinking' || evt.type === 'thought') return (
+    <div className="flex gap-2 text-[11px] border border-violet-900/40 bg-violet-950/30 rounded-lg px-2.5 py-1.5">
+      <span className="font-black text-violet-400 shrink-0">THINK</span>
+      <span className="text-slate-300 line-clamp-2">{evt.message}</span>
+    </div>
+  );
+  if (evt.type === 'status') return (
+    <div className="flex gap-2 text-[11px] border border-cyan-900/30 bg-cyan-950/20 rounded-lg px-2.5 py-1.5">
+      <span className="font-black text-cyan-500 shrink-0">INFO</span>
+      <span className="text-slate-300">{evt.message}</span>
+    </div>
+  );
+  if (evt.type === 'timeline') return (
+    <div className="flex gap-2 text-[11px] border border-slate-700/40 bg-slate-800/30 rounded-lg px-2.5 py-1.5">
+      <span className="font-black text-slate-400 shrink-0">STAGE</span>
+      <span className="text-slate-300 flex-1 truncate">{evt.message}</span>
+      {evt.duration_ms != null && <span className="text-slate-500 shrink-0">{evt.duration_ms}ms</span>}
+    </div>
+  );
+  if (evt.type === 'warning') return (
+    <div className="flex gap-2 text-[11px] border border-amber-900/40 bg-amber-950/30 rounded-lg px-2.5 py-1.5">
+      <span className="font-black text-amber-400 shrink-0">WARN</span>
+      <span className="text-slate-300">{evt.message}</span>
+    </div>
+  );
+  if (evt.type === 'error') return (
+    <div className="flex gap-2 text-[11px] border border-red-900/40 bg-red-950/30 rounded-lg px-2.5 py-1.5">
+      <span className="font-black text-red-400 shrink-0">ERR</span>
+      <span className="text-red-300">{evt.message}</span>
+    </div>
+  );
+  return null;
+}
+
+// ─── Main Component ────────────────────────────────────────────────────────
 export default function AgentChatPage() {
   const AGENT_CHAT_UI_KEY = 'agent_chat_ui_state_v1';
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -103,10 +320,17 @@ export default function AgentChatPage() {
   const [stateReady, setStateReady] = useState(false);
   const loadedSessionKeyRef = useRef<string>('');
   const sendingRef = useRef(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     sendingRef.current = sending;
   }, [sending]);
+
+  // Auto-scroll to bottom whenever messages change
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   const selectedAgent = useMemo(
     () => agents.find((a) => a.id === selectedAgentId) ?? null,
@@ -149,13 +373,7 @@ export default function AgentChatPage() {
   useEffect(() => {
     if (!stateReady) return;
     savePersisted(AGENT_CHAT_UI_KEY, {
-      selectedAgentId,
-      selectedSessionId,
-      debugMode,
-      showToolTrace,
-      supervisorMode,
-      delegateAgentIds,
-      draft,
+      selectedAgentId, selectedSessionId, debugMode, showToolTrace, supervisorMode, delegateAgentIds, draft,
     });
   }, [stateReady, selectedAgentId, selectedSessionId, debugMode, showToolTrace, supervisorMode, delegateAgentIds, draft]);
 
@@ -222,14 +440,10 @@ export default function AgentChatPage() {
     const refresh = async () => {
       if (sendingRef.current) return;
       await loadSessions(selectedAgentId, true);
-      if (selectedSessionId) {
-        await loadMessages(selectedAgentId, selectedSessionId, true);
-      }
+      if (selectedSessionId) await loadMessages(selectedAgentId, selectedSessionId, true);
     };
     const onFocus = () => { void refresh(); };
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') void refresh();
-    };
+    const onVisibility = () => { if (document.visibilityState === 'visible') void refresh(); };
     window.addEventListener('focus', onFocus);
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('pageshow', onFocus);
@@ -255,7 +469,6 @@ export default function AgentChatPage() {
     const agentId = selectedAgentId;
     const text = draft.trim();
     if (!agentId || !text || sending) return;
-
     const now = new Date().toISOString();
     setDraft('');
     setSending(true);
@@ -266,117 +479,66 @@ export default function AgentChatPage() {
 
     try {
       if (supervisorMode) {
-        if (!delegateAgentIds.length) {
-          throw new Error('Select at least one delegate agent for supervisor mode');
-        }
+        if (!delegateAgentIds.length) throw new Error('Select at least one delegate agent for supervisor mode');
         const kickoffRes = await fetch(`/api/agents/${agentId}/delegate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            task: text,
-            delegate_agent_ids: delegateAgentIds,
-            synthesize: true,
-            wait: false,
-          }),
+          body: JSON.stringify({ task: text, delegate_agent_ids: delegateAgentIds, synthesize: true, wait: false }),
         });
         const kickoffData = await safeJson(kickoffRes) as any;
-        if (!kickoffRes.ok) {
-          throw new Error(kickoffData?.error || `Supervisor launch failed (HTTP ${kickoffRes.status})`);
-        }
+        if (!kickoffRes.ok) throw new Error(kickoffData?.error || `Supervisor launch failed (HTTP ${kickoffRes.status})`);
         const parentExecutionId = Number(kickoffData?.parent_execution_id || 0);
-        if (!Number.isFinite(parentExecutionId) || parentExecutionId <= 0) {
-          throw new Error('Supervisor launch did not return a parent execution id');
-        }
+        if (!Number.isFinite(parentExecutionId) || parentExecutionId <= 0) throw new Error('Supervisor launch did not return a parent execution id');
 
-        let liveTrace: TraceEvent[] = [{
-          type: 'status',
-          message: `Supervisor run started with ${delegateAgentIds.length} delegate${delegateAgentIds.length === 1 ? '' : 's'}`,
-          execution_id: parentExecutionId,
-        }];
+        let liveDelegation: LiveDelegation = {
+          parentExecutionId,
+          supervisorStatus: 'running',
+          delegates: delegateAgentIds.map((id) => {
+            const a = agents.find((ag) => ag.id === id);
+            return { agentId: id, agentName: a?.name || `Agent ${id}`, role: 'delegate', title: a?.name || `Agent ${id}`, status: 'queued' };
+          }),
+          startedAt: Date.now(),
+        };
+
         const updateAssistantMessage = (updater: (m: ChatMessage) => ChatMessage) => {
           setMessages((prev) => prev.map((m) => (m.ts === assistantTs && m.role === 'assistant' ? updater(m) : m)));
         };
-        updateAssistantMessage((m) => ({ ...m, trace: liveTrace, content: `Supervisor run started. Execution #${parentExecutionId}` }));
+        updateAssistantMessage((m) => ({ ...m, delegation: liveDelegation, content: `Supervisor run started. Execution #${parentExecutionId}` }));
 
-        await new Promise<void>((resolve, reject) => {
+        await new Promise<void>((resolve) => {
           const es = new EventSource(`/api/agent-executions/${parentExecutionId}/stream`);
           es.addEventListener('update', (event: MessageEvent) => {
             try {
               const payload = JSON.parse(String(event.data || '{}'));
-              const delegationTrace = summarizeDelegationTrace(payload?.delegations || []);
-              const toolTrace = appendToolSnapshotTrace([], payload?.tools || []);
-              liveTrace = [
-                {
-                  type: 'status',
-                  message: `Supervisor execution #${parentExecutionId} is ${payload?.execution?.status || 'running'}`,
-                  execution_id: parentExecutionId,
-                  status: payload?.execution?.status || 'running',
-                },
-                ...delegationTrace,
-                ...toolTrace,
-              ];
-              const latestDelegation = delegationTrace[delegationTrace.length - 1];
+              liveDelegation = parseDelegationsToLive(
+                payload?.delegations || [],
+                parentExecutionId,
+                payload?.execution?.status || 'running',
+              );
               updateAssistantMessage((m) => ({
                 ...m,
-                trace: liveTrace,
-                content: latestDelegation?.message
-                  ? `Supervisor progress: ${latestDelegation.message}`
-                  : `Supervisor execution #${parentExecutionId} is ${payload?.execution?.status || 'running'}`,
+                delegation: { ...liveDelegation },
+                content: `Coordinating ${liveDelegation.delegates.length} agents… Execution #${parentExecutionId}`,
               }));
-            } catch {
-              // ignore malformed snapshots
-            }
+            } catch { /* ignore */ }
           });
-          es.addEventListener('done', () => {
-            es.close();
-            resolve();
-          });
-          es.addEventListener('error', () => {
-            es.close();
-            resolve();
-          });
+          es.addEventListener('done', () => { es.close(); resolve(); });
+          es.addEventListener('error', () => { es.close(); resolve(); });
         });
 
         const tRes = await fetch(`/api/agent-executions/${parentExecutionId}/timeline`);
         const tData = await safeJson(tRes) as any;
-        const timelineRows: any[] = Array.isArray(tData?.timeline) ? tData.timeline : [];
         const delegationRows: any[] = Array.isArray(tData?.delegations) ? tData.delegations : [];
         const executionStatus = String(tData?.execution?.status || 'unknown');
         const finalReply = String(tData?.execution?.output || `Supervisor execution #${parentExecutionId} finished with status ${executionStatus}.`);
-        liveTrace = [
-          {
-            type: 'status',
-            message: `Supervisor execution #${parentExecutionId} finished with status ${executionStatus}`,
-            execution_id: parentExecutionId,
-            status: executionStatus,
-          },
-          ...summarizeDelegationTrace(delegationRows),
-          ...timelineRows.map((s: any) => ({
-            type: 'timeline',
-            message: `${s.stage || 'stage'} • ${s.status || 'unknown'}`,
-            duration_ms: s.duration_ms,
-            status: s.status,
-            execution_id: s.child_execution_id ? Number(s.child_execution_id) : parentExecutionId,
-          })),
-        ];
-        const debug: MessageDebug | undefined = (debugMode || showToolTrace)
-          ? {
-              executionId: parentExecutionId,
-              status: executionStatus,
-              usage: {
-                prompt_tokens: Number(tData?.execution?.prompt_tokens || 0),
-                completion_tokens: Number(tData?.execution?.completion_tokens || 0),
-                cost: Number(tData?.execution?.total_cost || 0),
-              },
-              timeline: timelineRows,
-            }
-          : undefined;
-        updateAssistantMessage((m) => ({
-          ...m,
-          content: finalReply,
-          trace: liveTrace,
-          debug,
-        }));
+        const finalDelegation = parseDelegationsToLive(delegationRows, parentExecutionId, executionStatus);
+        const debug: MessageDebug | undefined = (debugMode || showToolTrace) ? {
+          executionId: parentExecutionId,
+          status: executionStatus,
+          usage: { prompt_tokens: Number(tData?.execution?.prompt_tokens || 0), completion_tokens: Number(tData?.execution?.completion_tokens || 0), cost: Number(tData?.execution?.total_cost || 0) },
+          timeline: Array.isArray(tData?.timeline) ? tData.timeline : [],
+        } : undefined;
+        updateAssistantMessage((m) => ({ ...m, content: finalReply, delegation: finalDelegation, debug }));
         return;
       }
 
@@ -384,18 +546,12 @@ export default function AgentChatPage() {
         const fallbackRes = await fetch(`/api/agents/${agentId}/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message: text,
-            session_id: selectedSessionId || undefined,
-          }),
+          body: JSON.stringify({ message: text, session_id: selectedSessionId || undefined }),
         });
         const raw = await fallbackRes.text();
         let data: any = null;
         try { data = raw ? JSON.parse(raw) : null; } catch { data = null; }
-        if (!fallbackRes.ok) {
-          const detail = data?.error || raw || `Chat failed (HTTP ${fallbackRes.status})`;
-          throw new Error(detail);
-        }
+        if (!fallbackRes.ok) throw new Error(data?.error || raw || `Chat failed (HTTP ${fallbackRes.status})`);
         const reply = String(data?.reply || '');
         const trace: TraceEvent[] = Array.isArray(data?.logs) ? data.logs : [];
         const execId = Number(data?.execution_id || 0);
@@ -404,43 +560,22 @@ export default function AgentChatPage() {
           try {
             const tRes = await fetch(`/api/agent-executions/${execId}/timeline`);
             const tData = await safeJson(tRes) as any;
-            const timelineRows: any[] = Array.isArray(tData?.timeline) ? tData.timeline : [];
-            debug = {
-              executionId: execId,
-              status: String(tData?.execution?.status || 'unknown'),
-              usage: data?.usage || null,
-              timeline: timelineRows,
-            };
-          } catch {
-            debug = { executionId: execId, status: 'unknown', usage: data?.usage || null, timeline: [] };
-          }
+            debug = { executionId: execId, status: String(tData?.execution?.status || 'unknown'), usage: data?.usage || null, timeline: Array.isArray(tData?.timeline) ? tData.timeline : [] };
+          } catch { debug = { executionId: execId, status: 'unknown', usage: data?.usage || null, timeline: [] }; }
         }
-        setMessages((prev) => prev.map((m) => (m.ts === assistantTs && m.role === 'assistant'
-          ? { ...m, content: reply || 'No response.', debug, trace }
-          : m)));
+        setMessages((prev) => prev.map((m) => (m.ts === assistantTs && m.role === 'assistant' ? { ...m, content: reply || 'No response.', debug, trace } : m)));
         if (data?.session_id) setSelectedSessionId(String(data.session_id));
       };
 
       const res = await fetch(`/api/agents/${agentId}/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: text,
-          session_id: selectedSessionId || undefined,
-        }),
+        body: JSON.stringify({ message: text, session_id: selectedSessionId || undefined }),
       });
-      if (res.status === 404) {
-        await runLegacyChat();
-        await loadSessions(agentId);
-        return;
-      }
-      if (!res.ok) {
-        const data = await safeJson(res);
-        const detail = data?.error || `Chat failed (HTTP ${res.status})`;
-        throw new Error(detail);
-      }
-
+      if (res.status === 404) { await runLegacyChat(); await loadSessions(agentId); return; }
+      if (!res.ok) { const data = await safeJson(res); throw new Error(data?.error || `Chat failed (HTTP ${res.status})`); }
       if (!res.body) throw new Error('Streaming not supported by this browser');
+
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -480,35 +615,20 @@ export default function AgentChatPage() {
                   const payload = JSON.parse(String(e.data || '{}'));
                   liveTrace = appendToolSnapshotTrace(liveTrace, payload?.tools || []);
                   updateAssistantMessage((m) => ({ ...m, trace: liveTrace, content: 'Working on it…' }));
-                } catch {
-                  // ignore malformed snapshots
-                }
+                } catch { /* ignore */ }
               });
-              execStream.addEventListener('done', () => {
-                execStream?.close();
-                execStream = null;
-              });
-              execStream.addEventListener('error', () => {
-                execStream?.close();
-                execStream = null;
-              });
+              execStream.addEventListener('done', () => { execStream?.close(); execStream = null; });
+              execStream.addEventListener('error', () => { execStream?.close(); execStream = null; });
             }
             liveTrace = [...liveTrace, evt.data || {}];
             updateAssistantMessage((m) => ({ ...m, trace: liveTrace, content: 'Working on it…' }));
             continue;
           }
-          if (evt.event === 'done') {
-            finalData = evt.data || {};
-            continue;
-          }
-          if (evt.event === 'error') {
-            throw new Error(evt.data?.error || 'Chat failed');
-          }
+          if (evt.event === 'done') { finalData = evt.data || {}; continue; }
+          if (evt.event === 'error') throw new Error(evt.data?.error || 'Chat failed');
         }
       }
-      if (execStream) {
-        execStream.close();
-      }
+      if (execStream) execStream.close();
 
       const reply = String(finalData?.reply || '');
       const execId = Number(finalData?.execution_id || 0);
@@ -527,15 +647,8 @@ export default function AgentChatPage() {
               status: s.status,
             }));
           }
-          debug = {
-            executionId: execId,
-            status: String(tData?.execution?.status || 'unknown'),
-            usage: finalData?.usage || null,
-            timeline: timelineRows,
-          };
-        } catch {
-          debug = { executionId: execId, status: 'unknown', usage: finalData?.usage || null, timeline: [] };
-        }
+          debug = { executionId: execId, status: String(tData?.execution?.status || 'unknown'), usage: finalData?.usage || null, timeline: timelineRows };
+        } catch { debug = { executionId: execId, status: 'unknown', usage: finalData?.usage || null, timeline: [] }; }
       }
       updateAssistantMessage((m) => ({ ...m, content: reply || 'No response.', debug, trace: liveTrace }));
       if (finalData?.session_id) setSelectedSessionId(String(finalData.session_id));
@@ -550,40 +663,47 @@ export default function AgentChatPage() {
   };
 
   return (
-    <div className="space-y-4 h-[calc(100vh-9.5rem)] flex flex-col">
-      <div className="swarm-hero p-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-            <Sparkles size={12} />
-            Conversation Runtime
+    <div className="space-y-4 h-[calc(100vh-6rem)] flex flex-col">
+      {/* Hero header */}
+      <div className="swarm-hero p-6 shrink-0">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
+              <Sparkles size={12} />
+              Conversation Runtime
+            </div>
+            <h1 className="text-3xl font-black text-white">Agent Chat</h1>
+            <p className="text-slate-300 mt-1 text-sm">Live conversations, delegated runs, and real-time delegation trees.</p>
           </div>
-          <h1 className="text-3xl font-black text-white">Agent Chat</h1>
-          <p className="text-slate-300 mt-1">Live conversations, delegated runs, and execution traces in one console.</p>
+          <div className="hidden md:flex items-center gap-3">
+            <div className="telemetry-tile px-4 py-3 min-w-[120px]">
+              <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Delegates</div>
+              <div className="mt-1 text-2xl font-black text-white">{delegateAgentIds.length}</div>
+            </div>
+            <div className="telemetry-tile px-4 py-3 min-w-[120px]">
+              <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Sessions</div>
+              <div className="mt-1 text-2xl font-black text-white">{sessions.length}</div>
+            </div>
+            <div className="telemetry-tile px-4 py-3 min-w-[120px]">
+              <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Messages</div>
+              <div className="mt-1 text-2xl font-black text-white">{messages.length}</div>
+            </div>
+          </div>
         </div>
-        <div className="hidden md:flex items-center gap-3">
-          <div className="telemetry-tile px-4 py-3 min-w-[140px]">
-            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Delegates</div>
-            <div className="mt-1 text-2xl font-black text-white">{delegateAgentIds.length}</div>
-          </div>
-          <div className="telemetry-tile px-4 py-3 min-w-[140px]">
-            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Sessions</div>
-            <div className="mt-1 text-2xl font-black text-white">{sessions.length}</div>
-          </div>
-        </div>
-      </div>
       </div>
 
+      {/* Main layout */}
       <div className="grid grid-cols-12 gap-4 flex-1 min-h-0 overflow-hidden">
-        <section className="col-span-12 lg:col-span-4 xl:col-span-3 panel-chrome bg-white/85 rounded-2xl border border-slate-200 p-4 flex flex-col min-h-0">
+        {/* Sidebar */}
+        <section className="col-span-12 lg:col-span-3 xl:col-span-3 panel-chrome bg-white/85 rounded-2xl border border-slate-200 p-4 flex flex-col min-h-0 overflow-hidden">
           <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Agent</label>
           <div className="relative mt-2">
-            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               value={agentSearch}
               onChange={(e) => setAgentSearch(e.target.value)}
               placeholder="Search agents..."
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 pl-9 text-sm"
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 pl-8 text-sm"
             />
           </div>
           <select
@@ -597,14 +717,15 @@ export default function AgentChatPage() {
           </select>
 
           <button
-            className="mt-3 w-full flex items-center justify-center gap-2 rounded-lg bg-indigo-600 text-white text-sm px-3 py-2 hover:bg-indigo-700"
+            className="mt-3 w-full flex items-center justify-center gap-2 rounded-lg bg-indigo-600 text-white text-sm px-3 py-2 hover:bg-indigo-700 transition-colors"
             onClick={startNewChat}
           >
             <Plus size={14} /> New Chat
           </button>
 
-          <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
-            <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+          {/* Supervisor mode */}
+          <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 shrink-0">
+            <label className="flex items-center gap-2 text-sm font-medium text-slate-700 cursor-pointer">
               <input
                 type="checkbox"
                 className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
@@ -614,32 +735,28 @@ export default function AgentChatPage() {
               <GitBranch size={14} className="text-violet-600" />
               Supervisor Mode
             </label>
-            <p className="mt-2 text-xs text-slate-500">
-              When enabled, the selected agent coordinates delegate agents in the background and streams their progress here.
+            <p className="mt-1.5 text-xs text-slate-500 leading-relaxed">
+              Master agent delegates to specialists. Live tree shown in chat.
             </p>
             {supervisorMode && (
-              <div className="mt-3 rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-700">
-                {delegateAgentIds.length
-                  ? `${delegateAgentIds.length} delegates selected for the next supervisor run.`
-                  : 'Select delegate agents to activate supervisor mode.'}
+              <div className="mt-2 rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-1.5 text-xs text-violet-700 font-semibold">
+                {delegateAgentIds.length ? `${delegateAgentIds.length} delegate${delegateAgentIds.length > 1 ? 's' : ''} selected` : 'Select delegate agents below'}
               </div>
             )}
             {supervisorMode && (
-              <div className="mt-3 space-y-2 max-h-56 overflow-y-auto pr-1">
-                {!delegateCandidates.length && (
-                  <div className="text-xs text-slate-500">Create more agents to use delegation.</div>
-                )}
+              <div className="mt-3 space-y-1.5 max-h-48 overflow-y-auto pr-0.5">
+                {!delegateCandidates.length && <div className="text-xs text-slate-500">Create more agents to use delegation.</div>}
                 {delegateCandidates.map((agent) => (
-                  <label key={agent.id} className="flex items-start gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs cursor-pointer">
+                  <label key={agent.id} className="flex items-start gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs cursor-pointer hover:bg-indigo-50 hover:border-indigo-200 transition-colors">
                     <input
                       type="checkbox"
-                      className="mt-0.5 w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      className="mt-0.5 w-3.5 h-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                       checked={delegateAgentIds.includes(agent.id)}
                       onChange={() => toggleDelegateAgent(agent.id)}
                     />
                     <div className="min-w-0">
-                      <div className="font-semibold text-slate-800">{agent.name}</div>
-                      <div className="text-slate-500">{agent.role || 'Delegate agent'}</div>
+                      <div className="font-semibold text-slate-800 truncate">{agent.name}</div>
+                      <div className="text-slate-500 truncate">{agent.role || 'Specialist'}</div>
                     </div>
                   </label>
                 ))}
@@ -647,194 +764,201 @@ export default function AgentChatPage() {
             )}
           </div>
 
-          <div className="mt-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">History</div>
-          <div className="mt-2 space-y-2 flex-1 min-h-0 overflow-y-auto pr-1">
-            {loading && <div className="text-xs text-slate-500">Loading…</div>}
-            {!loading && sessions.length === 0 && <div className="text-xs text-slate-500">No saved chats yet.</div>}
+          {/* Session history */}
+          <div className="mt-4 text-xs font-semibold text-slate-500 uppercase tracking-wider shrink-0">History</div>
+          <div className="mt-2 space-y-1.5 flex-1 min-h-0 overflow-y-auto pr-0.5">
+            {loading && <div className="text-xs text-slate-500 text-center py-4">Loading…</div>}
+            {!loading && sessions.length === 0 && <div className="text-xs text-slate-500 text-center py-4">No saved chats yet.</div>}
             {sessions.map((s) => (
               <button
                 key={s.id}
                 onClick={() => selectedAgentId && loadMessages(selectedAgentId, s.id)}
-                className={`w-full text-left rounded-lg border px-3 py-2 ${
-                  selectedSessionId === s.id ? 'border-indigo-300 bg-indigo-50' : 'border-slate-200 bg-white hover:bg-slate-50'
+                className={`w-full text-left rounded-lg border px-3 py-2 transition-colors ${
+                  selectedSessionId === s.id ? 'border-indigo-300 bg-indigo-50 text-indigo-900' : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-800'
                 }`}
               >
-                <div className="text-xs font-semibold text-slate-800 truncate">{s.user_id || s.id.slice(0, 12)}</div>
-                <div className="text-xs text-slate-500 truncate mt-1">{s.preview || 'No preview'}</div>
-                <div className="text-[11px] text-slate-400 mt-1">{s.message_count || 0} messages</div>
+                <div className="text-xs font-semibold truncate">{s.user_id || s.id.slice(0, 12)}</div>
+                <div className="text-xs text-slate-500 truncate mt-0.5">{s.preview || 'No preview'}</div>
+                <div className="text-[10px] text-slate-400 mt-0.5">{s.message_count || 0} messages</div>
               </button>
             ))}
           </div>
         </section>
 
-        <section className="col-span-12 lg:col-span-8 xl:col-span-9 panel-chrome bg-white/85 rounded-2xl border border-slate-200 p-4 flex flex-col min-h-0 overflow-hidden">
-          <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-200">
-            <div className="flex items-center gap-2 min-w-0">
-            <MessageSquare size={16} className="text-indigo-600" />
-            <div className="text-sm font-semibold text-slate-900">{selectedAgent?.name || 'Select an agent'}</div>
-            {selectedSessionId && <div className="text-xs text-slate-500">Session: {selectedSessionId}</div>}
-            {supervisorMode && (
-              <div className="text-xs px-2 py-1 rounded-full bg-violet-100 text-violet-700">
-                Supervisor mode
+        {/* Chat panel */}
+        <section className="col-span-12 lg:col-span-9 xl:col-span-9 panel-chrome bg-white/85 rounded-2xl border border-slate-200 flex flex-col min-h-0 overflow-hidden">
+          {/* Chat header */}
+          <div className="flex items-center justify-between gap-2 px-5 py-3 border-b border-slate-200 shrink-0">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="p-1.5 rounded-lg bg-indigo-100">
+                <MessageSquare size={15} className="text-indigo-600" />
               </div>
-            )}
+              <div className="min-w-0">
+                <div className="text-sm font-bold text-slate-900 truncate">{selectedAgent?.name || 'Select an agent'}</div>
+                {selectedSessionId && <div className="text-[10px] text-slate-400 font-mono truncate">session: {selectedSessionId.slice(0, 20)}…</div>}
+              </div>
+              {supervisorMode && (
+                <div className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 font-bold flex items-center gap-1 shrink-0">
+                  <Network size={11} /> Supervisor
+                </div>
+              )}
+              {sending && (
+                <div className="flex items-center gap-1.5 text-xs text-indigo-600 font-semibold shrink-0">
+                  <Loader2 size={12} className="animate-spin" /> Running…
+                </div>
+              )}
             </div>
             <div className="flex items-center gap-3 shrink-0">
               <div className="hidden md:flex items-center gap-1 text-xs text-slate-500">
                 <Activity size={12} />
-                {messages.length} messages
+                {messages.length} msgs
               </div>
-              <label className="flex items-center gap-2 text-xs text-slate-600">
-                <input
-                  type="checkbox"
-                  className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                  checked={showToolTrace}
-                  onChange={(e) => setShowToolTrace(e.target.checked)}
-                />
+              <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
+                <input type="checkbox" className="w-3.5 h-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" checked={showToolTrace} onChange={(e) => setShowToolTrace(e.target.checked)} />
                 Tool Trace
               </label>
-              <label className="flex items-center gap-2 text-xs text-slate-600">
-                <input
-                  type="checkbox"
-                  className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                  checked={debugMode}
-                  onChange={(e) => setDebugMode(e.target.checked)}
-                />
-                Debug Inference
+              <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
+                <input type="checkbox" className="w-3.5 h-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" checked={debugMode} onChange={(e) => setDebugMode(e.target.checked)} />
+                Debug
               </label>
             </div>
           </div>
 
-          <div className="flex-1 min-h-0 overflow-y-auto py-4 space-y-3">
+          {/* Messages area */}
+          <div ref={messagesContainerRef} className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-4 scroll-smooth">
             {messages.length === 0 && (
-              <div className="h-full flex items-center justify-center text-sm text-slate-500">
-                Start a new conversation with {selectedAgent?.name || 'an agent'}.
+              <div className="h-full flex flex-col items-center justify-center gap-3 text-slate-400">
+                <Bot size={36} className="opacity-30" />
+                <div className="text-sm font-semibold">Start a conversation with {selectedAgent?.name || 'an agent'}</div>
+                {supervisorMode && <div className="text-xs text-violet-500 font-medium">Supervisor mode ON · {delegateAgentIds.length} delegate{delegateAgentIds.length !== 1 ? 's' : ''} selected</div>}
               </div>
             )}
             {messages.map((m, idx) => (
-              <div key={`${m.ts || 'm'}-${idx}`} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm border ${
-                  m.role === 'user'
-                    ? 'bg-indigo-600 text-white border-indigo-500'
-                    : 'bg-white text-slate-800 border-slate-200'
-                }`}>
-                  <div className="flex items-center gap-2 text-[11px] opacity-80 mb-1">
-                    {m.role === 'user' ? <User size={12} /> : <Bot size={12} />}
-                    {m.role === 'user' ? 'You' : 'Agent'}
+              <div key={`${m.ts || 'm'}-${idx}`} className={`flex gap-3 ${m.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
+                {/* Avatar */}
+                <div className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-white shadow-lg ${m.role === 'user' ? 'bg-indigo-600' : 'bg-slate-700'}`}>
+                  {m.role === 'user' ? <User size={14} /> : <Bot size={14} />}
+                </div>
+
+                {/* Bubble */}
+                <div className={`flex-1 max-w-[85%] ${m.role === 'user' ? 'items-end flex flex-col' : ''}`}>
+                  {/* Sender label */}
+                  <div className={`text-[10px] font-black uppercase tracking-widest mb-1.5 ${m.role === 'user' ? 'text-indigo-500 text-right' : 'text-slate-500'}`}>
+                    {m.role === 'user' ? 'You' : selectedAgent?.name || 'Agent'}
+                    {m.ts && <span className="font-normal text-slate-400 ml-2 normal-case tracking-normal">{new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>}
                   </div>
-                  <div className="whitespace-pre-wrap">{m.content}</div>
-                  {m.role === 'assistant' && m.debug?.executionId ? (
-                    <div className="mt-2">
-                      <Link
-                        to={`/agent-executions/${m.debug.executionId}`}
-                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-700 hover:text-indigo-900"
-                      >
-                        <ExternalLink size={12} />
-                        Open Execution #{m.debug.executionId}
-                      </Link>
-                    </div>
-                  ) : null}
+
+                  <div className={`rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm ${
+                    m.role === 'user'
+                      ? 'bg-indigo-600 text-white rounded-tr-sm'
+                      : 'bg-white text-slate-800 border border-slate-200 rounded-tl-sm'
+                  }`}>
+                    <div className="whitespace-pre-wrap break-words">{m.content}</div>
+
+                    {/* Execution link */}
+                    {m.role === 'assistant' && m.debug?.executionId && (
+                      <div className="mt-2 pt-2 border-t border-slate-100">
+                        <Link to={`/agent-executions/${m.debug.executionId}`} className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800">
+                          <ExternalLink size={11} /> Execution #{m.debug.executionId}
+                        </Link>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Delegation tree */}
+                  {m.role === 'assistant' && m.delegation && (
+                    <DelegationTree delegation={m.delegation} agents={agents} />
+                  )}
+
+                  {/* Tool trace panel */}
                   {showToolTrace && m.role === 'assistant' && Array.isArray(m.trace) && m.trace.length > 0 && (
-                    <details className="mt-3 rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-slate-700" open>
-                      <summary className="cursor-pointer text-xs font-semibold text-indigo-700">Agent Activity</summary>
-                      <div className="mt-2 space-y-1.5 max-h-44 overflow-y-auto pr-1">
-                        {m.trace.map((evt: any, tidx: number) => (
-                          <div key={`trace-${tidx}`} className="text-[11px] border border-indigo-100 bg-white rounded px-2 py-1.5">
-                            {evt.type === 'tool_call' && (
-                              <div>
-                                <span className="font-semibold text-indigo-700">Tool Call:</span> {evt.tool}
-                                <div className="font-mono text-slate-600 mt-0.5 break-all">{JSON.stringify(evt.args || {})}</div>
-                              </div>
-                            )}
-                            {evt.type === 'tool_result' && (
-                              <div>
-                                <span className="font-semibold text-emerald-700">Tool Result:</span> {evt.tool}
-                                <div className="font-mono text-slate-600 mt-0.5 break-all">{String(evt.result || '')}</div>
-                                {evt.duration_ms != null && <div className="text-[10px] text-slate-500 mt-1">Duration: {evt.duration_ms}ms</div>}
-                              </div>
-                            )}
-                            {evt.type === 'thinking' && <div><span className="font-semibold text-blue-700">Thinking:</span> {evt.message}</div>}
-                            {evt.type === 'thought' && <div><span className="font-semibold text-violet-700">Thought:</span> {evt.message}</div>}
-                            {evt.type === 'status' && <div><span className="font-semibold text-cyan-700">Status:</span> {evt.message}</div>}
-                            {evt.type === 'warning' && <div><span className="font-semibold text-amber-700">Warning:</span> {evt.message}</div>}
-                            {evt.type === 'error' && <div><span className="font-semibold text-red-700">Error:</span> {evt.message}</div>}
-                            {evt.type === 'timeline' && (
-                              <div>
-                                <span className="font-semibold text-slate-700">Stage:</span> {evt.message}
-                                {evt.duration_ms != null && <span className="ml-2 text-[10px] text-slate-500">{evt.duration_ms}ms</span>}
-                              </div>
-                            )}
-                            {evt.type === 'delegation' && (
-                              <div>
-                                <span className="font-semibold text-violet-700">Delegation:</span> {evt.message}
-                                {evt.execution_id ? (
-                                  <Link to={`/agent-executions/${evt.execution_id}`} className="ml-2 text-[10px] text-indigo-700 hover:text-indigo-900">
-                                    open #{evt.execution_id}
-                                  </Link>
-                                ) : null}
-                                {evt.result ? <div className="font-mono text-slate-600 mt-0.5 break-all">{String(evt.result)}</div> : null}
-                              </div>
-                            )}
-                          </div>
-                        ))}
+                    <details className="mt-2 rounded-xl border border-indigo-100 bg-slate-950/90 overflow-hidden" open>
+                      <summary className="cursor-pointer text-[11px] font-black text-indigo-400 uppercase tracking-widest px-3 py-2 flex items-center gap-2 hover:bg-white/5 transition-colors">
+                        <Activity size={11} />
+                        Agent Activity · {m.trace.length} events
+                      </summary>
+                      <div className="px-3 pb-3 pt-1 space-y-1.5 max-h-56 overflow-y-auto">
+                        {m.trace.map((evt: any, tidx: number) => {
+                          const traceKey = `trace-${tidx}`;
+                          return <TraceRow key={traceKey} evt={evt} />;
+                        })}
                       </div>
                     </details>
                   )}
+
+                  {/* Debug panel */}
                   {debugMode && m.role === 'assistant' && m.debug && (
-                    <details className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-slate-700">
-                      <summary className="cursor-pointer text-xs font-semibold text-slate-700">Inference Debug</summary>
-                      <div className="mt-2 text-[11px] space-y-1.5">
-                        <div>Execution: <span className="font-mono">{m.debug.executionId ?? '-'}</span> • Status: <span className="font-semibold">{m.debug.status}</span></div>
+                    <details className="mt-2 rounded-xl border border-slate-200 bg-white overflow-hidden">
+                      <summary className="cursor-pointer text-[11px] font-semibold text-slate-600 px-3 py-2 flex items-center gap-2">
+                        Inference Debug
+                      </summary>
+                      <div className="px-3 pb-3 text-[11px] space-y-1.5">
+                        <div>Execution: <span className="font-mono">{m.debug.executionId ?? '-'}</span> · Status: <span className="font-bold">{m.debug.status}</span></div>
                         <div>
-                          Usage: <span className="font-mono">prompt {Number(m.debug?.usage?.prompt_tokens || 0).toLocaleString()}</span>,{' '}
-                          <span className="font-mono">completion {Number(m.debug?.usage?.completion_tokens || 0).toLocaleString()}</span>,{' '}
-                          <span className="font-mono">cost ${Number(m.debug?.usage?.cost || 0).toFixed(6)}</span>
+                          Tokens: <span className="font-mono">↑{Number(m.debug?.usage?.prompt_tokens || 0).toLocaleString()} ↓{Number(m.debug?.usage?.completion_tokens || 0).toLocaleString()}</span>
+                          {' · '}Cost: <span className="font-mono text-emerald-700">${Number(m.debug?.usage?.cost || 0).toFixed(6)}</span>
                         </div>
-                        <div className="pt-1">
-                          <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Timeline</div>
-                          <div className="space-y-1 max-h-36 overflow-y-auto pr-1">
-                            {(m.debug.timeline || []).map((step: any, sidx: number) => (
-                              <div key={`${step.stage || 'step'}-${sidx}`} className="flex items-center justify-between gap-2 rounded border border-slate-200 bg-white px-2 py-1">
-                                <span className="truncate">{step.stage || 'stage'}</span>
-                                <span className="font-mono text-slate-500">{step.duration_ms != null ? `${step.duration_ms}ms` : step.status || '-'}</span>
-                              </div>
-                            ))}
-                            {(!m.debug.timeline || !m.debug.timeline.length) && (
-                              <div className="text-slate-500">No timeline details available.</div>
-                            )}
+                        {(m.debug.timeline || []).map((step: any, sidx: number) => (
+                          <div key={`${step.stage || 'step'}-${sidx}`} className="flex items-center justify-between gap-2 rounded border border-slate-200 bg-slate-50 px-2 py-1">
+                            <span className="truncate text-slate-700">{step.stage || 'stage'}</span>
+                            <span className="font-mono text-slate-500 shrink-0">{step.duration_ms != null ? `${step.duration_ms}ms` : step.status || '-'}</span>
                           </div>
-                        </div>
+                        ))}
+                        {(!m.debug.timeline || !m.debug.timeline.length) && <div className="text-slate-500">No timeline details.</div>}
                       </div>
                     </details>
                   )}
                 </div>
               </div>
             ))}
+            {/* Auto-scroll anchor */}
+            <div ref={messagesEndRef} />
           </div>
 
-          <div className="pt-3 border-t border-slate-200">
-            {error && <div className="text-xs text-red-600 mb-2">{error}</div>}
-            <div className="flex items-end gap-2">
-              <textarea
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    sendMessage();
-                  }
-                }}
-                placeholder="Type your message... (Shift+Enter for newline)"
-                className="flex-1 min-h-[72px] max-h-44 rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
-              />
+          {/* Input area */}
+          <div className="px-5 py-4 border-t border-slate-200 bg-white/60 backdrop-blur-sm shrink-0">
+            {error && (
+              <div className="flex items-center gap-2 text-xs text-red-600 mb-3 rounded-lg bg-red-50 border border-red-200 px-3 py-2">
+                <XCircle size={13} className="shrink-0" />
+                {error}
+              </div>
+            )}
+            <div className="flex items-end gap-3">
+              <div className="flex-1 relative">
+                <textarea
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+                  }}
+                  placeholder={supervisorMode
+                    ? `Assign a task to "${selectedAgent?.name || 'supervisor'}" with ${delegateAgentIds.length} delegate${delegateAgentIds.length !== 1 ? 's' : ''}… (Shift+Enter for newline)`
+                    : `Message ${selectedAgent?.name || 'agent'}… (Shift+Enter for newline)`}
+                  disabled={sending}
+                  rows={4}
+                  className="w-full rounded-2xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-400 resize-none disabled:opacity-60 min-h-[110px] max-h-64 leading-relaxed transition-all"
+                  style={{ scrollbarWidth: 'thin' }}
+                />
+                {draft.length > 0 && (
+                  <div className="absolute bottom-2 right-3 text-[10px] text-slate-400">{draft.length}</div>
+                )}
+              </div>
               <button
                 onClick={sendMessage}
                 disabled={!draft.trim() || !selectedAgentId || sending || (supervisorMode && !delegateAgentIds.length)}
-                className="h-11 px-4 rounded-xl bg-indigo-600 text-white text-sm disabled:opacity-60 flex items-center gap-2"
+                className="h-14 px-5 rounded-2xl bg-indigo-600 text-white text-sm disabled:opacity-50 flex flex-col items-center justify-center gap-1 hover:bg-indigo-700 active:scale-95 transition-all shadow-lg shadow-indigo-200 font-bold"
               >
-                {sending ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
-                Send
+                {sending ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
+                <span className="text-[10px] font-black uppercase tracking-widest">{sending ? 'Wait' : 'Send'}</span>
               </button>
+            </div>
+            <div className="mt-2 flex items-center gap-4 text-[10px] text-slate-400">
+              <span>Enter to send · Shift+Enter for newline</span>
+              {supervisorMode && delegateAgentIds.length > 0 && (
+                <span className="text-violet-500 font-semibold">
+                  ◆ Supervisor mode · {delegateAgentIds.length} delegate{delegateAgentIds.length > 1 ? 's' : ''}
+                </span>
+              )}
             </div>
           </div>
         </section>
