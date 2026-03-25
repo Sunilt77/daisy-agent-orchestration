@@ -322,15 +322,23 @@ export default function AgentChatPage() {
   const sendingRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const traceEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     sendingRef.current = sending;
   }, [sending]);
 
-  // Auto-scroll to bottom whenever messages change
+  // Auto-scroll messages to bottom whenever messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Auto-scroll trace panel to bottom during active streaming
+  useEffect(() => {
+    if (sending) {
+      traceEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [messages, sending]);
 
   const selectedAgent = useMemo(
     () => agents.find((a) => a.id === selectedAgentId) ?? null,
@@ -877,11 +885,13 @@ export default function AgentChatPage() {
                         <Activity size={11} />
                         Agent Activity · {m.trace.length} events
                       </summary>
-                      <div className="px-3 pb-3 pt-1 space-y-1.5 max-h-56 overflow-y-auto">
+                      <div className="px-3 pb-3 pt-1 space-y-1.5 max-h-[28rem] overflow-y-auto scroll-smooth">
                         {m.trace.map((evt: any, tidx: number) => {
                           const traceKey = `trace-${tidx}`;
                           return <TraceRow key={traceKey} evt={evt} />;
                         })}
+                        {/* Scroll sentinel — auto-scrolled to during streaming */}
+                        <div ref={traceEndRef} />
                       </div>
                     </details>
                   )}
