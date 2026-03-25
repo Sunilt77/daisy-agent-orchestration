@@ -3,78 +3,90 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import React, { lazy, Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import Layout from './components/Layout';
-import Dashboard from './pages/Dashboard';
-import AgentsPage from './pages/AgentsPage';
-import CrewsPage from './pages/CrewsPage';
-import CrewPage from './pages/CrewPage';
-
-import ToolsPage from './pages/ToolsPage';
-import CredentialsPage from './pages/CredentialsPage';
-import ProjectsPage from './pages/ProjectsPage';
-import ProjectTracesPage from './pages/ProjectTracesPage';
-import ProvidersPage from './pages/ProvidersPage';
-import PricingPage from './pages/PricingPage';
-import McpPage from './pages/McpPage';
-import PlatformPage from './pages/PlatformPage';
 import ErrorBoundary from './components/ErrorBoundary';
-import AuthPage from './pages/AuthPage';
-import TracesPage from './pages/TracesPage';
-import TraceDetailPage from './pages/TraceDetailPage';
-import TaskControlPage from './pages/TaskControlPage';
-import AgentChatPage from './pages/AgentChatPage';
-import AgentExecutionPage from './pages/AgentExecutionPage';
-import WorkflowsPage from './pages/WorkflowsPage';
-import KnowledgebasePage from './pages/KnowledgebasePage';
 import { AuthProvider, RequireAuth } from './utils/auth';
+
+// Lazy load pages
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const AgentsPage = lazy(() => import('./pages/AgentsPage'));
+const CrewsPage = lazy(() => import('./pages/CrewsPage'));
+const CrewPage = lazy(() => import('./pages/CrewPage'));
+const ToolsPage = lazy(() => import('./pages/ToolsPage'));
+const CredentialsPage = lazy(() => import('./pages/CredentialsPage'));
+const ProjectsPage = lazy(() => import('./pages/ProjectsPage'));
+const ProjectTracesPage = lazy(() => import('./pages/ProjectTracesPage'));
+const ProvidersPage = lazy(() => import('./pages/ProvidersPage'));
+const PricingPage = lazy(() => import('./pages/PricingPage'));
+const McpPage = lazy(() => import('./pages/McpPage'));
+const PlatformPage = lazy(() => import('./pages/PlatformPage'));
+const AuthPage = lazy(() => import('./pages/AuthPage'));
+const TracesPage = lazy(() => import('./pages/TracesPage'));
+const TraceDetailPage = lazy(() => import('./pages/TraceDetailPage'));
+const TaskControlPage = lazy(() => import('./pages/TaskControlPage'));
+const AgentChatPage = lazy(() => import('./pages/AgentChatPage'));
+const AgentExecutionPage = lazy(() => import('./pages/AgentExecutionPage'));
+const WorkflowsPage = lazy(() => import('./pages/WorkflowsPage'));
+const KnowledgebasePage = lazy(() => import('./pages/KnowledgebasePage'));
+
+const PageLoader = () => (
+  <div className="flex h-64 w-full items-center justify-center">
+    <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent" />
+  </div>
+);
 
 export default function App() {
   return (
     <Router>
       <AuthProvider>
-        <Routes>
-          <Route
-            path="/mcps"
-            element={
-              <Layout>
-                <ErrorBoundary title="MCPs page failed to render">
-                  <McpPage />
-                </ErrorBoundary>
-              </Layout>
-            }
-          />
-          <Route path="/auth" element={<AuthPage />} />
-          <Route
-            path="*"
-            element={
-              <RequireAuth>
+        <Suspense fallback={<PageLoader />}>
+          <Routes>
+            <Route
+              path="/mcps"
+              element={
                 <Layout>
-                  <Routes>
-                    <Route path="/" element={<Dashboard />} />
-                    <Route path="/projects" element={<ProjectsPage />} />
-                    <Route path="/projects/:id/traces" element={<ProjectTracesPage />} />
-                    <Route path="/traces" element={<TracesPage />} />
-                    <Route path="/traces/:runId" element={<TraceDetailPage />} />
-                    <Route path="/platform" element={<PlatformPage />} />
-                    <Route path="/agents" element={<AgentsPage />} />
-                    <Route path="/agent-executions/:id" element={<AgentExecutionPage />} />
-                    <Route path="/agent-chat" element={<AgentChatPage />} />
-                    <Route path="/workflows" element={<WorkflowsPage />} />
-                    <Route path="/crews" element={<CrewsPage />} />
-                    <Route path="/tools" element={<ToolsPage />} />
-                    <Route path="/credentials" element={<CredentialsPage />} />
-                    <Route path="/providers" element={<ProvidersPage />} />
-                    <Route path="/pricing" element={<PricingPage />} />
-                    <Route path="/knowledgebase" element={<KnowledgebasePage />} />
-                    <Route path="/crew/:id" element={<CrewPage />} />
-                    <Route path="/task-control" element={<TaskControlPage />} />
-                  </Routes>
+                  <ErrorBoundary title="MCPs page failed to render">
+                    <McpPage />
+                  </ErrorBoundary>
                 </Layout>
-              </RequireAuth>
-            }
-          />
-        </Routes>
+              }
+            />
+            <Route path="/auth" element={<AuthPage />} />
+            <Route
+              path="*"
+              element={
+                <RequireAuth>
+                  <Layout>
+                    <Suspense fallback={<PageLoader />}>
+                      <Routes>
+                        <Route path="/" element={<Dashboard />} />
+                        <Route path="/projects" element={<ProjectsPage />} />
+                        <Route path="/projects/:id/traces" element={<ProjectTracesPage />} />
+                        <Route path="/traces" element={<TracesPage />} />
+                        <Route path="/traces/:runId" element={<TraceDetailPage />} />
+                        <Route path="/platform" element={<PlatformPage />} />
+                        <Route path="/agents" element={<AgentsPage />} />
+                        <Route path="/agent-executions/:id" element={<AgentExecutionPage />} />
+                        <Route path="/agent-chat" element={<AgentChatPage />} />
+                        <Route path="/workflows" element={<WorkflowsPage />} />
+                        <Route path="/crews" element={<CrewsPage />} />
+                        <Route path="/tools" element={<ToolsPage />} />
+                        <Route path="/credentials" element={<CredentialsPage />} />
+                        <Route path="/providers" element={<ProvidersPage />} />
+                        <Route path="/pricing" element={<PricingPage />} />
+                        <Route path="/knowledgebase" element={<KnowledgebasePage />} />
+                        <Route path="/crew/:id" element={<CrewPage />} />
+                        <Route path="/task-control" element={<TaskControlPage />} />
+                      </Routes>
+                    </Suspense>
+                  </Layout>
+                </RequireAuth>
+              }
+            />
+          </Routes>
+        </Suspense>
       </AuthProvider>
     </Router>
   );

@@ -209,7 +209,7 @@ model DocumentChunk {
 model DocumentVector {
   id         String    @id @default(uuid())
   chunkId    String    @unique @map("chunk_id")
-  embedding  Json
+  embedding  Unsupported("vector")
   provider   String
   model      String
   createdAt  DateTime  @default(now()) @map("created_at")
