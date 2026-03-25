@@ -1459,7 +1459,19 @@ app.get('/api/providers/:id/models', async (req, res) => {
     let models: { id: string, name: string }[] = [];
 
     if (config.providerType === 'openai' || config.providerType === 'openai-compatible' || config.providerType === 'litellm') {
-      const openai = new OpenAI({ apiKey: config.apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
+      const openai = new OpenAI({ 
+          apiKey: config.apiKey, 
+          baseURL: config.apiBase,
+          fetch: async (url: string | Request | URL, init?: RequestInit) => {
+              const headers = new Headers(init?.headers);
+              Array.from(headers.keys()).forEach(k => {
+                  if (k.toLowerCase().startsWith('x-stainless')) headers.delete(k);
+              });
+              headers.set('User-Agent', 'curl/8.7.1');
+              if (config.providerType === 'litellm') headers.set('x-litellm-api-key', config.apiKey!);
+              return fetch(url, { ...init, headers });
+          }
+      });
       const response = await openai.models.list();
       models = response.data.map(m => ({ id: m.id, name: m.id }));
     } else if (config.providerType === 'anthropic') { // Original condition, assuming config.type is not available here
@@ -5130,8 +5142,8 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
 }
 
 async function getProviderConfig(providerIdentifier: string): Promise<{ apiKey?: string, apiBase?: string, providerType: string, source: string, sourceName?: string }> {
-  // 1. Check if it's a specific provider name in llm_providers
-  const specificProvider = db.prepare('SELECT * FROM llm_providers WHERE name = ?').get(providerIdentifier) as any;
+  // 1. Check if it's a specific provider name or id in llm_providers
+  const specificProvider = db.prepare('SELECT * FROM llm_providers WHERE name = ? OR id = ?').get(providerIdentifier, providerIdentifier) as any;
   if (specificProvider) {
       return { 
           apiKey: specificProvider.api_key, 
@@ -6025,6 +6037,7 @@ async function runAgent(
                                     if (k.toLowerCase().startsWith('x-stainless')) headers.delete(k);
                                 });
                                 headers.set('User-Agent', 'curl/8.7.1');
+                                headers.set('x-litellm-api-key', currentApiKey!);
                                 return fetch(url, { ...init, headers });
                             }
                         });
