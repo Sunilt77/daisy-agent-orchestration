@@ -1011,6 +1011,17 @@ app.get('/api/mcp/bundles', async (_req, res) => {
         exposed_name: exposureByToolId.get(tool.id) || null,
       });
     }
+    // Get exposure status from SQLite since it might not exist in PostgreSQL yet
+    const bundleExposureStatus = new Map();
+    try {
+      for (const bundle of bundles) {
+        const exposureRow = db.prepare('SELECT is_exposed FROM mcp_bundles WHERE id = ?').get(bundle.id);
+        bundleExposureStatus.set(bundle.id, exposureRow ? Boolean(exposureRow.is_exposed) : true);
+      }
+    } catch (e) {
+      console.warn('Failed to get bundle exposure status from SQLite:', e.message);
+    }
+
     res.json(bundles.map((b) => ({
       id: b.id,
       name: b.name,
@@ -1018,7 +1029,7 @@ app.get('/api/mcp/bundles', async (_req, res) => {
       description: b.description,
       created_at: b.createdAt,
       updated_at: b.updatedAt,
-      is_exposed: Boolean(b.isExposed),
+      is_exposed: bundleExposureStatus.has(b.id) ? bundleExposureStatus.get(b.id) : Boolean(b.isExposed),
       tools: toolsByBundle.get(b.id) || [],
       tool_count: (toolsByBundle.get(b.id) || []).length,
     })));
@@ -1062,17 +1073,26 @@ app.put('/api/mcp/bundles/:id/exposure', async (req, res) => {
   if (!Number.isFinite(bundleId)) return res.status(400).json({ error: 'Invalid bundle id' });
   
   try {
-    const prisma = getPrisma();
-    const bundle = await prisma.orchestratorMcpBundle.findUnique({ where: { id: bundleId } });
-    if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
-    
-    await prisma.orchestratorMcpBundle.update({
-      where: { id: bundleId },
-      data: {
-        isExposed: Boolean(is_exposed),
-        updatedAt: new Date(),
-      },
-    });
+    // Update SQLite database directly
+    db.prepare('UPDATE mcp_bundles SET is_exposed = ? WHERE id = ?')
+      .run(is_exposed ? 1 : 0, bundleId);
+
+    // For PostgreSQL, check if the field exists in the schema before using it
+    try {
+      const prisma = getPrisma();
+      const bundle = await prisma.orchestratorMcpBundle.findUnique({ where: { id: bundleId } });
+      if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
+      
+      // Update only the updatedAt field in PostgreSQL since isExposed might not exist yet
+      await prisma.orchestratorMcpBundle.update({
+        where: { id: bundleId },
+        data: {
+          updatedAt: new Date(),
+        },
+      });
+    } catch (prismaError) {
+      console.warn('Prisma update failed, continuing with SQLite only:', prismaError.message);
+    }
     
     await refreshPersistentMirror();
     res.json({ success: true });
@@ -1104,24 +1124,40 @@ app.post('/api/mcp/bundles', async (req, res) => {
         where: { bundleId },
         _max: { versionNumber: true },
       }))._max.versionNumber || 0);
+      // Update in PostgreSQL without the isExposed field
       await prisma.orchestratorMcpBundle.update({
         where: { id: bundleId },
         data: {
           name: cleanName,
           description: typeof description === 'string' ? description : null,
           updatedAt: new Date(),
-          isExposed: isExposed,
         },
       });
+      
+      // Update SQLite with the isExposed field
+      try {
+        db.prepare('UPDATE mcp_bundles SET is_exposed = ? WHERE id = ?')
+          .run(isExposed ? 1 : 0, bundleId);
+      } catch (e) {
+        console.warn('Failed to update SQLite with exposure status:', e.message);
+      }
     } else {
+      // Create in PostgreSQL without the isExposed field
       const created = await prisma.orchestratorMcpBundle.create({
         data: {
           name: cleanName,
           slug: cleanSlug,
           description: typeof description === 'string' ? description : null,
-          isExposed: isExposed,
         },
       });
+      
+      // Update SQLite with the isExposed field
+      try {
+        db.prepare('UPDATE mcp_bundles SET is_exposed = ? WHERE id = ?')
+          .run(isExposed ? 1 : 0, created.id);
+      } catch (e) {
+        console.warn('Failed to update SQLite with exposure status:', e.message);
+      }
       bundleId = created.id;
     }
 
@@ -5900,6 +5936,17 @@ async function runAgent(
             directMcpTools = directMcpTools.filter((t) => allowedMcpTools.has(Number(t.tool_id)));
             // Allow all bundles attached to the agent regardless of exposure status
             // mcpBundles = mcpBundles.filter((b) => allowedMcpBundles.has(Number(b.id)));
+          }
+          
+          // Check exposure status from SQLite for each bundle
+          try {
+            for (const bundle of mcpBundles) {
+              const exposureRow = db.prepare('SELECT is_exposed FROM mcp_bundles WHERE id = ?').get(bundle.id);
+              bundle.is_exposed = exposureRow ? Boolean(exposureRow.is_exposed) : true;
+            }
+          } catch (e) {
+            console.warn('Failed to get bundle exposure status from SQLite:', e.message);
+          }
           }
 
           for (const mcpTool of directMcpTools) {

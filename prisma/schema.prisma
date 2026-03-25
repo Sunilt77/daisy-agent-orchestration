@@ -511,6 +511,7 @@ model OrchestratorMcpBundle {
   name        String
   slug        String   @unique
   description String?
+  isExposed   Boolean  @default(true) @map("is_exposed")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @default(now()) @map("updated_at")
 
