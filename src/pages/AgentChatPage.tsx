@@ -849,7 +849,7 @@ export default function AgentChatPage() {
                 </div>
 
                 {/* Bubble */}
-                <div className={`flex-1 max-w-[85%] ${m.role === 'user' ? 'items-end flex flex-col' : ''}`}>
+                <div className={`flex-1 ${m.role === 'user' ? 'max-w-[85%] items-end flex flex-col' : (m.trace?.length || m.debug || m.delegation) ? 'max-w-[95%]' : 'max-w-[85%]'}`}>
                   {/* Sender label */}
                   <div className={`text-[10px] font-black uppercase tracking-widest mb-1.5 ${m.role === 'user' ? 'text-indigo-500 text-right' : 'text-slate-500'}`}>
                     {m.role === 'user' ? 'You' : selectedAgent?.name || 'Agent'}
@@ -885,7 +885,7 @@ export default function AgentChatPage() {
                         <Activity size={11} />
                         Agent Activity · {m.trace.length} events
                       </summary>
-                      <div className="px-3 pb-3 pt-1 space-y-1.5 max-h-[28rem] overflow-y-auto scroll-smooth">
+                      <div className="px-3 pb-3 pt-1 space-y-1.5 max-h-[42.5rem] overflow-y-auto scroll-smooth">
                         {m.trace.map((evt: any, tidx: number) => {
                           const traceKey = `trace-${tidx}`;
                           return <TraceRow key={traceKey} evt={evt} />;
@@ -902,7 +902,7 @@ export default function AgentChatPage() {
                       <summary className="cursor-pointer text-[11px] font-semibold text-slate-600 px-3 py-2 flex items-center gap-2">
                         Inference Debug
                       </summary>
-                      <div className="px-3 pb-3 text-[11px] space-y-1.5">
+                      <div className="px-3 pb-3 text-[11px] space-y-1.5 max-h-[42.5rem] overflow-y-auto scroll-smooth">
                         <div>Execution: <span className="font-mono">{m.debug.executionId ?? '-'}</span> · Status: <span className="font-bold">{m.debug.status}</span></div>
                         <div>
                           Tokens: <span className="font-mono">↑{Number(m.debug?.usage?.prompt_tokens || 0).toLocaleString()} ↓{Number(m.debug?.usage?.completion_tokens || 0).toLocaleString()}</span>
@@ -915,6 +915,8 @@ export default function AgentChatPage() {
                           </div>
                         ))}
                         {(!m.debug.timeline || !m.debug.timeline.length) && <div className="text-slate-500">No timeline details.</div>}
+                        {/* Scroll sentinel for debug — shares the same ref if both open during streaming */}
+                        <div ref={traceEndRef} />
                       </div>
                     </details>
                   )}
