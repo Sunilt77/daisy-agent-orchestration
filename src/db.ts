@@ -64,7 +64,7 @@ export function initDb() {
       goal TEXT NOT NULL,
       backstory TEXT,
       system_prompt TEXT,
-      model TEXT DEFAULT 'gemini-3-flash-preview',
+      model TEXT DEFAULT 'gemini-1.5-flash',
       provider TEXT DEFAULT 'google',
       temperature REAL,
       max_tokens INTEGER,

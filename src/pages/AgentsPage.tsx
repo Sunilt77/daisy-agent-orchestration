@@ -836,7 +836,7 @@ export default function AgentsPage() {
     goal: '',
     backstory: '',
     system_prompt: '',
-    model: 'gemini-3-flash-preview',
+    model: 'gemini-1.5-flash',
     provider: 'google',
     temperature: '',
     max_tokens: '',
@@ -896,7 +896,7 @@ export default function AgentsPage() {
   const [buildError, setBuildError] = useState('');
   const [buildEvents, setBuildEvents] = useState<{message: string, type: 'status' | 'error' | 'done', id?: number}[]>([]);
   const [autoBuildProvider, setAutoBuildProvider] = useState('google');
-  const [autoBuildModel, setAutoBuildModel] = useState('gemini-2.5-flash-latest');
+  const [autoBuildModel, setAutoBuildModel] = useState('gemini-1.5-flash');
   const [autoBuildArchitecture, setAutoBuildArchitecture] = useState<'auto' | 'specialist' | 'supervisor'>('auto');
   const [autoBuildProjectId, setAutoBuildProjectId] = useState('');
   const [stateReady, setStateReady] = useState(false);
@@ -1049,7 +1049,9 @@ export default function AgentsPage() {
       // If no models were fetched successfully or res.ok was false, use defaults
       if (models.length === 0) {
         models = [
-          { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview' },
+          { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
+          { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
+          { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash (Experimental)' },
           { id: 'gpt-4o', name: 'GPT-4o' },
           { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet' }
         ];
@@ -1307,7 +1309,7 @@ export default function AgentsPage() {
       goal: '',
       backstory: '',
       system_prompt: '',
-      model: 'gemini-3-flash-preview',
+      model: 'gemini-1.5-flash',
       provider: 'google',
       temperature: '',
       max_tokens: '',

@@ -75,7 +75,7 @@ export default function CrewsPage() {
   const [buildError, setBuildError] = useState('');
   const [buildEvents, setBuildEvents] = useState<{message: string, type: 'status' | 'error' | 'done', id?: number}[]>([]);
   const [autoBuildProvider, setAutoBuildProvider] = useState('google');
-  const [autoBuildModel, setAutoBuildModel] = useState('gemini-2.5-flash-latest');
+  const [autoBuildModel, setAutoBuildModel] = useState('gemini-1.5-flash');
   const [autoBuildProcessPreference, setAutoBuildProcessPreference] = useState<'auto' | 'sequential' | 'hierarchical'>('auto');
   const [autoBuildProjectId, setAutoBuildProjectId] = useState('');
 
@@ -139,7 +139,9 @@ export default function CrewsPage() {
 
       if (models.length === 0) {
         models = [
-          { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview' },
+          { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
+          { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
+          { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash (Experimental)' },
           { id: 'gpt-4o', name: 'GPT-4o' },
           { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet' }
         ];

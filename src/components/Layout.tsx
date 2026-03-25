@@ -216,7 +216,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             className="h-full w-full overflow-auto overflow-x-hidden"
           >
             <div className="app-content-shell p-4 pt-20 sm:p-6 sm:pt-24 lg:p-8 lg:pt-28 xl:p-10 xl:pt-28 rise-in">
-              <div className="w-full max-w-[1720px] mx-auto">
+              <div className="w-full max-w-(--app-max-width) mx-auto">
                 {children}
               </div>
             </div>

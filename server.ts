@@ -3339,15 +3339,30 @@ app.get('/api/agents/:id/sessions/:sessionId/messages', async (req, res) => {
     res.json({ session_id: sessionId, messages });
 });
 
-app.get('/api/executions/agents', (req, res) => {
-    const executions = db.prepare(`
-        SELECT ae.*, a.name as agent_name 
-        FROM agent_executions ae 
-        JOIN agents a ON ae.agent_id = a.id 
-        ORDER BY ae.created_at DESC 
-        LIMIT 10
-    `).all();
-    res.json(executions);
+app.get('/api/executions/agents', async (req, res) => {
+    try {
+        const prisma = getPrisma();
+        const executions = await prisma.orchestratorAgentExecution.findMany({
+            include: {
+                agent: {
+                    select: { name: true }
+                }
+            },
+            orderBy: { createdAt: 'desc' },
+            take: 10
+        });
+
+        // Map to expected format
+        const formatted = executions.map(e => ({
+            ...e,
+            created_at: (e as any).createdAt, // Map back for frontend compatibility if needed
+            agent_name: (e as any).agent?.name || 'Unknown Agent'
+        }));
+
+        res.json(formatted);
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.post('/api/agents/:id/run', localRunLimiter, async (req, res) => {
@@ -3960,7 +3975,7 @@ app.post('/mcp/call/:toolName', localRunLimiter, async (req, res) => {
 // --- Agents ---
 app.post('/api/agents/autobuild', async (req, res) => {
     try {
-        const { goal, project_id, provider = 'google', model = 'gemini-2.5-flash-latest', stream = false, agent_role_preference = 'auto' } = req.body;
+        const { goal, project_id, provider = 'google', model = 'gemini-1.5-flash', stream = false, agent_role_preference = 'auto' } = req.body;
 
         if (stream) {
             res.setHeader('Content-Type', 'text/event-stream');
@@ -5736,7 +5751,7 @@ async function runAgent(
 	    }
 
     const totalUsage = { prompt_tokens: 0, completion_tokens: 0, cost: 0 };
-    const model = agent.model || 'gemini-3-flash-preview';
+    const model = agent?.model || 'gemini-1.5-flash';
     const modelPricing = getModelPricing(model);
 
     let finalOutput = "";

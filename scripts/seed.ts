@@ -76,10 +76,10 @@ async function main() {
   // Seed pricing (matches legacy constants; adjust as needed)
   await prisma.modelPricing.createMany({
     data: [
-      { model: 'gemini-3-flash-preview', inputUsd: 0.075, outputUsd: 0.30 },
-      { model: 'gemini-3.1-pro-preview', inputUsd: 1.25, outputUsd: 5.00 },
-      { model: 'gemini-2.5-flash-latest', inputUsd: 0.075, outputUsd: 0.30 },
-      { model: 'gemini-flash-lite-latest', inputUsd: 0.05, outputUsd: 0.20 },
+      { model: 'gemini-1.5-flash', inputUsd: 0.075, outputUsd: 0.30 },
+      { model: 'gemini-1.5-pro', inputUsd: 1.25, outputUsd: 5.00 },
+      { model: 'gemini-2.0-flash-exp', inputUsd: 0.075, outputUsd: 0.30 },
+      { model: 'gemini-2.0-flash-lite-preview-02-05', inputUsd: 0.05, outputUsd: 0.20 },
       { model: 'gpt-4o', inputUsd: 2.50, outputUsd: 10.00 },
       { model: 'gpt-4o-mini', inputUsd: 0.15, outputUsd: 0.60 },
       { model: 'gpt-4-turbo', inputUsd: 10.00, outputUsd: 30.00 },

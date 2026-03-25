@@ -75,7 +75,7 @@
 
 @layer base {
   :root {
-    --app-max-width: 1720px;
+    --app-max-width: 2560px;
   }
 
   * {

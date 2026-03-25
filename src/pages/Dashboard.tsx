@@ -500,60 +500,66 @@ export default function Dashboard() {
         initial={{ opacity: 0, y: 18 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.45, ease: 'easeOut', delay: 0.02 }}
-        className="swarm-hero mb-8"
+        className="swarm-hero mb-10 p-8 lg:p-10"
       >
-        <div className="flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between">
+        <div className="flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between mb-8">
           <div className="max-w-2xl">
-            <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.28em] text-cyan-100">
-              <Sparkles size={12} />
+            <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-4 py-1.5 text-[11px] font-black uppercase tracking-[0.3em] text-cyan-200 shadow-lg shadow-cyan-500/10">
+              <Sparkles size={12} className="animate-pulse" />
               Emergent Operations Layer
             </div>
-            <h2 className="text-3xl font-black tracking-tight text-white sm:text-4xl">
-              Intelligence dashboard for delegated crews, adaptive agents, and real-time execution flow.
+            <h2 className="text-3xl font-black tracking-tight text-white sm:text-4xl lg:text-5xl leading-[1.1]">
+              Intelligence dashboard for delegated crews and real-time execution.
             </h2>
-            <p className="mt-3 max-w-xl text-sm leading-6 text-slate-300">
-              This surface turns your runtime into a living map: orchestration pulse, execution waves, workforce state, and fast control lanes in one command environment.
+            <p className="mt-4 max-w-xl text-sm lg:text-base leading-relaxed text-slate-300 font-medium">
+              This surface turns your runtime into a living map: orchestration pulse, execution waves, workforce state, and fast control lanes.
             </p>
           </div>
 
-          <div className="grid w-full max-w-xl grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="grid w-full max-w-xl grid-cols-1 gap-4 sm:grid-cols-2">
             {orchestrationLanes.map((lane) => (
-              <div key={lane.label} className="telemetry-tile">
+              <div key={lane.label} className="telemetry-tile p-5 group hover:bg-white/[0.08] transition-colors">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="text-[11px] uppercase tracking-[0.28em] text-slate-400">{lane.label}</div>
-                    <div className="mt-2 text-3xl font-black text-white">{lane.value}</div>
+                    <div className="text-[10px] uppercase font-black tracking-[0.25em] text-slate-400">{lane.label}</div>
+                    <div className="mt-2 text-3xl font-black text-white group-hover:text-brand-200 transition-colors">{lane.value}</div>
                   </div>
-                  <div className="network-grid w-16">
+                  <div className="network-grid w-16 p-1 rounded-lg">
                     {Array.from({ length: 9 }).map((_, index) => (
-                      <span key={index} className={`h-3 rounded-full ${index < Math.max(1, Math.round(lane.width / 12)) ? 'bg-white/85' : 'bg-white/10'}`} />
+                      <span key={index} className={`h-2.5 rounded-full transition-all duration-500 ${index < Math.max(1, Math.round(lane.width / 12)) ? 'bg-white shadow-[0_0_8px_rgba(255,255,255,0.5)]' : 'bg-white/10'}`} />
                     ))}
                   </div>
                 </div>
-                <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/8">
-                  <div className={`h-full rounded-full bg-linear-to-r ${lane.tone}`} style={{ width: `${Math.max(6, lane.width)}%` }} />
+                <div className="mt-5 h-2.5 overflow-hidden rounded-full bg-white/5 border border-white/5">
+                  <motion.div 
+                    initial={{ width: 0 }}
+                    animate={{ width: `${Math.max(6, lane.width)}%` }}
+                    className={`h-full rounded-full bg-linear-to-r ${lane.tone} shadow-[0_0_12px_rgba(255,255,255,0.2)]`} 
+                  />
                 </div>
-                <div className="mt-2 text-xs text-slate-400">{lane.hint}</div>
+                <div className="mt-3 text-[11px] font-medium text-slate-400 group-hover:text-slate-300 transition-colors">{lane.hint}</div>
               </div>
             ))}
           </div>
         </div>
 
-        <div className="mt-6 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
           {quickAccessTiles.map((tile) => (
             <Link
               key={tile.label}
               to={tile.to}
-              className={`group rounded-[1.4rem] border ${tile.border} bg-white/[0.04] p-4 backdrop-blur-sm transition-all hover:-translate-y-1 hover:bg-white/[0.07] hover:shadow-[0_20px_60px_rgba(8,15,40,0.32)]`}
+              className={`group rounded-[2rem] border ${tile.border} bg-white/[0.06] p-5 backdrop-blur-md transition-all hover:-translate-y-1.5 hover:bg-white/[0.1] hover:shadow-[0_24px_70px_rgba(8,15,40,0.4)]`}
             >
-              <div className="mb-3 flex items-center justify-between">
-                <div className={`rounded-2xl border border-white/10 p-2.5 ${tile.iconTone}`}>
-                  <tile.icon size={18} />
+              <div className="mb-4 flex items-center justify-between">
+                <div className={`rounded-2xl border border-white/10 p-3 ${tile.iconTone} shadow-lg shadow-white/5 group-hover:shadow-white/10 group-hover:scale-110 transition-all`}>
+                  <tile.icon size={20} />
                 </div>
-                <ArrowRight size={15} className="text-slate-500 transition-transform group-hover:translate-x-1 group-hover:text-white" />
+                <div className="rounded-full bg-white/5 p-2 transition-colors group-hover:bg-brand-500/20">
+                  <ArrowRight size={14} className="text-slate-500 transition-transform group-hover:translate-x-1 group-hover:text-brand-200" />
+                </div>
               </div>
-              <div className="font-bold text-white">{tile.label}</div>
-              <div className="mt-1 text-xs leading-5 text-slate-400">{tile.hint}</div>
+              <div className="text-lg font-black text-white tracking-tight">{tile.label}</div>
+              <div className="mt-2 text-xs leading-relaxed font-semibold text-slate-400 group-hover:text-slate-200">{tile.hint}</div>
             </Link>
           ))}
         </div>
@@ -565,152 +571,302 @@ export default function Dashboard() {
         transition={{ duration: 0.45, ease: 'easeOut' }}
         className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4 mb-10"
       >
-        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile relative overflow-hidden">
-          <div className="absolute -top-8 -right-8 w-24 h-24 rounded-full bg-brand-200/60 blur-2xl" />
+        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile p-5 relative overflow-hidden group">
+          <div className="absolute -top-8 -right-8 w-24 h-24 rounded-full bg-brand-400/20 blur-2xl group-hover:bg-brand-400/30 transition-colors" />
           <div className="relative">
-            <div className="text-xs uppercase tracking-[0.2em] text-slate-400 mb-2">Agents Online</div>
+            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Agents Online</div>
             <div className="flex items-end justify-between">
-              <div className="text-3xl font-black text-white">{agents.length}</div>
-              <Bot size={18} className="text-brand-200" />
+              <div className="text-4xl font-black text-white">{agents.length}</div>
+              <div className="p-2 rounded-xl bg-brand-500/10 text-brand-300 group-hover:scale-110 transition-transform">
+                <Bot size={20} />
+              </div>
             </div>
-            <div className="text-xs text-slate-400 mt-1">{dashboardInsights.runningAgents} currently running</div>
+            <div className="text-[11px] font-bold text-slate-400 mt-2 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              {dashboardInsights.runningAgents} currently active
+            </div>
           </div>
         </motion.div>
 
-        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile relative overflow-hidden">
-          <div className="absolute -bottom-8 -left-8 w-24 h-24 rounded-full bg-accent-200/60 blur-2xl" />
+        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile p-5 relative overflow-hidden group">
+          <div className="absolute -bottom-8 -left-8 w-24 h-24 rounded-full bg-accent-400/20 blur-2xl group-hover:bg-accent-400/30 transition-colors" />
           <div className="relative">
-            <div className="text-xs uppercase tracking-[0.2em] text-slate-400 mb-2">Crew Matrix</div>
+            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Crew Matrix</div>
             <div className="flex items-end justify-between">
-              <div className="text-3xl font-black text-white">{crews.length}</div>
-              <Users size={18} className="text-accent-200" />
+              <div className="text-4xl font-black text-white">{crews.length}</div>
+              <div className="p-2 rounded-xl bg-accent-500/10 text-accent-300 group-hover:scale-110 transition-transform">
+                <Users size={20} />
+              </div>
             </div>
-            <div className="text-xs text-slate-400 mt-1">{dashboardInsights.exposedCrews} exposed via API/MCP</div>
+            <div className="text-[11px] font-bold text-slate-400 mt-2">{dashboardInsights.exposedCrews} exposed via API/MCP</div>
           </div>
         </motion.div>
 
-        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile">
-          <div className="text-xs uppercase tracking-[0.2em] text-slate-400 mb-2">24H Throughput</div>
+        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile p-5 group">
+          <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">24H Throughput</div>
           <div className="flex items-end justify-between">
-            <div className="text-3xl font-black text-white">{dashboardInsights.execution24h}</div>
-            <TrendingUp size={18} className="text-emerald-200" />
+            <div className="text-4xl font-black text-white">{dashboardInsights.execution24h}</div>
+            <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-300 group-hover:scale-110 transition-transform">
+              <TrendingUp size={20} />
+            </div>
           </div>
-          <div className="text-xs text-slate-400 mt-1">Recent executions in last day</div>
+          <div className="text-[11px] font-bold text-slate-400 mt-2">Recent executions today</div>
         </motion.div>
 
-        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile">
-          <div className="text-xs uppercase tracking-[0.2em] text-slate-400 mb-2">Token Flow</div>
+        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile p-5 group">
+          <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Token Flow</div>
           <div className="flex items-end justify-between">
-            <div className="text-3xl font-black text-white">{(dashboardInsights.totalPrompt + dashboardInsights.totalCompletion).toLocaleString()}</div>
-            <Cpu size={18} className="text-indigo-200" />
+            <div className="text-4xl font-black text-white">{(dashboardInsights.totalPrompt + dashboardInsights.totalCompletion).toLocaleString()}</div>
+            <div className="p-2 rounded-xl bg-indigo-500/10 text-indigo-300 group-hover:scale-110 transition-transform">
+              <Cpu size={20} />
+            </div>
           </div>
-          <div className="text-xs text-slate-400 mt-1">Prompt {dashboardInsights.totalPrompt.toLocaleString()} / Completion {dashboardInsights.totalCompletion.toLocaleString()}</div>
+          <div className="text-[11px] font-bold text-slate-400 mt-2 truncate">P {dashboardInsights.totalPrompt.toLocaleString()} / C {dashboardInsights.totalCompletion.toLocaleString()}</div>
         </motion.div>
 
-        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile">
-          <div className="text-xs uppercase tracking-[0.2em] text-slate-400 mb-2">Cost Envelope</div>
+        <motion.div whileHover={{ y: -3, scale: 1.01 }} className="telemetry-tile p-5 group">
+          <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Cost Envelope</div>
           <div className="flex items-end justify-between">
-            <div className="text-3xl font-black text-emerald-300">${dashboardInsights.totalCost.toFixed(4)}</div>
-            <DollarSign size={18} className="text-emerald-200" />
+            <div className="text-4xl font-black text-emerald-400 tracking-tighter">${dashboardInsights.totalCost.toFixed(4)}</div>
+            <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-300 group-hover:scale-110 transition-transform">
+              <DollarSign size={20} />
+            </div>
           </div>
-          <div className="text-xs text-slate-400 mt-1">Avg recency {dashboardInsights.avgLatency}s</div>
+          <div className="text-[11px] font-bold text-slate-400 mt-2">Avg latency {dashboardInsights.avgLatency}s</div>
         </motion.div>
       </motion.div>
 
-      <div className="panel-chrome rounded-3xl p-6 mb-10">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-          <div className="telemetry-tile">
-            <div className="text-xs text-violet-200 font-semibold mb-1">Swarm Efficiency</div>
-            <div className="text-2xl font-black text-violet-100">{opsPulse.successRate.toFixed(1)}%</div>
-            <div className="mt-2 h-2 bg-white/10 rounded-full overflow-hidden"><div className="h-full bg-violet-400 rounded-full" style={{ width: `${opsPulse.successRate}%` }} /></div>
+      <div className="panel-chrome rounded-[2.5rem] p-8 mb-10 overflow-hidden relative">
+        <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-brand-500/5 blur-[120px] rounded-full -mr-64 -mt-64" />
+        
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-10 relative z-10">
+          <div className="telemetry-tile p-6 relative overflow-hidden group border-white/10">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-violet-500/10 blur-3xl -mr-16 -mt-16 group-hover:bg-violet-500/20 transition-colors" />
+            <div className="text-[10px] text-violet-300 font-black uppercase tracking-[0.25em] mb-1">Swarm Efficiency</div>
+            <div className="text-4xl font-black text-white">{opsPulse.successRate.toFixed(1)}%</div>
+            <div className="mt-5 h-2.5 bg-white/10 rounded-full overflow-hidden border border-white/5 shadow-inner">
+              <motion.div 
+                initial={{ width: 0 }}
+                animate={{ width: `${opsPulse.successRate}%` }}
+                className="h-full bg-linear-to-r from-violet-600 to-indigo-500 rounded-full shadow-[0_0_15px_rgba(139,92,246,0.6)]" 
+              />
+            </div>
           </div>
-          <div className="telemetry-tile">
-            <div className="text-xs text-cyan-200 font-semibold mb-1">Halo Effect Impact</div>
-            <div className="text-2xl font-black text-cyan-100">${dashboardInsights.totalCost.toFixed(2)}</div>
-            <div className="mt-2 h-2 bg-white/10 rounded-full overflow-hidden"><div className="h-full bg-cyan-400 rounded-full" style={{ width: `${Math.min(100, Math.max(8, dashboardInsights.activeRunsNow * 10))}%` }} /></div>
+          <div className="telemetry-tile p-6 relative overflow-hidden group border-white/10">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-cyan-500/10 blur-3xl -mr-16 -mt-16 group-hover:bg-cyan-500/20 transition-colors" />
+            <div className="text-[10px] text-cyan-300 font-black uppercase tracking-[0.25em] mb-1">Impact Velocity</div>
+            <div className="text-4xl font-black text-white">${dashboardInsights.totalCost.toFixed(2)}</div>
+            <div className="mt-5 h-2.5 bg-white/10 rounded-full overflow-hidden border border-white/5 shadow-inner">
+              <motion.div 
+                initial={{ width: 0 }}
+                animate={{ width: `${Math.min(100, Math.max(8, dashboardInsights.activeRunsNow * 10))}%` }}
+                className="h-full bg-linear-to-r from-cyan-600 to-emerald-500 rounded-full shadow-[0_0_15px_rgba(6,182,212,0.6)]" 
+              />
+            </div>
           </div>
-          <div className="telemetry-tile">
-            <div className="text-xs text-emerald-200 font-semibold mb-1">Agent Learning Rate</div>
-            <div className="text-2xl font-black text-emerald-100">{dashboardInsights.utilization}%</div>
-            <div className="mt-2 h-2 bg-white/10 rounded-full overflow-hidden"><div className="h-full bg-emerald-400 rounded-full" style={{ width: `${dashboardInsights.utilization}%` }} /></div>
+          <div className="telemetry-tile p-6 relative overflow-hidden group border-white/10">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-500/10 blur-3xl -mr-16 -mt-16 group-hover:bg-emerald-500/20 transition-colors" />
+            <div className="text-[10px] text-emerald-300 font-black uppercase tracking-[0.25em] mb-1">Cerebral Load</div>
+            <div className="text-4xl font-black text-white">{dashboardInsights.utilization}%</div>
+            <div className="mt-5 h-2.5 bg-white/10 rounded-full overflow-hidden border border-white/5 shadow-inner">
+              <motion.div 
+                initial={{ width: 0 }}
+                animate={{ width: `${dashboardInsights.utilization}%` }}
+                className="h-full bg-linear-to-r from-emerald-600 to-teal-500 rounded-full shadow-[0_0_15px_rgba(16,185,129,0.6)]" 
+              />
+            </div>
           </div>
-          <div className="telemetry-tile">
-            <div className="text-xs text-orange-200 font-semibold mb-1">Emergent Patterns</div>
-            <div className="text-2xl font-black text-orange-100">{recentExecutions.length}</div>
-            <div className="mt-2 h-2 bg-white/10 rounded-full overflow-hidden"><div className="h-full bg-orange-400 rounded-full" style={{ width: `${Math.min(100, recentExecutions.length * 4)}%` }} /></div>
+          <div className="telemetry-tile p-6 relative overflow-hidden group border-white/10">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/10 blur-3xl -mr-16 -mt-16 group-hover:bg-orange-500/20 transition-colors" />
+            <div className="text-[10px] text-orange-300 font-black uppercase tracking-[0.25em] mb-1">Neural Patterns</div>
+            <div className="text-4xl font-black text-white">{recentExecutions.length}</div>
+            <div className="mt-5 h-2.5 bg-white/10 rounded-full overflow-hidden border border-white/5 shadow-inner">
+              <motion.div 
+                initial={{ width: 0 }}
+                animate={{ width: `${Math.min(100, recentExecutions.length * 4)}%` }}
+                className="h-full bg-linear-to-r from-orange-600 to-amber-500 rounded-full shadow-[0_0_15px_rgba(245,158,11,0.6)]" 
+              />
+            </div>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-          <div className="rounded-[1.6rem] border border-white/10 bg-white/[0.04] p-5">
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-xl font-bold text-white">Collective Behavior Evolution</h3>
-              <div className="text-xs text-slate-400">Last 7 days</div>
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 relative z-10">
+          <div className="rounded-[2.4rem] border border-white/10 bg-white/[0.05] p-8 backdrop-blur-2xl relative overflow-hidden group">
+            <div className="absolute inset-0 bg-linear-to-b from-indigo-500/5 to-transparent pointer-events-none" />
+            <div className="flex items-center justify-between mb-6 relative z-10">
+              <div className="flex items-center gap-4">
+                <div className="p-2.5 rounded-2xl bg-brand-500/15 text-brand-300">
+                  <Activity size={24} />
+                </div>
+                <div>
+                  <h3 className="text-xl font-black text-white tracking-tight">Collective Evolution</h3>
+                  <div className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mt-0.5">Analytics Core</div>
+                </div>
+              </div>
+              <div className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 text-[10px] font-black text-slate-400 uppercase tracking-widest hidden sm:block">
+                Last 7 Days
+              </div>
             </div>
-            <div className="text-xs text-slate-400 mb-3">Runs vs Tokens vs Cost trend</div>
-            <div className="h-52 rounded-xl border border-white/10 bg-slate-950/30 p-3">
-              <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="w-full h-full">
-                <defs>
-                  <linearGradient id="runsGrad" x1="0" y1="0" x2="1" y2="0">
-                    <stop offset="0%" stopColor="#7c3aed" />
-                    <stop offset="100%" stopColor="#6366f1" />
-                  </linearGradient>
-                  <linearGradient id="tokensGrad" x1="0" y1="0" x2="1" y2="0">
-                    <stop offset="0%" stopColor="#0891b2" />
-                    <stop offset="100%" stopColor="#06b6d4" />
-                  </linearGradient>
-                  <linearGradient id="costGrad" x1="0" y1="0" x2="1" y2="0">
-                    <stop offset="0%" stopColor="#10b981" />
-                    <stop offset="100%" stopColor="#22c55e" />
-                  </linearGradient>
-                </defs>
-                {[20, 40, 60, 80].map((y) => (
-                  <line key={y} x1="0" x2="100" y1={y} y2={y} stroke="rgba(148,163,184,0.18)" strokeWidth="0.4" />
-                ))}
-                <path d={evolutionPaths.runs} fill="none" stroke="url(#runsGrad)" strokeWidth="1.4" />
-                <path d={evolutionPaths.tokens} fill="none" stroke="url(#tokensGrad)" strokeWidth="1.4" />
-                <path d={evolutionPaths.cost} fill="none" stroke="url(#costGrad)" strokeWidth="1.4" />
-              </svg>
+            
+            <div className="h-72 rounded-[1.8rem] border border-white/10 bg-slate-950/50 p-6 relative overflow-hidden network-grid">
+              <div className="absolute inset-0 opacity-15 pointer-events-none">
+                <div className="w-full h-full" style={{ backgroundImage: 'radial-gradient(circle at 2px 2px, rgba(255,255,255,0.05) 1px, transparent 0)', backgroundSize: '32px 32px' }} />
+              </div>
+              
+              {recentExecutions.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-slate-500 gap-4">
+                  <div className="p-4 rounded-full bg-white/5 border border-white/5 animate-pulse">
+                    <BarChart3 size={32} className="opacity-40" />
+                  </div>
+                  <div className="text-[11px] font-black uppercase tracking-[0.25em] opacity-50">Syncing telemetry data...</div>
+                </div>
+              ) : (
+                <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="w-full h-full relative z-10 drop-shadow-2xl">
+                  <defs>
+                    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+                      <feGaussianBlur stdDeviation="2" result="coloredBlur" />
+                      <feMerge>
+                        <feMergeNode in="coloredBlur" />
+                        <feMergeNode in="SourceGraphic" />
+                      </feMerge>
+                    </filter>
+                    <linearGradient id="runsGrad" x1="0" y1="0" x2="1" y2="0">
+                      <stop offset="0%" stopColor="#a78bfa" />
+                      <stop offset="100%" stopColor="#6366f1" />
+                    </linearGradient>
+                  </defs>
+                  {[20, 40, 60, 80].map((y) => (
+                    <line key={y} x1="0" x2="100" y1={y} y2={y} stroke="rgba(148,163,184,0.15)" strokeWidth="0.5" />
+                  ))}
+                  <motion.path 
+                    initial={{ pathLength: 0, opacity: 0 }}
+                    animate={{ pathLength: 1, opacity: 1 }}
+                    transition={{ duration: 1.8, ease: 'easeInOut' }}
+                    d={evolutionPaths.runs} 
+                    fill="none" 
+                    stroke="url(#runsGrad)" 
+                    strokeWidth="2.5" 
+                    filter="url(#glow)"
+                  />
+                  <motion.path 
+                    initial={{ pathLength: 0, opacity: 0 }}
+                    animate={{ pathLength: 1, opacity: 0.5 }}
+                    transition={{ duration: 1.8, ease: 'easeInOut', delay: 0.3 }}
+                    d={evolutionPaths.tokens} 
+                    fill="none" 
+                    stroke="#22d3ee" 
+                    strokeWidth="2.5" 
+                  />
+                  <motion.path 
+                    initial={{ pathLength: 0, opacity: 0 }}
+                    animate={{ pathLength: 1, opacity: 0.5 }}
+                    transition={{ duration: 1.8, ease: 'easeInOut', delay: 0.6 }}
+                    d={evolutionPaths.cost} 
+                    fill="none" 
+                    stroke="#34d399" 
+                    strokeWidth="2.5" 
+                  />
+                </svg>
+              )}
             </div>
-            <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
-              <div className="rounded-lg border border-violet-400/20 bg-violet-500/10 px-2 py-1 text-violet-100">Runs</div>
-              <div className="rounded-lg border border-cyan-400/20 bg-cyan-500/10 px-2 py-1 text-cyan-100">Tokens</div>
-              <div className="rounded-lg border border-emerald-400/20 bg-emerald-500/10 px-2 py-1 text-emerald-100">Cost</div>
-            </div>
-            <div className="mt-3 grid grid-cols-7 gap-1 text-[10px] text-slate-400">
-              {evolutionSeries.map((d) => <div key={d.dateKey} className="text-center">{d.label}</div>)}
+            
+            <div className="mt-6 grid grid-cols-3 gap-4">
+              <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 p-4 flex items-center justify-between group/legend">
+                <div>
+                  <div className="text-[10px] font-black text-violet-300 uppercase tracking-widest mb-1">Runs</div>
+                  <div className="text-sm font-black text-white">{dashboardInsights.execution24h}</div>
+                </div>
+                <div className="w-3 h-3 rounded-full bg-violet-500 shadow-[0_0_12px_rgba(139,92,246,0.8)] group-hover:scale-125 transition-transform" />
+              </div>
+              <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4 flex items-center justify-between group/legend">
+                <div>
+                  <div className="text-[10px] font-black text-cyan-300 uppercase tracking-widest mb-1">Tokens</div>
+                  <div className="text-sm font-black text-white">{Math.round((dashboardInsights.totalPrompt + dashboardInsights.totalCompletion)/1000)}k</div>
+                </div>
+                <div className="w-3 h-3 rounded-full bg-cyan-500 shadow-[0_0_12px_rgba(6,182,212,0.8)] group-hover:scale-125 transition-transform" />
+              </div>
+              <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4 flex items-center justify-between group/legend">
+                <div>
+                  <div className="text-[10px] font-black text-emerald-300 uppercase tracking-widest mb-1">Cost</div>
+                  <div className="text-sm font-black text-white">${dashboardInsights.totalCost.toFixed(2)}</div>
+                </div>
+                <div className="w-3 h-3 rounded-full bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.8)] group-hover:scale-125 transition-transform" />
+              </div>
             </div>
           </div>
 
-          <div className="rounded-[1.6rem] border border-white/10 bg-white/[0.04] p-5">
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-xl font-bold text-white">Agent Coordination Matrix</h3>
-              <div className="text-xs text-slate-400">Top active agents</div>
-            </div>
-            <div className="text-xs text-slate-400 mb-3">Completion / Running / Failed distribution</div>
-            <div className="space-y-3">
-              {coordinationSeries.length === 0 && (
-                <div className="text-sm text-slate-400 border border-white/10 rounded-xl px-3 py-2">No execution data yet.</div>
-              )}
-              {coordinationSeries.map((row) => (
-                <div key={row.name}>
-                  <div className="flex items-center justify-between text-xs mb-1">
-                    <span className="truncate max-w-[70%] text-slate-200 font-semibold">{row.name}</span>
-                    <span className="text-slate-400">C {row.completedPct}% • R {row.runningPct}% • F {row.failedPct}%</span>
-                  </div>
-                  <div className="h-2.5 w-full rounded-full bg-white/10 overflow-hidden flex">
-                    <div className="h-full bg-violet-500" style={{ width: `${row.completedPct}%` }} />
-                    <div className="h-full bg-sky-500" style={{ width: `${row.runningPct}%` }} />
-                    <div className="h-full bg-orange-400" style={{ width: `${row.failedPct}%` }} />
-                  </div>
+          <div className="rounded-[2.4rem] border border-white/10 bg-white/[0.05] p-8 backdrop-blur-2xl relative overflow-hidden group">
+            <div className="absolute inset-0 bg-linear-to-b from-brand-500/5 to-transparent pointer-events-none" />
+            <div className="flex items-center justify-between mb-6 relative z-10">
+              <div className="flex items-center gap-4">
+                <div className="p-2.5 rounded-2xl bg-brand-500/15 text-brand-300">
+                  <Target size={24} />
                 </div>
-              ))}
+                <div>
+                  <h3 className="text-xl font-black text-white tracking-tight">Swarm Coordination</h3>
+                  <div className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mt-0.5">Real-Time Node Mesh</div>
+                </div>
+              </div>
+              <div className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 text-[10px] font-black text-slate-400 uppercase tracking-widest hidden sm:block">
+                Top Active Nodes
+              </div>
             </div>
-            <div className="mt-4 grid grid-cols-3 gap-2 text-[11px]">
-              <div className="rounded-lg border border-violet-400/20 bg-violet-500/10 px-2 py-1 text-violet-100 text-center">Completed</div>
-              <div className="rounded-lg border border-sky-400/20 bg-sky-500/10 px-2 py-1 text-sky-100 text-center">Running</div>
-              <div className="rounded-lg border border-orange-400/20 bg-orange-500/10 px-2 py-1 text-orange-100 text-center">Failed</div>
+            
+            <div className="space-y-5 max-h-[340px] overflow-y-auto pr-3 custom-scrollbar">
+              {coordinationSeries.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-16 text-slate-500 border-2 border-dashed border-white/5 rounded-[2rem] bg-white/[0.02]">
+                   <Users size={40} className="opacity-10 mb-4" />
+                   <p className="text-[12px] font-black uppercase tracking-[0.25em] opacity-40">Awaiting node activity...</p>
+                </div>
+              ) : (
+                coordinationSeries.map((row) => (
+                  <div key={row.name} className="group/row bg-white/[0.02] p-4 rounded-2xl border border-white/5 hover:bg-white/[0.05] transition-all">
+                    <div className="flex items-center justify-between text-[11px] mb-3">
+                      <span className="truncate max-w-[65%] text-slate-200 font-black tracking-tight group-hover/row:text-brand-100 transition-colors uppercase">{row.name}</span>
+                      <div className="flex gap-3 font-black text-[9px] text-slate-500 uppercase tracking-wider">
+                         <span className="text-violet-400">Done:{row.completedPct}%</span>
+                         <span className="text-sky-400">Live:{row.runningPct}%</span>
+                         <span className="text-orange-400">Fail:{row.failedPct}%</span>
+                      </div>
+                    </div>
+                    <div className="h-4 w-full rounded-full bg-slate-900/50 overflow-hidden flex border border-white/5 shadow-inner">
+                      <motion.div 
+                        initial={{ width: 0 }}
+                        animate={{ width: `${row.completedPct}%` }}
+                        className="h-full bg-linear-to-r from-violet-600 to-violet-400 shadow-[0_0_12px_rgba(139,92,246,0.5)]" 
+                      />
+                      <motion.div 
+                        initial={{ width: 0 }}
+                        animate={{ width: `${row.runningPct}%` }}
+                        className="h-full bg-linear-to-r from-sky-600 to-sky-400 shadow-[0_0_12px_rgba(14,165,233,0.5)]" 
+                      />
+                      <motion.div 
+                        initial={{ width: 0 }}
+                        animate={{ width: `${row.failedPct}%` }}
+                        className="h-full bg-linear-to-r from-orange-600 to-orange-400 shadow-[0_0_12px_rgba(251,146,60,0.5)]" 
+                      />
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
+            
+            {coordinationSeries.length > 0 && (
+              <div className="mt-8 pt-6 border-t border-white/10 grid grid-cols-3 gap-3">
+                <div className="flex flex-col items-center gap-2 bg-violet-600/10 rounded-2xl py-3 border border-violet-500/20">
+                  <div className="w-2.5 h-2.5 rounded-full bg-violet-500 shadow-[0_0_10px_rgba(139,92,246,0.8)]" />
+                  <span className="text-[10px] font-black text-violet-200 uppercase tracking-widest">Completed</span>
+                </div>
+                <div className="flex flex-col items-center gap-2 bg-sky-600/10 rounded-2xl py-3 border border-sky-500/20">
+                  <div className="w-2.5 h-2.5 rounded-full bg-sky-500 shadow-[0_0_10px_rgba(14,165,233,0.8)]" />
+                  <span className="text-[10px] font-black text-sky-200 uppercase tracking-widest">Running</span>
+                </div>
+                <div className="flex flex-col items-center gap-2 bg-orange-600/10 rounded-2xl py-3 border border-orange-500/20">
+                  <div className="w-2.5 h-2.5 rounded-full bg-orange-500 shadow-[0_0_10px_rgba(251,146,60,0.8)]" />
+                  <span className="text-[10px] font-black text-orange-200 uppercase tracking-widest">Failed</span>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
