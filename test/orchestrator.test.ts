@@ -195,7 +195,7 @@ describe.sequential('orchestrator local APIs', () => {
         goal: 'Coordinate multi-agent work',
         backstory: 'Test coordinator',
         provider: 'google',
-        model: 'gemini-3-flash-preview',
+        model: 'gemini-1.5-flash',
         toolIds: [Number(tool1.body.id)],
         mcp_tool_ids: [Number(tool1.body.id)],
         mcp_bundle_ids: [Number(bundle.body.id)],
@@ -209,7 +209,7 @@ describe.sequential('orchestrator local APIs', () => {
         goal: 'Execute assigned tasks',
         backstory: 'Test specialist',
         provider: 'google',
-        model: 'gemini-3-flash-preview',
+        model: 'gemini-1.5-flash',
       })
       .expect(200);
 
@@ -219,7 +219,7 @@ describe.sequential('orchestrator local APIs', () => {
         name: 'Defaults Agent',
         role: 'Generalist',
         provider: 'google',
-        model: 'gemini-3-flash-preview',
+        model: 'gemini-1.5-flash',
       })
       .expect(200);
     expect(agentWithDefaults.body.id).toBeTruthy();

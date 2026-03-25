@@ -604,7 +604,7 @@ export default function ToolsPage() {
         }
       } else {
         setAvailableModels([
-          { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview' },
+          { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
           { id: 'gpt-4o', name: 'GPT-4o' },
           { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet' }
         ]);

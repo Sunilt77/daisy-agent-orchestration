@@ -61,7 +61,7 @@ When asked to build a new capability, you should:
 1. Design the tool interface.
 2. Implement the tool logic (usually as a script).
 3. Register the tool to the platform using upsert_platform_tool.`,
-    model: 'gemini-3-flash-preview',
+    model: 'gemini-1.5-flash',
     provider: 'google',
     toolsEnabled: true,
   };

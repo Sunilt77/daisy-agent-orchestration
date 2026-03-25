@@ -87,7 +87,7 @@ async function createAgent(name = 'Runtime Agent') {
       backstory: 'runtime test backstory',
       systemPrompt: 'Respond with JSON only.',
       provider: 'google',
-      model: 'gemini-3-flash-preview',
+      model: 'gemini-1.5-flash',
       status: 'running',
     },
   });

@@ -1487,7 +1487,7 @@ app.get('/api/providers/:id/models', async (req, res) => {
       } catch (e) {
         // Fallback
         models = [
-          { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview' },
+          { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
           { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro Preview' },
           { id: 'gemini-2.5-flash-latest', name: 'Gemini 2.5 Flash' },
           { id: 'gemini-flash-lite-latest', name: 'Gemini Flash Lite' }
@@ -2409,7 +2409,7 @@ app.post('/api/agents', async (req, res) => {
         goal: normalizedGoal,
         backstory: normalizedBackstory,
         systemPrompt: finalSystemPrompt,
-        model: String(model || 'gemini-3-flash-preview'),
+        model: String(model || 'gemini-1.5-flash'),
         provider: String(provider || 'google'),
         temperature: normalizeNumber(temperature),
         maxTokens: normalizeNumber(max_tokens),
@@ -2499,7 +2499,7 @@ app.put('/api/agents/:id', async (req, res) => {
         goal: normalizedGoal,
         backstory: normalizedBackstory,
         systemPrompt: finalSystemPrompt,
-        model: String(model || 'gemini-3-flash-preview'),
+        model: String(model || 'gemini-1.5-flash'),
         provider: provider || 'google',
         temperature: normalizeNumber(temperature),
         maxTokens: normalizeNumber(max_tokens),
@@ -5184,7 +5184,7 @@ const DEFAULT_PRICING: Record<string, { input: number; output: number }> = {
   'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
   'gemini-2.5-flash-lite-latest': { input: 0.10, output: 0.40 },
   'gemini-flash-lite-latest': { input: 0.10, output: 0.40 },
-  'gemini-3-flash-preview': { input: 0.30, output: 2.50 },
+  'gemini-1.5-flash': { input: 0.30, output: 1.20 },
   'gemini-3.1-pro-preview': { input: 1.25, output: 10.00 },
 
   // OpenAI (public API pricing)
@@ -5727,7 +5727,7 @@ async function runAgent(
 	    const rootSpanId = span.spanContext().spanId;
 	    span.setAttribute('agent.name', agent.name);
 	    span.setAttribute('agent.role', agent.role);
-	    span.setAttribute('agent.model', agent.model || 'gemini-3-flash-preview');
+	    span.setAttribute('agent.model', agent.model || 'gemini-1.5-flash');
 	    span.setAttribute('task.description', task.description);
 
 	    // Set status to running
@@ -5751,7 +5751,8 @@ async function runAgent(
 	    }
 
     const totalUsage = { prompt_tokens: 0, completion_tokens: 0, cost: 0 };
-    const model = agent?.model || 'gemini-1.5-flash';
+    const rawModel = agent?.model || 'gemini-1.5-flash';
+    const model = (rawModel === 'gemini-3-flash-preview') ? 'gemini-1.5-flash' : rawModel;
     const modelPricing = getModelPricing(model);
 
     let finalOutput = "";

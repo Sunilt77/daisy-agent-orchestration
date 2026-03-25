@@ -56,7 +56,7 @@ describe.sequential('builder UI behavior', () => {
       goal: '',
       backstory: '',
       system_prompt: '',
-      model: 'gemini-3-flash-preview',
+      model: 'gemini-1.5-flash',
       provider: 'google',
       temperature: null,
       max_tokens: null,
@@ -85,7 +85,7 @@ describe.sequential('builder UI behavior', () => {
       if (url === '/api/mcp/bundles' && method === 'GET') return mockJson([]);
       if (url === '/api/projects' && method === 'GET') return mockJson([]);
       if (url === '/api/providers' && method === 'GET') return mockJson([{ id: 'google', name: 'Google', provider: 'google' }]);
-      if (url === '/api/providers/google/models' && method === 'GET') return mockJson([{ id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview' }]);
+      if (url === '/api/providers/google/models' && method === 'GET') return mockJson([{ id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' }]);
       if (url === '/api/agents/77' && method === 'PUT') {
         postedAgentPayload = JSON.parse(String(init?.body || '{}'));
         return mockJson({ id: 101 });
