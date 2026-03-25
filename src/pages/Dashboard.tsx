@@ -195,8 +195,9 @@ export default function Dashboard() {
     const totalPrompt = recentExecutions.reduce((sum, e) => sum + (e.prompt_tokens || 0), 0);
     const totalCompletion = recentExecutions.reduce((sum, e) => sum + (e.completion_tokens || 0), 0);
     const totalCost = recentExecutions.reduce((sum, e) => sum + (e.total_cost || 0), 0);
-    const avgLatency = recentExecutions.length
+    const avgLatency = (Array.isArray(recentExecutions) && recentExecutions.length)
       ? Math.round(recentExecutions.reduce((sum, e) => {
+          if (!e.created_at) return sum;
           const delta = now - new Date(e.created_at).getTime();
           return sum + Math.max(0, Math.min(delta / 1000, 3600));
         }, 0) / recentExecutions.length)
@@ -304,13 +305,21 @@ export default function Dashboard() {
       return { dateKey, label: d.toLocaleDateString([], { weekday: 'short' }), runs: 0, tokens: 0, cost: 0 };
     });
     const bucketIndex = new Map(buckets.map((b, idx) => [b.dateKey, idx]));
+    if (!Array.isArray(recentExecutions)) return buckets;
     recentExecutions.forEach((run) => {
-      const key = new Date(run.created_at).toISOString().slice(0, 10);
-      const idx = bucketIndex.get(key);
-      if (idx === undefined) return;
-      buckets[idx].runs += 1;
-      buckets[idx].tokens += (run.prompt_tokens || 0) + (run.completion_tokens || 0);
-      buckets[idx].cost += run.total_cost || 0;
+      if (!run.created_at) return;
+      try {
+        const d = new Date(run.created_at);
+        if (isNaN(d.getTime())) return;
+        const key = d.toISOString().slice(0, 10);
+        const idx = bucketIndex.get(key);
+        if (idx === undefined) return;
+        buckets[idx].runs += 1;
+        buckets[idx].tokens += (run.prompt_tokens || 0) + (run.completion_tokens || 0);
+        buckets[idx].cost += run.total_cost || 0;
+      } catch (e) {
+        // Skip invalid dates
+      }
     });
 
     const maxRuns = Math.max(1, ...buckets.map((b) => b.runs));
@@ -1324,16 +1333,16 @@ export default function Dashboard() {
                                         {exec.agent_name}
                                     </td>
                                     <td className="px-6 py-4 text-slate-500">
-                                        {new Date(exec.created_at).toLocaleString()}
+                                        {exec.created_at ? new Date(exec.created_at).toLocaleString() : '—'}
                                     </td>
                                     <td className="px-6 py-4 text-right font-mono text-slate-600">
-                                        {exec.prompt_tokens.toLocaleString()}
+                                        {(exec.prompt_tokens || 0).toLocaleString()}
                                     </td>
                                     <td className="px-6 py-4 text-right font-mono text-slate-600">
-                                        {exec.completion_tokens.toLocaleString()}
+                                        {(exec.completion_tokens || 0).toLocaleString()}
                                     </td>
                                     <td className="px-6 py-4 text-right font-mono font-medium text-emerald-600">
-                                        ${exec.total_cost.toFixed(6)}
+                                        ${(exec.total_cost || 0).toFixed(6)}
                                     </td>
                                 </tr>
                             ))}
@@ -1370,7 +1379,7 @@ export default function Dashboard() {
                 <div className="p-6 space-y-6">
                     <div className="flex items-center gap-4 mb-4">
                         <span className="text-slate-600 text-sm font-medium">
-                            {new Date(selectedExecution.created_at).toLocaleString()}
+                            {selectedExecution.created_at ? new Date(selectedExecution.created_at).toLocaleString() : '—'}
                         </span>
                     </div>
 
@@ -1395,15 +1404,15 @@ export default function Dashboard() {
                     <div className="grid grid-cols-3 gap-4 pt-4 border-t border-slate-100">
                         <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
                             <div className="text-xs text-slate-500 mb-1">Prompt Tokens</div>
-                            <div className="font-medium text-slate-900">{selectedExecution.prompt_tokens.toLocaleString()}</div>
+                            <div className="font-medium text-slate-900">{(selectedExecution.prompt_tokens || 0).toLocaleString()}</div>
                         </div>
                         <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
                             <div className="text-xs text-slate-500 mb-1">Completion Tokens</div>
-                            <div className="font-medium text-slate-900">{selectedExecution.completion_tokens.toLocaleString()}</div>
+                            <div className="font-medium text-slate-900">{(selectedExecution.completion_tokens || 0).toLocaleString()}</div>
                         </div>
                         <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
                             <div className="text-xs text-slate-500 mb-1">Total Cost</div>
-                            <div className="font-medium text-emerald-600">${selectedExecution.total_cost.toFixed(6)}</div>
+                            <div className="font-medium text-emerald-600">${(selectedExecution.total_cost || 0).toFixed(6)}</div>
                         </div>
                     </div>
                 </div>
