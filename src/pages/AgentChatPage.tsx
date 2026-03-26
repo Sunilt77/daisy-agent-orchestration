@@ -515,6 +515,16 @@ export default function AgentChatPage() {
 
         await new Promise<void>((resolve) => {
           const es = new EventSource(`/api/agent-executions/${parentExecutionId}/stream`);
+          const timeout = setTimeout(() => {
+            es.close();
+            resolve();
+          }, 180000); // 3 minute timeout for supervisor delegation
+          
+          const cleanup = () => {
+            clearTimeout(timeout);
+            try { es.close(); } catch { /* ignore */ }
+          };
+          
           es.addEventListener('update', (event: MessageEvent) => {
             try {
               const payload = JSON.parse(String(event.data || '{}'));
@@ -530,8 +540,8 @@ export default function AgentChatPage() {
               }));
             } catch { /* ignore */ }
           });
-          es.addEventListener('done', () => { es.close(); resolve(); });
-          es.addEventListener('error', () => { es.close(); resolve(); });
+          es.addEventListener('done', () => { cleanup(); resolve(); });
+          es.addEventListener('error', () => { cleanup(); resolve(); });
         });
 
         const tRes = await fetch(`/api/agent-executions/${parentExecutionId}/timeline`);
@@ -596,47 +606,57 @@ export default function AgentChatPage() {
         setMessages((prev) => prev.map((m) => (m.ts === assistantTs && m.role === 'assistant' ? updater(m) : m)));
       };
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        buffer = buffer.replace(/\r\n/g, '\n');
-        const parsed = parseSseChunk(buffer);
-        buffer = parsed.rest;
-        for (const evt of parsed.events) {
-          if (evt.event === 'session') {
-            if (evt.data?.session_id) setSelectedSessionId(String(evt.data.session_id));
-            continue;
-          }
-          if (evt.event === 'status') {
-            liveTrace = [...liveTrace, { type: 'status', message: String(evt.data?.message || evt.data?.status || 'running') }];
-            updateAssistantMessage((m) => ({ ...m, trace: liveTrace, content: 'Working on it…' }));
-            continue;
-          }
-          if (evt.event === 'log') {
-            const execIdFromLog = Number(evt.data?.execution_id || 0);
-            if (!execStreamStarted && Number.isFinite(execIdFromLog) && execIdFromLog > 0) {
-              execStreamStarted = true;
-              execStream = new EventSource(`/api/agent-executions/${execIdFromLog}/stream`);
-              execStream.addEventListener('update', (e: MessageEvent) => {
-                try {
-                  const payload = JSON.parse(String(e.data || '{}'));
-                  liveTrace = appendToolSnapshotTrace(liveTrace, payload?.tools || []);
-                  updateAssistantMessage((m) => ({ ...m, trace: liveTrace, content: 'Working on it…' }));
-                } catch { /* ignore */ }
-              });
-              execStream.addEventListener('done', () => { execStream?.close(); execStream = null; });
-              execStream.addEventListener('error', () => { execStream?.close(); execStream = null; });
-            }
-            liveTrace = [...liveTrace, evt.data || {}];
-            updateAssistantMessage((m) => ({ ...m, trace: liveTrace, content: 'Working on it…' }));
-            continue;
-          }
-          if (evt.event === 'done') { finalData = evt.data || {}; continue; }
-          if (evt.event === 'error') throw new Error(evt.data?.error || 'Chat failed');
+      const closeExecStream = () => {
+        if (execStream) {
+          try { execStream.close(); } catch { /* ignore */ }
+          execStream = null;
         }
+      };
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          buffer = buffer.replace(/\r\n/g, '\n');
+          const parsed = parseSseChunk(buffer);
+          buffer = parsed.rest;
+          for (const evt of parsed.events) {
+            if (evt.event === 'session') {
+              if (evt.data?.session_id) setSelectedSessionId(String(evt.data.session_id));
+              continue;
+            }
+            if (evt.event === 'status') {
+              liveTrace = [...liveTrace, { type: 'status', message: String(evt.data?.message || evt.data?.status || 'running') }];
+              updateAssistantMessage((m) => ({ ...m, trace: liveTrace, content: 'Working on it…' }));
+              continue;
+            }
+            if (evt.event === 'log') {
+              const execIdFromLog = Number(evt.data?.execution_id || 0);
+              if (!execStreamStarted && Number.isFinite(execIdFromLog) && execIdFromLog > 0) {
+                execStreamStarted = true;
+                execStream = new EventSource(`/api/agent-executions/${execIdFromLog}/stream`);
+                execStream.addEventListener('update', (e: MessageEvent) => {
+                  try {
+                    const payload = JSON.parse(String(e.data || '{}'));
+                    liveTrace = appendToolSnapshotTrace(liveTrace, payload?.tools || []);
+                    updateAssistantMessage((m) => ({ ...m, trace: liveTrace, content: 'Working on it…' }));
+                  } catch { /* ignore */ }
+                });
+                execStream.addEventListener('done', () => { closeExecStream(); });
+                execStream.addEventListener('error', () => { closeExecStream(); });
+              }
+              liveTrace = [...liveTrace, evt.data || {}];
+              updateAssistantMessage((m) => ({ ...m, trace: liveTrace, content: 'Working on it…' }));
+              continue;
+            }
+            if (evt.event === 'done') { finalData = evt.data || {}; continue; }
+            if (evt.event === 'error') throw new Error(evt.data?.error || 'Chat failed');
+          }
+        }
+      } finally {
+        closeExecStream();
       }
-      if (execStream) execStream.close();
 
       const reply = String(finalData?.reply || '');
       const execId = Number(finalData?.execution_id || 0);

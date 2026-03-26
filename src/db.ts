@@ -323,6 +323,7 @@ export function initDb() {
       name TEXT NOT NULL,
       slug TEXT NOT NULL UNIQUE,
       description TEXT,
+      is_exposed INTEGER DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -458,9 +459,15 @@ export function initDb() {
     const applyColumn = (sql: string) => {
       try {
         db.exec(sql);
-      } catch (e) {
-        console.error('Failed to apply SQL:', sql, 'error:', e);
-        throw e;
+      } catch (e: any) {
+        // Column already exists is not a fatal error - just log and continue
+        const errorMsg = String(e?.message || '');
+        if (errorMsg.includes('duplicate column') || errorMsg.includes('already exists')) {
+          console.info('Column migration already applied:', sql);
+        } else {
+          console.error('Failed to apply SQL:', sql, 'error:', e);
+          throw e;
+        }
       }
     };
 
@@ -733,6 +740,7 @@ export function initDb() {
           name TEXT NOT NULL,
           slug TEXT NOT NULL UNIQUE,
           description TEXT,
+          is_exposed INTEGER DEFAULT 1,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );

@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { Prisma } from '@prisma/client';
 import { generateEmbedding, EmbeddingConfig } from './embeddings.js';
 import { getPrisma } from '../platform/prisma.js';
 import db from '../db.js';
@@ -67,7 +68,8 @@ export async function processDocument(
     await prisma.documentVector.create({
       data: {
         chunkId: chunkRecord.id,
-        embedding: JSON.stringify(embedding), // Store as JSON since we can't use vector type yet
+        // Persist embeddings as JSON text until pgvector is enabled end-to-end.
+        embedding: JSON.stringify(embedding),
         provider,
         model
       }
@@ -145,7 +147,7 @@ export async function createKnowledgebaseIndex(
       name,
       slug: generateSlug(name),
       description,
-      embeddingConfig: JSON.stringify(embeddingConfig)
+      embeddingConfig: embeddingConfig as unknown as Prisma.InputJsonValue
     }
   });
 

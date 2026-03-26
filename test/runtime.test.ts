@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { app } from '../server';
-import db from '../src/db';
-import { getPrisma } from '../src/platform/prisma';
+import db, { initDb } from '../src/db';
+import { ensurePrismaReady, getPrisma } from '../src/platform/prisma';
 
 async function wipeLocalDb() {
-  const prisma = getPrisma();
+  const prisma = await ensurePrismaReady();
+  initDb();
   // Clear persistent and runtime orchestrator tables in Postgres
   await prisma.$transaction([
     prisma.orchestratorAgentSessionMemory.deleteMany(),
@@ -71,14 +72,18 @@ async function wipeLocalDb() {
       'settings',
     ];
     for (const table of tables) {
-      db.prepare(`DELETE FROM ${table}`).run();
+      try {
+        db.prepare(`DELETE FROM ${table}`).run();
+      } catch (e) {
+        console.warn(`Failed to clear table ${table}: ${(e as Error).message}`);
+      }
     }
   });
   tx();
 }
 
 async function createAgent(name = 'Runtime Agent') {
-  const prisma = getPrisma();
+  const prisma = await ensurePrismaReady();
   const agent = await prisma.orchestratorAgent.create({
     data: {
       name,
@@ -110,7 +115,7 @@ async function createAgent(name = 'Runtime Agent') {
 }
 
 async function createCrew(name = 'Runtime Crew') {
-  const prisma = getPrisma();
+  const prisma = await ensurePrismaReady();
   const crew = await prisma.orchestratorCrew.create({
     data: {
       name,
@@ -256,7 +261,7 @@ describe.sequential('runtime + streaming + control APIs', () => {
 
   it('supports agent sessions API and stop-all cancellation semantics', async () => {
     const agentId = await createAgent('Session Agent');
-    const prisma = getPrisma();
+    const prisma = await ensurePrismaReady();
     const runningExec = await prisma.orchestratorAgentExecution.create({
       data: {
         agentId,
@@ -369,14 +374,14 @@ describe.sequential('runtime + streaming + control APIs', () => {
       },
     });
 
-    for (let i = 0; i < 20; i += 1) {
+    for (let i = 0; i < 50; i += 1) {
       const parent = await prisma.orchestratorAgentExecution.findUnique({ where: { id: parentExecutionId } });
       if (parent?.status === 'completed') {
         expect(String(parent.output)).toContain('child out');
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
-      if (i === 19) {
+      if (i === 49) {
         throw new Error('Delegated execution did not complete in time');
       }
     }

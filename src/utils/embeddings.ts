@@ -96,7 +96,7 @@ export async function searchSimilarChunks(
 
   // Calculate cosine similarity for each vector
   const similarities = vectors.map(v => {
-    const storedEmbedding = JSON.parse(v.embedding as string);
+    const storedEmbedding = JSON.parse(String(v.embedding || '[]'));
     const similarity = cosineSimilarity(queryEmbedding, storedEmbedding);
     return {
       chunk: {

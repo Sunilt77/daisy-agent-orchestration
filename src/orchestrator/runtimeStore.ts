@@ -35,7 +35,7 @@ export async function enqueueJob(type: string, payload: any) {
     },
     select: { id: true },
   });
-  return row.id;
+  return Number(row.id);
 }
 
 export async function updateJobResult(
@@ -69,7 +69,7 @@ export async function claimNextJob() {
   });
   if (claimed.count === 0) return null;
   return {
-    id: job.id,
+    id: Number(job.id),
     type: job.type,
     payload: parseJson(job.payload, {}),
   };
@@ -151,7 +151,7 @@ export async function createDelegatedParentExecution(options: {
     },
     select: { id: true },
   });
-  return row.id;
+  return Number(row.id);
 }
 
 export async function finalizeSupervisorExecution(
@@ -161,7 +161,7 @@ export async function finalizeSupervisorExecution(
   totalUsage?: { prompt_tokens: number; completion_tokens: number; cost: number }
 ) {
   const usage = totalUsage || { prompt_tokens: 0, completion_tokens: 0, cost: 0 };
-  await getPrisma().orchestratorAgentExecution.update({
+  await getPrisma().orchestratorAgentExecution.updateMany({
     where: { id: parentExecutionId },
     data: {
       status,
@@ -296,7 +296,7 @@ export async function createWorkflowRun(workflowId: number, triggerType: string,
     },
     select: { id: true },
   });
-  return row.id;
+  return Number(row.id);
 }
 
 export async function persistWorkflowRun(runId: number, status: string, output: any, logs: any[]) {
@@ -386,7 +386,7 @@ export async function createAgentExecution(data: {
     },
     select: { id: true },
   });
-  return row.id;
+  return Number(row.id);
 }
 
 export async function updateAgentExecution(execId: number, data: {
@@ -455,7 +455,7 @@ export async function createToolExecution(data: {
     },
     select: { id: true },
   });
-  return row.id;
+  return Number(row.id);
 }
 
 export async function updateToolExecution(id: number, data: {

@@ -1,9 +1,11 @@
 export async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5, baseDelayMs = 2000): Promise<T> {
     let attempt = 0;
+    let lastError: Error | null = null;
     while (attempt < maxRetries) {
         try {
             return await fn();
         } catch (error: any) {
+            lastError = error;
             attempt++;
             const errorString = error?.message || String(error);
             const isRetryable = errorString.includes('429') || 
@@ -29,5 +31,6 @@ export async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5, baseDel
             await new Promise(resolve => setTimeout(resolve, delay));
         }
     }
-    throw new Error("Max retries reached");
+    const errorMessage = lastError?.message || 'Unknown error';
+    throw new Error(`Max retries reached (${maxRetries} attempts). Last error: ${errorMessage}`);
 }

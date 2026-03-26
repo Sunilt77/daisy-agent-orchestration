@@ -20,7 +20,7 @@ import JSON5 from 'json5';
 import { withRetry } from './src/utils/withRetry';
 import cookieParser from 'cookie-parser';
 import { registerPlatformRoutes } from './src/platform/routes';
-import { closePrisma, getPrisma } from './src/platform/prisma';
+import { closePrisma, ensurePrismaReady, getPrisma } from './src/platform/prisma';
 import { closeRedis, initRedis, isRedisConnected } from './src/infra/redis';
 import { getSqlitePath } from './src/db';
 import { startSqliteGcsSyncLoop, syncSqliteToGcs } from './src/infra/sqliteGcs';
@@ -59,9 +59,20 @@ import * as z from 'zod/v4';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import * as internalTools from './src/orchestrator/internalTools.js';
+import { registerOrchestratorConfigRoutes } from './src/server/registerOrchestratorConfigRoutes';
+import { registerMcpAdminRoutes } from './src/server/registerMcpAdminRoutes';
+import { registerRuntimeControlRoutes } from './src/server/registerRuntimeControlRoutes';
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
+
+// Test suites import `app` without calling `startServer()`, so the local mirror
+// schema must be ready at module load time as well.
+initDb();
+
+app.use((req, res, next) => {
+  ensurePrismaReady().then(() => next()).catch(next);
+});
 
 type CancelToken = { canceled: boolean; reason?: string };
 type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'canceled';
@@ -91,7 +102,12 @@ function getSetting(key: string): string | null {
 import { refreshPersistentMirror } from './src/orchestrator/sqliteMirror.js';
 
 async function setSetting(key: string, value: string | null) {
-  const prisma = getPrisma();
+  const prisma = await ensurePrismaReady();
+  if (value == null) {
+    db.prepare('DELETE FROM settings WHERE key = ?').run(key);
+  } else {
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+  }
   if (value == null) {
     await prisma.orchestratorSetting.deleteMany({ where: { key } });
   } else {
@@ -795,689 +811,25 @@ app.put('/api/platform/ingestion', async (req, res) => {
 });
 
 // MCP exposure configuration
-app.get('/api/mcp/config', (_req, res) => {
-  const token = getSetting(SETTINGS_KEY_MCP_AUTH_TOKEN);
-  res.json({ auth_token: token || null });
-});
-
-app.put('/api/mcp/config', async (req, res) => {
-  const { auth_token } = req.body || {};
-  if (auth_token === '' || auth_token == null) {
-    await setSetting(SETTINGS_KEY_MCP_AUTH_TOKEN, null);
-    return res.json({ auth_token: null });
-  }
-  if (typeof auth_token !== 'string') return res.status(400).json({ error: 'auth_token must be a string' });
-  await setSetting(SETTINGS_KEY_MCP_AUTH_TOKEN, auth_token.trim());
-  res.json({ auth_token: auth_token.trim() });
-});
-
-// MCP exposed tools
-app.get('/api/mcp/exposed-tools', async (_req, res) => {
-  try {
-    const prisma = getPrisma();
-    const [tools, exposures] = await Promise.all([
-      prisma.orchestratorTool.findMany({
-        orderBy: { name: 'asc' },
-        select: { id: true, name: true, description: true, category: true, type: true },
-      }),
-      prisma.orchestratorMcpExposedTool.findMany({
-        select: { toolId: true, exposedName: true, description: true },
-      }),
-    ]);
-    const exposureByToolId = new Map(exposures.map((row) => [row.toolId, row]));
-    res.json(tools.map((tool) => {
-      const exposure = exposureByToolId.get(tool.id);
-      return {
-        tool_id: tool.id,
-        tool_name: tool.name,
-        tool_description: tool.description,
-        category: tool.category,
-        tool_type: tool.type,
-        exposed_name: exposure?.exposedName ?? null,
-        exposed_description: exposure?.description ?? null,
-      };
-    }));
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/mcp/exposed-tools/:toolId/versions', (req, res) => {
-  const toolId = Number(req.params.toolId);
-  if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
-  const tool = db.prepare('SELECT id, name FROM tools WHERE id = ?').get(toolId) as any;
-  if (!tool) return res.status(404).json({ error: 'Tool not found' });
-  const versions = db.prepare(`
-    SELECT id, tool_id, version_number, exposed_name, description, is_exposed, change_kind, created_at
-    FROM mcp_exposed_tool_versions
-    WHERE tool_id = ?
-    ORDER BY version_number DESC, id DESC
-  `).all(toolId);
-  res.json({ tool, versions });
-});
-
-app.put('/api/mcp/exposed-tools/:toolId', async (req, res) => {
-  const toolId = Number(req.params.toolId);
-  if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
-  const { exposed, exposed_name, description } = req.body || {};
-  const tool = db.prepare('SELECT id, name, description FROM tools WHERE id = ?').get(toolId) as any;
-  if (!tool) return res.status(404).json({ error: 'Tool not found' });
-
-  const currentVersion = Number((db.prepare('SELECT MAX(version_number) as max_version FROM mcp_exposed_tool_versions WHERE tool_id = ?').get(toolId) as any)?.max_version || 0);
-
-  try {
-    const prisma = getPrisma();
-    if (!exposed) {
-      await prisma.orchestratorMcpExposedTool.deleteMany({ where: { toolId } });
-      await prisma.orchestratorAgentMcpTool.deleteMany({ where: { toolId } });
-      await prisma.orchestratorMcpExposedToolVersion.create({
-        data: {
-          toolId,
-          versionNumber: currentVersion + 1,
-          exposedName: null,
-          description: null,
-          isExposed: false,
-          changeKind: 'disable',
-        },
-      });
-      await refreshPersistentMirror();
-      return res.json({ exposed: false });
-    }
-
-    const name = typeof exposed_name === 'string' && exposed_name.trim()
-      ? exposed_name.trim()
-      : String(tool.name).toLowerCase().replace(/[^a-z0-9_\\-]/g, '_');
-    const desc = typeof description === 'string' && description.trim()
-      ? description.trim()
-      : (tool.description || '');
-
-    await prisma.orchestratorMcpExposedTool.upsert({
-      where: { toolId },
-      update: {
-        exposedName: name,
-        description: desc,
-        updatedAt: new Date(),
-      },
-      create: {
-        toolId,
-        exposedName: name,
-        description: desc,
-      },
-    });
-    await prisma.orchestratorMcpExposedToolVersion.create({
-      data: {
-        toolId,
-        versionNumber: currentVersion + 1,
-        exposedName: name,
-        description: desc,
-        isExposed: true,
-        changeKind: currentVersion === 0 ? 'create' : 'update',
-      },
-    });
-    await refreshPersistentMirror();
-
-    res.json({ exposed: true, exposed_name: name, description: desc });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message || 'Failed to update exposed tool' });
-  }
-});
-
-app.post('/api/mcp/exposed-tools/:toolId/restore/:versionId', async (req, res) => {
-  const toolId = Number(req.params.toolId);
-  const versionId = Number(req.params.versionId);
-  if (!Number.isFinite(toolId) || !Number.isFinite(versionId)) return res.status(400).json({ error: 'Invalid tool or version id' });
-  const version = db.prepare(`
-    SELECT *
-    FROM mcp_exposed_tool_versions
-    WHERE id = ? AND tool_id = ?
-    LIMIT 1
-  `).get(versionId, toolId) as any;
-  if (!version) return res.status(404).json({ error: 'Exposure version not found' });
-  const currentVersion = Number((db.prepare('SELECT MAX(version_number) as max_version FROM mcp_exposed_tool_versions WHERE tool_id = ?').get(toolId) as any)?.max_version || 0);
-  try {
-    const prisma = getPrisma();
-    if (!version.is_exposed) {
-      await prisma.orchestratorMcpExposedTool.deleteMany({ where: { toolId } });
-      await prisma.orchestratorAgentMcpTool.deleteMany({ where: { toolId } });
-      await prisma.orchestratorMcpExposedToolVersion.create({
-        data: {
-          toolId,
-          versionNumber: currentVersion + 1,
-          exposedName: null,
-          description: null,
-          isExposed: false,
-          changeKind: 'restore',
-        },
-      });
-      await refreshPersistentMirror();
-      return res.json({ success: true, exposed: false, version: currentVersion + 1 });
-    }
-    await prisma.orchestratorMcpExposedTool.upsert({
-      where: { toolId },
-      update: {
-        exposedName: version.exposed_name,
-        description: version.description || '',
-        updatedAt: new Date(),
-      },
-      create: {
-        toolId,
-        exposedName: version.exposed_name,
-        description: version.description || '',
-      },
-    });
-    await prisma.orchestratorMcpExposedToolVersion.create({
-      data: {
-        toolId,
-        versionNumber: currentVersion + 1,
-        exposedName: version.exposed_name,
-        description: version.description || '',
-        isExposed: true,
-        changeKind: 'restore',
-      },
-    });
-    await refreshPersistentMirror();
-    res.json({ success: true, exposed: true, version: currentVersion + 1 });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message || 'Failed to restore exposed tool version' });
-  }
-});
-
-// MCP bundles: expose a selected set of tools as one MCP endpoint.
-app.get('/api/mcp/bundles', async (_req, res) => {
-  try {
-    const prisma = getPrisma();
-    const [bundles, bundleTools, tools, exposures] = await Promise.all([
-      prisma.orchestratorMcpBundle.findMany({ orderBy: { updatedAt: 'desc' } }),
-      prisma.orchestratorMcpBundleTool.findMany({ orderBy: [{ bundleId: 'asc' }, { toolId: 'asc' }] }),
-      prisma.orchestratorTool.findMany({
-        select: { id: true, name: true, description: true, category: true },
-      }),
-      prisma.orchestratorMcpExposedTool.findMany({
-        select: { toolId: true, exposedName: true },
-      }),
-    ]);
-    const toolById = new Map(tools.map((tool) => [tool.id, tool]));
-    const exposureByToolId = new Map(exposures.map((row) => [row.toolId, row.exposedName]));
-    const toolsByBundle = new Map<number, any[]>();
-    for (const row of bundleTools) {
-      const tool = toolById.get(row.toolId);
-      if (!tool) continue;
-      if (!toolsByBundle.has(row.bundleId)) toolsByBundle.set(row.bundleId, []);
-      toolsByBundle.get(row.bundleId)!.push({
-        tool_id: tool.id,
-        tool_name: tool.name,
-        tool_description: tool.description,
-        category: tool.category,
-        exposed_name: exposureByToolId.get(tool.id) || null,
-      });
-    }
-    // Get exposure status from SQLite since it might not exist in PostgreSQL yet
-    const bundleExposureStatus = new Map();
-    try {
-      for (const bundle of bundles) {
-        const exposureRow = db.prepare('SELECT is_exposed FROM mcp_bundles WHERE id = ?').get(bundle.id);
-        bundleExposureStatus.set(bundle.id, exposureRow ? Boolean(exposureRow.is_exposed) : true);
-      }
-    } catch (e) {
-      console.warn('Failed to get bundle exposure status from SQLite:', e.message);
-    }
-
-    res.json(bundles.map((b) => ({
-      id: b.id,
-      name: b.name,
-      slug: b.slug,
-      description: b.description,
-      created_at: b.createdAt,
-      updated_at: b.updatedAt,
-      is_exposed: bundleExposureStatus.has(b.id) ? bundleExposureStatus.get(b.id) : Boolean(b.isExposed),
-      tools: toolsByBundle.get(b.id) || [],
-      tool_count: (toolsByBundle.get(b.id) || []).length,
-    })));
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-function getMcpBundleDependencies(bundleId: number) {
-  const agents = db.prepare(`
-    SELECT a.id, a.name
-    FROM agent_mcp_bundles amb
-    JOIN agents a ON a.id = amb.agent_id
-    WHERE amb.bundle_id = ?
-    ORDER BY a.name ASC
-  `).all(bundleId) as any[];
-  return {
-    agents,
-    agents_count: agents.length,
-  };
-}
-
-app.get('/api/mcp/bundles/:id/versions', (req, res) => {
-  const bundleId = Number(req.params.id);
-  if (!Number.isFinite(bundleId)) return res.status(400).json({ error: 'Invalid bundle id' });
-  const bundle = db.prepare('SELECT id, name, slug FROM mcp_bundles WHERE id = ?').get(bundleId) as any;
-  if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
-  const versions = db.prepare(`
-    SELECT id, bundle_id, version_number, name, slug, description, tool_ids, change_kind, created_at
-    FROM mcp_bundle_versions
-    WHERE bundle_id = ?
-    ORDER BY version_number DESC, id DESC
-  `).all(bundleId);
-  const dependencies = getMcpBundleDependencies(bundleId);
-  res.json({ bundle, versions, dependencies });
-});
-
-app.put('/api/mcp/bundles/:id/exposure', async (req, res) => {
-  const bundleId = Number(req.params.id);
-  const { is_exposed } = req.body || {};
-  if (!Number.isFinite(bundleId)) return res.status(400).json({ error: 'Invalid bundle id' });
-  
-  try {
-    // Update SQLite database directly
-    db.prepare('UPDATE mcp_bundles SET is_exposed = ? WHERE id = ?')
-      .run(is_exposed ? 1 : 0, bundleId);
-
-    // For PostgreSQL, check if the field exists in the schema before using it
-    try {
-      const prisma = getPrisma();
-      const bundle = await prisma.orchestratorMcpBundle.findUnique({ where: { id: bundleId } });
-      if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
-      
-      // Update only the updatedAt field in PostgreSQL since isExposed might not exist yet
-      await prisma.orchestratorMcpBundle.update({
-        where: { id: bundleId },
-        data: {
-          updatedAt: new Date(),
-        },
-      });
-    } catch (prismaError) {
-      console.warn('Prisma update failed, continuing with SQLite only:', prismaError.message);
-    }
-    
-    await refreshPersistentMirror();
-    res.json({ success: true });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/mcp/bundles', async (req, res) => {
-  const { name, slug, description, tool_ids, is_exposed } = req.body || {};
-  const parsedIds = Array.isArray(tool_ids) ? [...new Set(tool_ids.map((v: any) => Number(v)).filter((n: number) => Number.isFinite(n)))] : [];
-  if (!parsedIds.length) return res.status(400).json({ error: 'tool_ids must include at least one tool' });
-  const cleanName = typeof name === 'string' && name.trim() ? name.trim() : 'MCP Bundle';
-  const cleanSlug = (typeof slug === 'string' && slug.trim() ? slug.trim() : cleanName.toLowerCase())
-    .replace(/[^a-z0-9_-]/gi, '_')
-    .toLowerCase();
-  if (!cleanSlug) return res.status(400).json({ error: 'Invalid slug' });
-  // Default exposure to true if not specified
-  const isExposed = is_exposed !== false;
-
-  try {
-    const prisma = getPrisma();
-    const existing = await prisma.orchestratorMcpBundle.findUnique({ where: { slug: cleanSlug } });
-    let bundleId: number;
-    let previousVersion = 0;
-    if (existing) {
-      bundleId = existing.id;
-      previousVersion = Number((await prisma.orchestratorMcpBundleVersion.aggregate({
-        where: { bundleId },
-        _max: { versionNumber: true },
-      }))._max.versionNumber || 0);
-      // Update in PostgreSQL without the isExposed field
-      await prisma.orchestratorMcpBundle.update({
-        where: { id: bundleId },
-        data: {
-          name: cleanName,
-          description: typeof description === 'string' ? description : null,
-          updatedAt: new Date(),
-        },
-      });
-      
-      // Update SQLite with the isExposed field
-      try {
-        db.prepare('UPDATE mcp_bundles SET is_exposed = ? WHERE id = ?')
-          .run(isExposed ? 1 : 0, bundleId);
-      } catch (e) {
-        console.warn('Failed to update SQLite with exposure status:', e.message);
-      }
-    } else {
-      // Create in PostgreSQL without the isExposed field
-      const created = await prisma.orchestratorMcpBundle.create({
-        data: {
-          name: cleanName,
-          slug: cleanSlug,
-          description: typeof description === 'string' ? description : null,
-        },
-      });
-      
-      // Update SQLite with the isExposed field
-      try {
-        db.prepare('UPDATE mcp_bundles SET is_exposed = ? WHERE id = ?')
-          .run(isExposed ? 1 : 0, created.id);
-      } catch (e) {
-        console.warn('Failed to update SQLite with exposure status:', e.message);
-      }
-      bundleId = created.id;
-    }
-
-    const validTools = await prisma.orchestratorTool.findMany({
-      where: { id: { in: parsedIds } },
-      select: { id: true },
-    });
-    await prisma.orchestratorMcpBundleTool.deleteMany({ where: { bundleId } });
-    if (validTools.length) {
-      await prisma.orchestratorMcpBundleTool.createMany({
-        data: validTools.map((row) => ({ bundleId, toolId: row.id })),
-        skipDuplicates: true,
-      });
-    }
-    await prisma.orchestratorMcpBundleVersion.create({
-      data: {
-        bundleId,
-        versionNumber: previousVersion + 1 || 1,
-        name: cleanName,
-        slug: cleanSlug,
-        description: typeof description === 'string' ? description : null,
-        toolIds: JSON.stringify(validTools.map((row) => row.id)),
-        changeKind: previousVersion === 0 ? 'create' : 'update',
-      },
-    });
-    await refreshPersistentMirror();
-    res.json({ success: true, id: bundleId, slug: cleanSlug });
-  } catch (e: any) {
-    res.status(400).json({ error: e.message || 'Failed to save MCP bundle' });
-  }
-});
-
-app.post('/api/mcp/bundles/:id/restore/:versionId', async (req, res) => {
-  const bundleId = Number(req.params.id);
-  const versionId = Number(req.params.versionId);
-  if (!Number.isFinite(bundleId) || !Number.isFinite(versionId)) return res.status(400).json({ error: 'Invalid bundle or version id' });
-  const bundle = db.prepare('SELECT id FROM mcp_bundles WHERE id = ?').get(bundleId) as any;
-  if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
-  const version = db.prepare(`
-    SELECT *
-    FROM mcp_bundle_versions
-    WHERE id = ? AND bundle_id = ?
-    LIMIT 1
-  `).get(versionId, bundleId) as any;
-  if (!version) return res.status(404).json({ error: 'Bundle version not found' });
-  let toolIds: number[] = [];
-  try {
-    const parsed = JSON.parse(version.tool_ids || '[]');
-    toolIds = Array.isArray(parsed) ? parsed.map((x: any) => Number(x)).filter((x: number) => Number.isFinite(x)) : [];
-  } catch {}
-  const currentVersion = Number((db.prepare('SELECT MAX(version_number) as max_version FROM mcp_bundle_versions WHERE bundle_id = ?').get(bundleId) as any)?.max_version || 0);
-  try {
-    const prisma = getPrisma();
-    const validTools = await prisma.orchestratorTool.findMany({
-      where: { id: { in: toolIds } },
-      select: { id: true },
-    });
-    await prisma.orchestratorMcpBundle.update({
-      where: { id: bundleId },
-      data: {
-        name: version.name,
-        slug: version.slug,
-        description: version.description || null,
-        updatedAt: new Date(),
-      },
-    });
-    await prisma.orchestratorMcpBundleTool.deleteMany({ where: { bundleId } });
-    if (validTools.length) {
-      await prisma.orchestratorMcpBundleTool.createMany({
-        data: validTools.map((row) => ({ bundleId, toolId: row.id })),
-        skipDuplicates: true,
-      });
-    }
-    await prisma.orchestratorMcpBundleVersion.create({
-      data: {
-        bundleId,
-        versionNumber: currentVersion + 1,
-        name: version.name,
-        slug: version.slug,
-        description: version.description || null,
-        toolIds: JSON.stringify(validTools.map((row) => row.id)),
-        changeKind: 'restore',
-      },
-    });
-    await refreshPersistentMirror();
-    res.json({ success: true, version: currentVersion + 1 });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message || 'Failed to restore bundle version' });
-  }
-});
-
-app.delete('/api/mcp/bundles/:id', async (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid bundle id' });
-  const force = String(req.query.force || '') === 'true';
-  const dependencies = getMcpBundleDependencies(id);
-  if (dependencies.agents_count > 0 && !force) {
-    return res.status(409).json({ error: 'Bundle is still linked to agents.', dependencies });
-  }
-  try {
-    const prisma = getPrisma();
-    await prisma.orchestratorAgentMcpBundle.deleteMany({ where: { bundleId: id } });
-    await prisma.orchestratorMcpBundleTool.deleteMany({ where: { bundleId: id } });
-    await prisma.orchestratorMcpBundleVersion.deleteMany({ where: { bundleId: id } });
-    await prisma.orchestratorMcpBundle.delete({ where: { id } });
-    await refreshPersistentMirror();
-    res.json({ success: true, forced: force });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message || 'Failed to delete MCP bundle' });
-  }
+registerMcpAdminRoutes({
+  app,
+  db,
+  getPrisma,
+  getSetting,
+  setSetting,
+  refreshPersistentMirror,
+  settingsKeyMcpAuthToken: SETTINGS_KEY_MCP_AUTH_TOKEN,
 });
 
 // Per-project platform linkage (local project -> platform project)
-app.get('/api/projects/:id/platform-link', async (req, res) => {
-  try {
-    const localProjectId = Number(req.params.id);
-    if (!Number.isFinite(localProjectId)) return res.status(400).json({ error: 'Invalid project id' });
-    const row = await getPrisma().orchestratorProjectLink.findUnique({
-      where: { projectId: localProjectId },
-      select: { platformProjectId: true },
-    });
-    res.json({ platformProjectId: row?.platformProjectId ?? null });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.put('/api/projects/:id/platform-link', async (req, res) => {
-  try {
-    const prisma = getPrisma();
-    const localProjectId = Number(req.params.id);
-    if (!Number.isFinite(localProjectId)) return res.status(400).json({ error: 'Invalid project id' });
-
-    let localProject = await prisma.orchestratorProject.findUnique({ where: { id: localProjectId }, select: { id: true } });
-    if (!localProject) {
-      const localProjectName = req.body?.localProjectName as unknown;
-      if (typeof localProjectName === 'string' && localProjectName.trim()) {
-        localProject = await prisma.orchestratorProject.findFirst({
-          where: { name: localProjectName.trim() },
-          orderBy: { id: 'desc' },
-          select: { id: true },
-        });
-      }
-    }
-    if (!localProject) return res.status(404).json({ error: 'Project not found' });
-
-    const platformProjectId = req.body?.platformProjectId as unknown;
-    if (platformProjectId == null || platformProjectId === '') {
-      await prisma.orchestratorProjectLink.deleteMany({ where: { projectId: localProject.id } });
-      await refreshPersistentMirror();
-      return res.json({ platformProjectId: null });
-    }
-    if (typeof platformProjectId !== 'string') return res.status(400).json({ error: 'platformProjectId must be a string' });
-
-    const project = await getPrisma().project.findUnique({ where: { id: platformProjectId } });
-    if (!project) return res.status(400).json({ error: 'Platform project not found' });
-
-    await prisma.orchestratorProjectLink.upsert({
-      where: { projectId: localProject.id },
-      update: { platformProjectId, updatedAt: new Date() },
-      create: { projectId: localProject.id, platformProjectId },
-    });
-    await refreshPersistentMirror();
-
-    res.json({ platformProjectId });
-  } catch (e: any) {
-    console.error('Failed to update project link:', e);
-    res.status(500).json({ error: e.message });
-  }
+registerOrchestratorConfigRoutes({
+  app,
+  db,
+  getPrisma,
+  refreshPersistentMirror,
 });
 
 // API Routes
-
-// --- Credentials ---
-app.get('/api/credentials', async (req, res) => {
-  try {
-    const category = String(req.query.category || '').trim();
-    const credentials = await getPrisma().orchestratorCredential.findMany({
-      where: category ? { category } : undefined,
-      orderBy: { id: 'asc' },
-    });
-    res.json(credentials.map((row) => ({
-      id: row.id,
-      provider: row.provider,
-      name: row.name || row.provider,
-      key_name: row.keyName || 'Authorization',
-      category: row.category || 'general',
-      api_key: '********',
-    })));
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/credentials', async (req, res) => {
-  const { provider, name, key_name, category, api_key, key_value } = req.body || {};
-  const credentialKey = String(provider || '').trim();
-  const secretValue = String(api_key || key_value || '').trim();
-  const categoryValue = String(category || 'general').trim() || 'general';
-  if (!credentialKey) return res.status(400).json({ error: 'provider (credential key) is required' });
-  if (!secretValue) return res.status(400).json({ error: 'api_key (credential value) is required' });
-  try {
-    await getPrisma().orchestratorCredential.upsert({
-      where: { provider: credentialKey },
-      update: {
-        name: String(name || credentialKey).trim(),
-        keyName: String(key_name || 'Authorization').trim(),
-        category: categoryValue,
-        apiKey: secretValue,
-        updatedAt: new Date(),
-      },
-      create: {
-        provider: credentialKey,
-        name: String(name || credentialKey).trim(),
-        keyName: String(key_name || 'Authorization').trim(),
-        category: categoryValue,
-        apiKey: secretValue,
-      },
-    });
-    await refreshPersistentMirror();
-    res.json({ success: true });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.delete('/api/credentials/:id', async (req, res) => {
-  try {
-    await getPrisma().orchestratorCredential.delete({ where: { id: Number(req.params.id) } });
-    await refreshPersistentMirror();
-    res.json({ success: true });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// --- LLM Providers ---
-app.get('/api/providers', async (req, res) => {
-  try {
-    const providers = await getPrisma().orchestratorLlmProvider.findMany({
-      orderBy: { id: 'asc' },
-    });
-    res.json(providers.map((row) => ({
-      id: row.id,
-      name: row.name,
-      provider: row.provider,
-      api_base: row.apiBase,
-      api_key: '********',
-      is_default: row.isDefault,
-    })));
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/providers', async (req, res) => {
-  const { name, provider, api_base, api_key, is_default } = req.body;
-  const prisma = getPrisma();
-  try {
-    if (is_default) {
-      await prisma.orchestratorLlmProvider.updateMany({
-        where: { provider },
-        data: { isDefault: false, updatedAt: new Date() },
-      });
-    }
-    const created = await prisma.orchestratorLlmProvider.create({
-      data: {
-        name,
-        provider,
-        apiBase: api_base || null,
-        apiKey: api_key || null,
-        isDefault: Boolean(is_default),
-      },
-    });
-    await refreshPersistentMirror();
-    res.json({ id: created.id });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.put('/api/providers/:id', async (req, res) => {
-  const { name, provider, api_base, api_key, is_default } = req.body;
-  const prisma = getPrisma();
-  try {
-    if (is_default) {
-      await prisma.orchestratorLlmProvider.updateMany({
-        where: { provider, id: { not: Number(req.params.id) } },
-        data: { isDefault: false, updatedAt: new Date() },
-      });
-    }
-    const existing = await prisma.orchestratorLlmProvider.findUnique({ where: { id: Number(req.params.id) } });
-    if (!existing) return res.status(404).json({ error: 'Provider not found' });
-    await prisma.orchestratorLlmProvider.update({
-      where: { id: Number(req.params.id) },
-      data: {
-        name,
-        provider,
-        apiBase: api_base || null,
-        apiKey: api_key && api_key !== '********' ? api_key : existing.apiKey,
-        isDefault: Boolean(is_default),
-        updatedAt: new Date(),
-      },
-    });
-    await refreshPersistentMirror();
-    res.json({ success: true });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.delete('/api/providers/:id', async (req, res) => {
-  try {
-    await getPrisma().orchestratorLlmProvider.delete({ where: { id: Number(req.params.id) } });
-    await refreshPersistentMirror();
-    res.json({ success: true });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
 
 // --- Model Pricing ---
 app.get('/api/pricing', (_req, res) => {
@@ -2550,21 +1902,47 @@ app.post('/api/agents', async (req, res) => {
     }
     if (Array.isArray(mcp_tool_ids)) {
       const validToolIds = mcp_tool_ids.map((x: any) => Number(x)).filter((x: number) => Number.isFinite(x));
-      const exposed = await prisma.orchestratorMcpExposedTool.findMany({
-        where: { toolId: { in: validToolIds } },
-        select: { toolId: true },
-      });
-      const data = exposed.map((row) => ({ agentId: created.id, toolId: row.toolId }));
-      if (data.length) await prisma.orchestratorAgentMcpTool.createMany({ data, skipDuplicates: true });
+      let exposedToolIds = (
+        await prisma.orchestratorMcpExposedTool.findMany({
+          where: { toolId: { in: validToolIds } },
+          select: { toolId: true },
+        })
+      ).map((row) => Number(row.toolId));
+      if (!exposedToolIds.length && validToolIds.length) {
+        exposedToolIds = (db.prepare('SELECT tool_id FROM mcp_exposed_tools WHERE tool_id IN (' + validToolIds.map(() => '?').join(',') + ')').all(...validToolIds) as any[])
+          .map((row) => Number(row.tool_id))
+          .filter((id) => Number.isFinite(id));
+      }
+      const data = exposedToolIds.map((toolId) => ({ agentId: created.id, toolId }));
+      if (data.length) {
+        try {
+          await prisma.orchestratorAgentMcpTool.createMany({ data, skipDuplicates: true });
+        } catch (error: any) {
+          console.warn('Agent MCP tool link sync fell back to SQLite:', error?.message || error);
+        }
+      }
     }
     if (Array.isArray(mcp_bundle_ids)) {
       const validBundleIds = mcp_bundle_ids.map((x: any) => Number(x)).filter((x: number) => Number.isFinite(x));
-      const bundles = await prisma.orchestratorMcpBundle.findMany({
-        where: { id: { in: validBundleIds } },
-        select: { id: true },
-      });
-      const data = bundles.map((row) => ({ agentId: created.id, bundleId: row.id }));
-      if (data.length) await prisma.orchestratorAgentMcpBundle.createMany({ data, skipDuplicates: true });
+      let bundleIds = (
+        await prisma.orchestratorMcpBundle.findMany({
+          where: { id: { in: validBundleIds } },
+          select: { id: true },
+        })
+      ).map((row) => Number(row.id));
+      if (!bundleIds.length && validBundleIds.length) {
+        bundleIds = (db.prepare('SELECT id FROM mcp_bundles WHERE id IN (' + validBundleIds.map(() => '?').join(',') + ')').all(...validBundleIds) as any[])
+          .map((row) => Number(row.id))
+          .filter((id) => Number.isFinite(id));
+      }
+      const data = bundleIds.map((bundleId) => ({ agentId: created.id, bundleId }));
+      if (data.length) {
+        try {
+          await prisma.orchestratorAgentMcpBundle.createMany({ data, skipDuplicates: true });
+        } catch (error: any) {
+          console.warn('Agent MCP bundle link sync fell back to SQLite:', error?.message || error);
+        }
+      }
     }
     await refreshPersistentMirror();
     res.json({ id: created.id });
@@ -3949,6 +3327,36 @@ app.get('/mcp/manifest', (req, res) => {
         JOIN tools t ON t.id = e.tool_id
         ORDER BY e.exposed_name ASC
     `).all() as any[];
+    const bundles = db.prepare(`
+        SELECT b.id, b.name, b.slug, b.description, b.is_exposed
+        FROM mcp_bundles b
+        WHERE COALESCE(b.is_exposed, 1) = 1
+        ORDER BY b.name COLLATE NOCASE ASC
+    `).all() as any[];
+    const bundleTools = db.prepare(`
+        SELECT
+          b.id AS bundle_id,
+          b.slug AS bundle_slug,
+          b.name AS bundle_name,
+          t.id AS tool_id,
+          t.name AS tool_name,
+          COALESCE(e.exposed_name, t.name) AS exposed_name,
+          COALESCE(e.description, t.description) AS description
+        FROM mcp_bundles b
+        JOIN mcp_bundle_tools bt ON bt.bundle_id = b.id
+        JOIN tools t ON t.id = bt.tool_id
+        LEFT JOIN mcp_exposed_tools e ON e.tool_id = t.id
+        WHERE COALESCE(b.is_exposed, 1) = 1
+        ORDER BY b.name COLLATE NOCASE ASC, t.name COLLATE NOCASE ASC
+    `).all() as any[];
+    const bundleToolsBySlug = new Map<string, any[]>();
+    for (const row of bundleTools) {
+      const slug = String(row.bundle_slug || '');
+      if (!slug) continue;
+      if (!bundleToolsBySlug.has(slug)) bundleToolsBySlug.set(slug, []);
+      bundleToolsBySlug.get(slug)!.push(row);
+    }
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
     
     const agentTools = exposedAgents.map(agent => ({
         name: agent.name.toLowerCase().replace(/\s+/g, '_'),
@@ -3989,18 +3397,127 @@ app.get('/mcp/manifest', (req, res) => {
         }
     }));
 
+    const bundleEntries = bundles.map((bundle) => ({
+        name: `bundle_${normalizeMcpName(bundle.slug || bundle.name)}`,
+        description: `[BUNDLE] ${bundle.description || bundle.name}. Contains ${(bundleToolsBySlug.get(bundle.slug) || []).length} tool(s). Provide tool_name to execute a tool within this bundle or omit it to inspect the bundle inventory.`,
+        inputSchema: {
+            type: "object",
+            properties: {
+                tool_name: {
+                    type: "string",
+                    description: "Optional tool name or exposed MCP name inside this bundle to invoke."
+                },
+                args: {
+                    type: "object",
+                    description: "Arguments for the selected bundled tool.",
+                    additionalProperties: true
+                }
+            },
+            additionalProperties: true
+        }
+    }));
+
     res.json({
         schema_version: "1.0",
         name: "Orchestrator Agents & Crews",
         description: "Exposed agents, crews, and tools from the AI Orchestrator",
-        tools: [...agentTools, ...crewTools, ...toolTools]
+        tools: [...agentTools, ...crewTools, ...toolTools, ...bundleEntries],
+        bundles: bundles.map((bundle) => ({
+          name: bundle.name,
+          slug: bundle.slug,
+          description: bundle.description || '',
+          streamable_http_url: `${baseUrl}/mcp/bundle/${encodeURIComponent(bundle.slug)}`,
+          sse_url: `${baseUrl}/mcp/bundle/${encodeURIComponent(bundle.slug)}/sse`,
+          tools: (bundleToolsBySlug.get(bundle.slug) || []).map((tool) => ({
+            tool_name: tool.tool_name,
+            exposed_name: tool.exposed_name,
+            description: tool.description || '',
+          })),
+        })),
     });
 });
 
 app.post('/mcp/call/:toolName', localRunLimiter, async (req, res) => {
     if (!requireMcpAuth(req, res)) return;
     const toolName = req.params.toolName;
-    const { task, kickoff_message, session_id, user_id, args } = req.body || {};
+    const { task, kickoff_message, session_id, user_id, args, tool_name } = req.body || {};
+
+    if (toolName.startsWith('bundle_')) {
+        const slug = toolName.replace(/^bundle_/, '');
+        const bundle = db.prepare(`
+            SELECT id, name, slug, description, is_exposed
+            FROM mcp_bundles
+            WHERE slug = ? AND COALESCE(is_exposed, 1) = 1
+            LIMIT 1
+        `).get(slug) as any;
+        if (!bundle) return res.status(404).json({ error: "Tool (Bundle) not found" });
+
+        const bundleTools = db.prepare(`
+            SELECT
+              t.*,
+              COALESCE(e.exposed_name, t.name) AS effective_name,
+              COALESCE(e.description, t.description) AS effective_description
+            FROM mcp_bundle_tools bt
+            JOIN tools t ON t.id = bt.tool_id
+            LEFT JOIN mcp_exposed_tools e ON e.tool_id = t.id
+            WHERE bt.bundle_id = ?
+            ORDER BY t.name COLLATE NOCASE ASC
+        `).all(bundle.id) as any[];
+        if (!bundleTools.length) {
+          return res.status(404).json({ error: "Bundle has no tools" });
+        }
+
+        const requestedToolName = String(
+          tool_name ??
+          args?.tool_name ??
+          args?.tool ??
+          ''
+        ).trim();
+        if (!requestedToolName) {
+          return res.json({
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                bundle: {
+                  name: bundle.name,
+                  slug: bundle.slug,
+                  description: bundle.description || '',
+                },
+                tools: bundleTools.map((tool) => ({
+                  name: tool.name,
+                  exposed_name: tool.effective_name,
+                  description: tool.effective_description || '',
+                })),
+                usage: {
+                  message: "Call this bundle again with tool_name and optional args to execute a bundled tool."
+                }
+              }, null, 2)
+            }]
+          });
+        }
+
+        const selectedTool = bundleTools.find((tool) => {
+          const rawName = normalizeMcpName(String(tool.name || ''));
+          const exposedName = normalizeMcpName(String(tool.effective_name || tool.name || ''));
+          const requested = normalizeMcpName(requestedToolName.replace(/^tool_/, ''));
+          return requested === rawName || requested === exposedName;
+        });
+        if (!selectedTool) {
+          return res.status(404).json({ error: "Bundled tool not found" });
+        }
+        try {
+          const toolArgs = args && typeof args === 'object' ? { ...args } : {};
+          delete (toolArgs as any).tool_name;
+          delete (toolArgs as any).tool;
+          const result = await executeTool(selectedTool.name, toolArgs, undefined, selectedTool);
+          return res.json({
+            content: [{ type: "text", text: result }],
+            bundle: { slug: bundle.slug, tool_name: selectedTool.name, exposed_name: selectedTool.effective_name }
+          });
+        } catch (e: any) {
+          return res.status(500).json({ error: e.message || 'Bundled tool execution failed' });
+        }
+    }
 
     if (toolName.startsWith('tool_')) {
         const exposedName = toolName.replace('tool_', '');
@@ -7185,350 +6702,17 @@ app.get('/api/executions/:id/stream', (req, res) => {
   req.on('close', () => clearInterval(timer));
 });
 
-app.post('/api/executions/:id/cancel', async (req, res) => {
-  const executionId = Number(req.params.id);
-  if (!Number.isFinite(executionId)) return res.status(400).json({ error: 'Invalid execution id' });
-  const prisma = getPrisma();
-  const exec = await prisma.orchestratorCrewExecution.findUnique({ where: { id: executionId } });
-  if (!exec) return res.status(404).json({ error: 'Execution not found' });
-  if (exec.status !== 'running') return res.status(409).json({ error: 'Execution is not running' });
-
-  const token = getCancelToken(crewCancelTokens, executionId);
-  token.canceled = true;
-  token.reason = 'Canceled by user';
-  
-  await prisma.orchestratorCrewExecution.update({
-    where: { id: executionId },
-    data: { status: 'canceled' },
-  });
-  await prisma.orchestratorCrewExecutionLog.create({
-    data: {
-      executionId: executionId,
-      type: 'canceled',
-      payload: JSON.stringify({ message: 'Canceled by user' }),
-    },
-  });
-
-  // Mirror to SQLite
-  db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run('canceled', executionId);
-  db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
-    .run(executionId, 'canceled', JSON.stringify({ message: 'Canceled by user' }));
-
-  res.json({ success: true });
-});
-
-app.post('/api/executions/:id/retry', async (req, res) => {
-  const executionId = Number(req.params.id);
-  if (!Number.isFinite(executionId)) return res.status(400).json({ error: 'Invalid execution id' });
-  const prisma = getPrisma();
-  const exec = await prisma.orchestratorCrewExecution.findUnique({ where: { id: executionId } });
-  if (!exec) return res.status(404).json({ error: 'Execution not found' });
-  const crew = await prisma.orchestratorCrew.findUnique({ where: { id: exec.crewId } });
-  if (!crew) return res.status(404).json({ error: 'Crew not found' });
-
-  const newExec = await prisma.orchestratorCrewExecution.create({
-    data: {
-      crewId: exec.crewId,
-      status: 'running',
-      logs: JSON.stringify([]),
-      initialInput: exec.initialInput || '',
-      retryOf: executionId,
-    },
-  });
-  const newExecutionId = newExec.id;
-
-  // Mirror to SQLite
-  db.prepare('INSERT INTO crew_executions (id, crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(newExecutionId, exec.crewId, 'running', JSON.stringify([]), exec.initialInput || '', executionId);
-
-  await enqueueJob('run_crew', {
-    crewId: Number(exec.crewId),
-    executionId: newExecutionId,
-    initialInput: exec.initialInput || '',
-    initiatedBy: 'retry_crew_execution',
-    retryOfExecutionId: executionId,
-  });
-  res.json({ success: true, executionId: newExecutionId, retry_of: executionId });
-});
-
-app.post('/api/executions/:id/resume', async (req, res) => {
-  const executionId = Number(req.params.id);
-  if (!Number.isFinite(executionId)) return res.status(400).json({ error: 'Invalid execution id' });
-  const prisma = getPrisma();
-  const exec = await prisma.orchestratorCrewExecution.findUnique({ where: { id: executionId } });
-  if (!exec) return res.status(404).json({ error: 'Execution not found' });
-
-  const newExec = await prisma.orchestratorCrewExecution.create({
-    data: {
-      crewId: exec.crewId,
-      status: 'running',
-      logs: JSON.stringify([]),
-      initialInput: exec.initialInput || '',
-      retryOf: executionId,
-    },
-  });
-  const newExecutionId = newExec.id;
-
-  // Mirror to SQLite
-  db.prepare('INSERT INTO crew_executions (id, crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(newExecutionId, exec.crewId, 'running', JSON.stringify([]), exec.initialInput || '', executionId);
-
-  await enqueueJob('run_crew', {
-    crewId: Number(exec.crewId),
-    executionId: newExecutionId,
-    initialInput: exec.initialInput || '',
-    initiatedBy: 'resume_crew_execution',
-    retryOfExecutionId: executionId,
-  });
-  res.json({ success: true, executionId: newExecutionId, resumed_from: executionId });
-});
-
-app.post('/api/agent-executions/:id/cancel', async (req, res) => {
-  const execId = Number(req.params.id);
-  if (!Number.isFinite(execId)) return res.status(400).json({ error: 'Invalid execution id' });
-  const exec = await getRuntimeAgentExecution(execId);
-  if (!exec) return res.status(404).json({ error: 'Execution not found' });
-  if (exec.status !== 'running') return res.status(409).json({ error: 'Execution is not running' });
-
-  const token = getCancelToken(agentCancelTokens, execId);
-  token.canceled = true;
-  token.reason = 'Canceled by user';
-  await updateRuntimeAgentExecution(execId, { status: 'canceled' });
-  await cascadeCancelDelegatedChildren(execId, 'Canceled by user');
-  if (exec.agent_id) {
-    db.prepare("UPDATE agents SET status = 'idle' WHERE id = ?").run(exec.agent_id);
-  }
-  res.json({ success: true });
-});
-
-app.post('/api/agents/:id/stop-all', async (req, res) => {
-  const agentId = Number(req.params.id);
-  if (!Number.isFinite(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
-  const prisma = getPrisma();
-  const agent = await prisma.orchestratorAgent.findUnique({ where: { id: agentId } });
-  if (!agent) return res.status(404).json({ error: 'Agent not found' });
-
-  const runningExecs = await prisma.orchestratorAgentExecution.findMany({
-    where: { agentId, status: 'running' },
-    select: { id: true }
-  });
-  for (const row of runningExecs) {
-    const token = getCancelToken(agentCancelTokens, Number(row.id));
-    token.canceled = true;
-    token.reason = 'Canceled by user (stop-all)';
-  }
-  
-  await prisma.orchestratorAgentExecution.updateMany({
-    where: { agentId, status: 'running' },
-    data: { status: 'canceled' }
-  });
-  await prisma.orchestratorAgent.update({
-    where: { id: agentId },
-    data: { status: 'idle' }
-  });
-
-  // Mirror to SQLite
-  db.prepare("UPDATE agent_executions SET status = 'canceled' WHERE agent_id = ? AND status = 'running'").run(agentId);
-  db.prepare("UPDATE agents SET status = 'idle' WHERE id = ?").run(agentId);
-
-  let canceledQueued = 0;
-  const queueRows = await prisma.orchestratorJobQueue.findMany({
-    where: { 
-      type: 'run_agent',
-      status: { in: ['pending', 'running'] }
-    }
-  });
-
-  for (const row of queueRows) {
-    let payload: any = {};
-    try { payload = row.payload ? JSON.parse(row.payload) : {}; } catch {}
-    if (Number(payload?.agentId) !== agentId) continue;
-    
-    if (row.status === 'pending') {
-      await prisma.orchestratorJobQueue.update({
-        where: { id: row.id },
-        data: { 
-          status: 'canceled',
-          error: 'Canceled by user (stop-all)',
-          finishedAt: new Date()
-        }
-      });
-      // Mirror to SQLite
-      db.prepare("UPDATE job_queue SET status = 'canceled', error = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?")
-        .run('Canceled by user (stop-all)', row.id);
-      canceledQueued++;
-    }
-  }
-  res.json({ success: true, canceled_running_executions: runningExecs.length, canceled_pending_jobs: canceledQueued });
-});
-
-app.get('/api/task-control', async (req, res) => {
-  try {
-    const prisma = getPrisma();
-    const [runningAgentExecs, runningCrewExecs, pendingJobsRaw, failedAgentExecs, failedCrewExecs] = await Promise.all([
-      prisma.orchestratorAgentExecution.findMany({
-        where: { status: 'running' },
-        include: { agent: { select: { name: true, role: true } } },
-        orderBy: { createdAt: 'desc' }
-      }),
-      prisma.orchestratorCrewExecution.findMany({
-        where: { status: 'running' },
-        include: { crew: { select: { name: true, process: true } } },
-        orderBy: { createdAt: 'desc' }
-      }),
-      prisma.orchestratorJobQueue.findMany({
-        where: { status: 'pending' },
-        orderBy: { id: 'desc' },
-        take: 200
-      }),
-      prisma.orchestratorAgentExecution.findMany({
-        where: { status: 'failed' },
-        include: { agent: { select: { name: true } } },
-        orderBy: { createdAt: 'desc' },
-        take: 20
-      }),
-      prisma.orchestratorCrewExecution.findMany({
-        where: { status: 'failed' },
-        include: { crew: { select: { name: true } } },
-        orderBy: { createdAt: 'desc' },
-        take: 20
-      })
-    ]);
-
-    const runningAgentExecutions = runningAgentExecs.map(ae => ({
-      id: ae.id,
-      agent_id: ae.agentId,
-      task: ae.task,
-      created_at: ae.createdAt.toISOString(),
-      agent_name: ae.agent?.name,
-      agent_role: ae.agent?.role
-    }));
-
-    const runningCrewExecutions = runningCrewExecs.map(ce => ({
-      id: ce.id,
-      crew_id: ce.crewId,
-      initial_input: ce.initialInput,
-      created_at: ce.createdAt.toISOString(),
-      crew_name: ce.crew?.name,
-      process: ce.crew?.process
-    }));
-
-    const pendingJobs = pendingJobsRaw.map((row) => ({
-      id: row.id,
-      type: row.type,
-      status: row.status,
-      created_at: row.createdAt.toISOString(),
-      payload: row.payload ? JSON.parse(row.payload) : {}
-    }));
-
-    const failedAgentExecutions = failedAgentExecs.map(ae => ({
-      id: ae.id,
-      agent_id: ae.agentId,
-      task: ae.task,
-      created_at: ae.createdAt.toISOString(),
-      agent_name: ae.agent?.name
-    }));
-
-    const failedCrewExecutions = failedCrewExecs.map(ce => ({
-      id: ce.id,
-      crew_id: ce.crewId,
-      initial_input: ce.initialInput,
-      created_at: ce.createdAt.toISOString(),
-      crew_name: ce.crew?.name
-    }));
-
-    res.json({
-      runningAgentExecutions,
-      runningCrewExecutions,
-      pendingJobs,
-      failedAgentExecutions,
-      failedCrewExecutions,
-    });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message || 'Failed to load task control data' });
-  }
-});
-
-app.post('/api/task-control/jobs/:id/cancel', async (req, res) => {
-  const jobId = Number(req.params.id);
-  if (!Number.isFinite(jobId)) return res.status(400).json({ error: 'Invalid job id' });
-  const prisma = getPrisma();
-  const row = await prisma.orchestratorJobQueue.findUnique({ where: { id: jobId } });
-  if (!row) return res.status(404).json({ error: 'Job not found' });
-  if (row.status !== 'pending') return res.status(409).json({ error: 'Only pending jobs can be canceled' });
-  
-  await prisma.orchestratorJobQueue.update({
-    where: { id: jobId },
-    data: { status: 'canceled', error: 'Canceled by user', finishedAt: new Date() }
-  });
-  
-  // Mirror to SQLite
-  db.prepare("UPDATE job_queue SET status = 'canceled', error = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?")
-    .run('Canceled by user', jobId);
-  res.json({ success: true });
-});
-
-app.post('/api/task-control/stop-running-agents', async (req, res) => {
-  const prisma = getPrisma();
-  const running = await prisma.orchestratorAgentExecution.findMany({
-    where: { status: 'running' },
-    select: { id: true, agentId: true }
-  });
-  for (const exec of running) {
-    const token = getCancelToken(agentCancelTokens, Number(exec.id));
-    token.canceled = true;
-    token.reason = 'Canceled by user (bulk stop)';
-  }
-  
-  const updateResult = await prisma.orchestratorAgentExecution.updateMany({
-    where: { status: 'running' },
-    data: { status: 'canceled' }
-  });
-  await prisma.orchestratorAgent.updateMany({
-    where: { status: 'running' },
-    data: { status: 'idle' }
-  });
-
-  // Mirror to SQLite
-  db.prepare("UPDATE agent_executions SET status = 'canceled' WHERE status = 'running'").run();
-  db.prepare("UPDATE agents SET status = 'idle' WHERE status = 'running'").run();
-  
-  res.json({ success: true, canceled_running_executions: updateResult.count });
-});
-
-app.post('/api/task-control/stop-running-crews', async (req, res) => {
-  const prisma = getPrisma();
-  const running = await prisma.orchestratorCrewExecution.findMany({
-    where: { status: 'running' },
-    select: { id: true }
-  });
-  for (const exec of running) {
-    const token = getCancelToken(crewCancelTokens, Number(exec.id));
-    token.canceled = true;
-    token.reason = 'Canceled by user (bulk stop)';
-    
-    await prisma.orchestratorCrewExecutionLog.create({
-      data: {
-        executionId: Number(exec.id),
-        type: 'canceled',
-        payload: JSON.stringify({ message: 'Canceled by user (bulk stop)' })
-      }
-    });
-    
-    // Mirror to SQLite
-    db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
-      .run(Number(exec.id), 'canceled', JSON.stringify({ message: 'Canceled by user (bulk stop)' }));
-  }
-  
-  const updateResult = await prisma.orchestratorCrewExecution.updateMany({
-    where: { status: 'running' },
-    data: { status: 'canceled' }
-  });
-  
-  // Mirror to SQLite
-  db.prepare("UPDATE crew_executions SET status = 'canceled' WHERE status = 'running'").run();
-  
-  res.json({ success: true, canceled_running_executions: updateResult.count });
+registerRuntimeControlRoutes({
+  app,
+  db,
+  getPrisma,
+  getRuntimeAgentExecution,
+  updateRuntimeAgentExecution,
+  cascadeCancelDelegatedChildren,
+  enqueueJob,
+  agentCancelTokens,
+  crewCancelTokens,
+  getCancelToken,
 });
 
 app.post('/api/task-control/cancel-pending-jobs', async (req, res) => {
@@ -7736,6 +6920,18 @@ async function shutdown(signal: string) {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
+// Handle unhandled rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  // Give time for logging then exit
+  setTimeout(() => process.exit(1), 1000);
+});
+
 function scheduleRetention() {
   const localDays = Number(process.env.LOCAL_RETENTION_DAYS || 30);
   const platformDays = Number(process.env.PLATFORM_RETENTION_DAYS || 0);
@@ -7786,8 +6982,7 @@ function scheduleRetention() {
 }
 
 async function startServer() {
-  // Initialize Database first
-  initDb();
+  await ensurePrismaReady();
 
   function ensureDefaultPricing() {
     const upsert = db.prepare(`

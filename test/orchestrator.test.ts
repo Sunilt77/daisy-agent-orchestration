@@ -2,10 +2,10 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { app } from '../server';
 import db, { initDb } from '../src/db';
-import { getPrisma } from '../src/platform/prisma';
+import { ensurePrismaReady, getPrisma } from '../src/platform/prisma';
 
 async function wipeAllDbs() {
-  const prisma = getPrisma();
+  const prisma = await ensurePrismaReady();
   // Wipe Prisma (Primary)
   await prisma.orchestratorAgentExecution.deleteMany({});
   await prisma.orchestratorToolExecution.deleteMany({});
@@ -186,6 +186,23 @@ describe.sequential('orchestrator local APIs', () => {
       })
       .expect(200);
     expect(bundle.body.id).toBeTruthy();
+
+    const manifest = await request(app).get('/mcp/manifest').expect(200);
+    expect(Array.isArray(manifest.body.tools)).toBe(true);
+    expect(manifest.body.tools.some((x: any) => x.name === 'bundle_core_bundle')).toBe(true);
+    expect(Array.isArray(manifest.body.bundles)).toBe(true);
+    const manifestBundle = manifest.body.bundles.find((x: any) => x.slug === 'core_bundle');
+    expect(manifestBundle).toBeTruthy();
+    expect(String(manifestBundle.streamable_http_url)).toContain('/mcp/bundle/core_bundle');
+    expect(Array.isArray(manifestBundle.tools)).toBe(true);
+    expect(manifestBundle.tools.length).toBeGreaterThanOrEqual(2);
+
+    const bundleInventory = await request(app)
+      .post('/mcp/call/bundle_core_bundle')
+      .send({})
+      .expect(200);
+    expect(String(bundleInventory.body.content?.[0]?.text || '')).toContain('"slug": "core_bundle"');
+    expect(String(bundleInventory.body.content?.[0]?.text || '')).toContain('CurrentDateTimeTool');
 
     const agent1 = await request(app)
       .post('/api/agents')

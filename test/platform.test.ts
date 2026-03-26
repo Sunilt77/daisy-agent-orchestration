@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import request from 'supertest';
 import { app } from '../server';
-import { getPrisma } from '../src/platform/prisma';
+import { ensurePrismaReady, getPrisma } from '../src/platform/prisma';
 
 const prisma = getPrisma();
 
 async function wipeDb() {
+  await ensurePrismaReady();
   // Order matters due to FKs.
   await prisma.runEvent.deleteMany();
   await prisma.run.deleteMany();
@@ -36,7 +37,7 @@ describe('platform', () => {
     // signup
     const signup = await agent
       .post('/api/auth/signup')
-      .send({ org_name: 'Acme', email: 'owner@acme.com', password: 'password123' })
+      .send({ org_name: 'Acme', email: 'owner@acme.com', password: 'Password123!' })
       .expect(200);
     expect(signup.body.user.email).toBe('owner@acme.com');
 
@@ -104,12 +105,12 @@ describe('platform', () => {
 
     await admin
       .post('/api/auth/signup')
-      .send({ org_name: 'Acme', email: 'owner@acme.com', password: 'password123' })
+      .send({ org_name: 'Acme', email: 'owner@acme.com', password: 'Password123!' })
       .expect(200);
 
     await request(app)
       .post('/api/auth/signup')
-      .send({ org_name: 'Beta', email: 'owner@beta.com', password: 'password123' })
+      .send({ org_name: 'Beta', email: 'owner2@beta.com', password: 'Password123!' })
       .expect(200);
 
     const tenants = await admin.get('/api/admin/tenants').expect(200);
@@ -142,7 +143,7 @@ describe('platform', () => {
 
     const loginAgain = await request(app)
       .post('/api/auth/login')
-      .send({ email: 'owner@acme.com', password: 'password123' });
+      .send({ email: 'owner@acme.com', password: 'Password123!' });
     expect(loginAgain.status).toBe(429);
     expect(String(loginAgain.body.error || '')).toContain('session limit');
   });

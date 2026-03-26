@@ -2,7 +2,7 @@ import type { Express, Request, Response, NextFunction } from 'express';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
-import { getPrisma } from './prisma';
+import { ensurePrismaReady, getPrisma } from './prisma';
 import { asHttpError, HttpError } from './httpErrors';
 import { clearSessionCookie, getSessionDays, hashPassword, requireUser, setSessionCookie, verifyPassword } from './auth';
 import { createProjectApiKey, verifyProjectApiKey } from './apiKeys';
@@ -106,7 +106,8 @@ function getJsonSetting<T>(key: string, fallback: T): T {
 }
 
 async function setJsonSetting<T>(key: string, value: T) {
-  await getPrisma().orchestratorSetting.upsert({
+  const prisma = await ensurePrismaReady();
+  await prisma.orchestratorSetting.upsert({
     where: { key },
     update: { value: JSON.stringify(value) },
     create: { key, value: JSON.stringify(value) },
@@ -1673,4 +1674,13 @@ async function requireUserOptional(req: Request, _res: Response, next: NextFunct
   } catch (e) {
     next(e);
   }
+}
+
+function handleHttpErrors(app: Express) {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+    const httpError = asHttpError(err);
+    console.error('Platform API error:', err); // Added for debugging
+    res.status(httpError.status).json({ error: httpError.message });
+  });
 }
