@@ -1016,4 +1016,55 @@ export function initDb() {
   }
 }
 
+export function ensureVoiceTables() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS voice_sessions (
+        id TEXT PRIMARY KEY,
+        agent_id INTEGER NOT NULL,
+        status TEXT DEFAULT 'idle',
+        transport TEXT DEFAULT 'websocket',
+        voice_provider TEXT DEFAULT 'elevenlabs',
+        voice_id TEXT,
+        tts_model_id TEXT,
+        stt_model_id TEXT,
+        transcript TEXT,
+        reply_text TEXT,
+        meta TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS voice_session_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        payload TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (session_id) REFERENCES voice_sessions(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_voice_profiles (
+        agent_id INTEGER PRIMARY KEY,
+        voice_provider TEXT DEFAULT 'elevenlabs',
+        voice_id TEXT,
+        tts_model_id TEXT,
+        stt_model_id TEXT,
+        output_format TEXT,
+        sample_rate INTEGER DEFAULT 16000,
+        language_code TEXT DEFAULT 'en',
+        auto_tts INTEGER DEFAULT 1,
+        meta TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+      );
+    `);
+  } catch (e) {
+    console.error('Voice table migration error:', e);
+    throw e;
+  }
+}
+
 export default db;

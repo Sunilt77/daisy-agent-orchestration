@@ -60,25 +60,77 @@ export default function VoicePage() {
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
 
-  useEffect(() => {
-    fetch('/api/voice/targets')
-      .then((res) => res.json())
-      .then((data) => {
+  const loadTargets = async () => {
+    try {
+      const targetsRes = await fetch('/api/voice/targets');
+      if (targetsRes.ok) {
+        const data = await targetsRes.json().catch(() => ({}));
         const nextTargets = [
           ...(Array.isArray(data?.agents) ? data.agents : []),
           ...(Array.isArray(data?.crews) ? data.crews : []),
         ] as VoiceTarget[];
-        setTargets(nextTargets);
-        const firstAgent = nextTargets.find((target) => target.type === 'agent');
-        if (firstAgent) {
-          setTargetType('agent');
-          setTargetId(String(firstAgent.id));
-        } else if (nextTargets[0]?.id) {
-          setTargetType(nextTargets[0].type);
-          setTargetId(String(nextTargets[0].id));
+        if (nextTargets.length) {
+          setTargets(nextTargets);
+          const firstAgent = nextTargets.find((target) => target.type === 'agent');
+          if (firstAgent) {
+            setTargetType('agent');
+            setTargetId(String(firstAgent.id));
+          } else if (nextTargets[0]?.id) {
+            setTargetType(nextTargets[0].type);
+            setTargetId(String(nextTargets[0].id));
+          }
+          return;
         }
-      })
-      .catch(() => setTargets([]));
+      }
+
+      const [agentsRes, crewsRes] = await Promise.all([
+        fetch('/api/voice/agents'),
+        fetch('/api/crews'),
+      ]);
+
+      const agentsData = agentsRes.ok ? await agentsRes.json().catch(() => []) : [];
+      const crewsData = crewsRes.ok ? await crewsRes.json().catch(() => []) : [];
+      const fallbackTargets: VoiceTarget[] = [
+        ...(Array.isArray(agentsData) ? agentsData.map((agent: any) => ({
+          id: Number(agent.id),
+          type: 'agent' as const,
+          name: agent.name,
+          subtitle: agent.role || 'Agent',
+          role: agent.role || 'Agent',
+          provider: agent.provider || undefined,
+          model: agent.model || undefined,
+          status: agent.status || undefined,
+          voice_profile: agent.voice_profile,
+        })) : []),
+        ...(Array.isArray(crewsData) ? crewsData.map((crew: any) => ({
+          id: Number(crew.id),
+          type: 'crew' as const,
+          name: crew.name,
+          subtitle: `${crew.process || 'sequential'} crew`,
+          process: crew.process || 'sequential',
+          status: crew.status || undefined,
+        })) : []),
+      ];
+      setTargets(fallbackTargets);
+      const firstAgent = fallbackTargets.find((target) => target.type === 'agent');
+      if (firstAgent) {
+        setTargetType('agent');
+        setTargetId(String(firstAgent.id));
+      } else if (fallbackTargets[0]?.id) {
+        setTargetType(fallbackTargets[0].type);
+        setTargetId(String(fallbackTargets[0].id));
+      }
+      if (!fallbackTargets.length) {
+        setError('Voice Console could not load agents or crews. If you recently updated the server, restart it and refresh this page.');
+      }
+    } catch {
+      setTargets([]);
+      setError('Voice Console could not load runtime targets. If the server was just updated, restart it and refresh.');
+    }
+  };
+
+  useEffect(() => {
+    void loadTargets();
   }, []);
 
   const availableTargets = useMemo(

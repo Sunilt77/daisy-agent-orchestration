@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import { createServer as createViteServer, ViteDevServer } from 'vite';
-import { initDb } from './src/db';
+import { ensureVoiceTables, initDb } from './src/db';
 import db from './src/db';
 import { GoogleGenAI } from '@google/genai';
 import OpenAI from 'openai';
@@ -841,6 +841,7 @@ function resolveVoiceTarget(targetType: string, targetId: number) {
 }
 
 function getAgentVoiceProfile(agentId: number) {
+  ensureVoiceTables();
   const row = db.prepare('SELECT * FROM agent_voice_profiles WHERE agent_id = ?').get(agentId) as any;
   if (!row) return null;
   return {
@@ -858,6 +859,7 @@ function getAgentVoiceProfile(agentId: number) {
 }
 
 function saveAgentVoiceProfile(agentId: number, payload: any) {
+  ensureVoiceTables();
   db.prepare(`
     INSERT INTO agent_voice_profiles (
       agent_id, voice_provider, voice_id, tts_model_id, stt_model_id, output_format, sample_rate, language_code, auto_tts, meta, updated_at
@@ -899,6 +901,7 @@ function getVoiceCredentialApiKey() {
 }
 
 function appendVoiceSessionEvent(sessionId: string, type: string, payload: any) {
+  ensureVoiceTables();
   db.prepare('INSERT INTO voice_session_events (session_id, type, payload) VALUES (?, ?, ?)')
     .run(sessionId, type, JSON.stringify(payload ?? {}));
   db.prepare('UPDATE voice_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
@@ -913,6 +916,7 @@ function updateVoiceSession(sessionId: string, patch: Partial<{
   stt_model_id: string;
   meta: any;
 }>) {
+  ensureVoiceTables();
   const fields: string[] = [];
   const values: any[] = [];
   if (patch.status != null) { fields.push('status = ?'); values.push(patch.status); }
@@ -929,6 +933,7 @@ function updateVoiceSession(sessionId: string, patch: Partial<{
 }
 
 function createVoiceSession(agentId: number, options?: Partial<VoiceSocketContext>) {
+  ensureVoiceTables();
   const sessionId = randomUUID();
   db.prepare(`
     INSERT INTO voice_sessions (
@@ -957,6 +962,7 @@ function createVoiceSession(agentId: number, options?: Partial<VoiceSocketContex
 }
 
 function getVoiceSession(sessionId: string) {
+  ensureVoiceTables();
   return db.prepare('SELECT * FROM voice_sessions WHERE id = ?').get(sessionId) as VoiceSessionRow | undefined;
 }
 
