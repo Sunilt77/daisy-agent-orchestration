@@ -64,6 +64,10 @@ function executionKindLabel(kind?: string) {
   }
 }
 
+function delegationRoleLabel(role?: string) {
+  return role === 'synthesis' ? 'Synthesis' : 'Delegate';
+}
+
 async function safeJson(res: Response) {
   const text = await res.text();
   try { return text ? JSON.parse(text) : null; } catch { return null; }
@@ -131,6 +135,17 @@ export default function AgentExecutionPage() {
     () => Number(execution?.prompt_tokens || 0) + Number(execution?.completion_tokens || 0),
     [execution?.prompt_tokens, execution?.completion_tokens]
   );
+  const delegationStats = useMemo(() => {
+    const delegateRows = delegations.filter((row) => row.role !== 'synthesis');
+    const synthesisRows = delegations.filter((row) => row.role === 'synthesis');
+    const completed = delegateRows.filter((row) => row.status === 'completed').length;
+    return {
+      delegates: delegateRows,
+      synthesisRows,
+      completed,
+      failed: delegations.filter((row) => row.status === 'failed' || row.status === 'canceled').length,
+    };
+  }, [delegations]);
 
   if (!Number.isFinite(execId) || execId <= 0) {
     return <div className="text-sm text-red-600">Invalid execution id.</div>;
@@ -201,6 +216,80 @@ export default function AgentExecutionPage() {
         <div className="xl:col-span-2 space-y-6">
           <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 font-medium text-slate-700 flex items-center gap-2">
+              <GitBranch size={16} /> Delegation Chain Overview
+            </div>
+            <div className="p-4 space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Current Role</div>
+                  <div className="mt-2 text-sm font-semibold text-slate-900">{executionKindLabel(execution?.execution_kind)}</div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Parent Execution</div>
+                  <div className="mt-2 text-sm font-semibold text-slate-900">
+                    {execution?.parent_execution_id ? (
+                      <Link to={`/agent-executions/${execution.parent_execution_id}`} className="text-indigo-600 hover:text-indigo-800">
+                        #{execution.parent_execution_id}
+                      </Link>
+                    ) : 'Root execution'}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Delegates</div>
+                  <div className="mt-2 text-sm font-semibold text-slate-900">
+                    {delegationStats.completed}/{delegationStats.delegates.length} complete
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Synthesis Steps</div>
+                  <div className="mt-2 text-sm font-semibold text-slate-900">{delegationStats.synthesisRows.length}</div>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Chain Map</div>
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                  {execution?.parent_execution_id ? (
+                    <>
+                      <Link to={`/agent-executions/${execution.parent_execution_id}`} className="rounded-full border border-violet-200 bg-violet-50 px-3 py-1 font-semibold text-violet-700">
+                        Parent #{execution.parent_execution_id}
+                      </Link>
+                      <span className="text-slate-400">{'->'}</span>
+                    </>
+                  ) : null}
+                  <span className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 font-semibold text-indigo-700">
+                    Current #{execId}
+                  </span>
+                  {delegations.length > 0 ? (
+                    delegations.map((delegation) => (
+                      <React.Fragment key={`chain-${delegation.id}`}>
+                        <span className="text-slate-400">{'->'}</span>
+                        {delegation.child_execution_id ? (
+                          <Link to={`/agent-executions/${delegation.child_execution_id}`} className="rounded-full border border-slate-200 bg-white px-3 py-1 font-semibold text-slate-700 hover:border-indigo-200 hover:text-indigo-700">
+                            {delegationRoleLabel(delegation.role)} #{delegation.child_execution_id}
+                          </Link>
+                        ) : (
+                          <span className="rounded-full border border-slate-200 bg-white px-3 py-1 font-semibold text-slate-500">
+                            {delegationRoleLabel(delegation.role)} pending
+                          </span>
+                        )}
+                      </React.Fragment>
+                    ))
+                  ) : (
+                    <>
+                      <span className="text-slate-400">{'->'}</span>
+                      <span className="rounded-full border border-dashed border-slate-200 bg-white px-3 py-1 text-slate-500">
+                        No child delegations
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 font-medium text-slate-700 flex items-center gap-2">
               <Bot size={16} /> Input
             </div>
             <div className="p-4 text-sm text-slate-800 whitespace-pre-wrap font-mono max-h-[320px] overflow-y-auto">
@@ -224,6 +313,11 @@ export default function AgentExecutionPage() {
                 <div key={`${step.stage}-${idx}`} className="flex items-center justify-between text-xs border border-slate-100 rounded-lg px-3 py-2">
                   <div className="text-slate-700">{step.stage}</div>
                   <div className="flex items-center gap-2">
+                    {step.child_execution_id ? (
+                      <Link to={`/agent-executions/${step.child_execution_id}`} className="px-2 py-0.5 rounded-full bg-violet-50 text-violet-700 hover:bg-violet-100">
+                        Child #{step.child_execution_id}
+                      </Link>
+                    ) : null}
                     <span className={`px-2 py-0.5 rounded-full ${statusPillClass(step.status)}`}>{step.status}</span>
                     <span className="font-mono text-slate-500">{step.duration_ms != null ? `${step.duration_ms}ms` : '-'}</span>
                   </div>

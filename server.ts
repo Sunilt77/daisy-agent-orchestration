@@ -231,6 +231,32 @@ async function getToolInputSchemaForRecord(tool: any): Promise<any> {
     };
   }
 
+  if (tool.type === 'internal') {
+    const requiredArgs = Array.isArray(config?.requiredArgs) ? config.requiredArgs.map((value: any) => String(value)) : [];
+    const argSchema = config?.argSchema && typeof config.argSchema === 'object' ? config.argSchema : {};
+    const argDescriptions = config?.argDescriptions && typeof config.argDescriptions === 'object' ? config.argDescriptions : {};
+    const propertyKeys = Array.from(new Set([
+      ...requiredArgs,
+      ...Object.keys(argSchema),
+      ...Object.keys(argDescriptions),
+    ].map((value) => String(value)).filter(Boolean)));
+    const properties = Object.fromEntries(
+      propertyKeys.map((name: string) => {
+        const normalized = normalizeMcpName(String(name || ''));
+        return [normalized || name, {
+          type: String(argSchema[name] || argSchema[normalized] || 'string'),
+          description: String(argDescriptions[name] || argDescriptions[normalized] || ''),
+        }];
+      }),
+    );
+    return {
+      type: 'object',
+      properties,
+      required: requiredArgs.map((name: string) => normalizeMcpName(name) || name),
+      additionalProperties: true,
+    };
+  }
+
   return {
     type: 'object',
     properties: {},
@@ -527,6 +553,188 @@ async function cascadeCancelDelegatedChildren(parentExecutionId: number, reason:
         updatedAt: new Date(),
       },
     });
+  }
+}
+
+async function executeDelegatedAgentRun(options: {
+  targetAgent: any;
+  task: string;
+  expectedOutput?: string;
+  context?: string;
+  parentExecutionId: number;
+  delegationTitle: string;
+  sessionId?: string;
+  userId?: string;
+  initiatedBy: string;
+  delegationDepth?: number;
+  logForwarder?: (log: any) => void;
+}) {
+  const {
+    targetAgent,
+    task,
+    expectedOutput = 'Return the most useful result for the delegating agent.',
+    context = '',
+    parentExecutionId,
+    delegationTitle,
+    sessionId,
+    userId,
+    initiatedBy,
+    delegationDepth = 1,
+    logForwarder,
+  } = options;
+
+  return await runAgent(
+    targetAgent,
+    { description: task, expected_output: expectedOutput },
+    context,
+    (log) => {
+      logForwarder?.(log);
+    },
+    {
+      initiatedBy,
+      sessionId,
+      userId,
+    },
+    {
+      parentExecutionId,
+      executionKind: 'delegated_child',
+      delegationTitle,
+      delegationDepth,
+    },
+  );
+}
+
+async function delegateToAgentTool(args: any, ctx?: ToolExecutionContext): Promise<string> {
+  const currentAgent = ctx?.agent;
+  const parentExecutionId = Number(ctx?.executionId || 0);
+  if (!currentAgent?.id || parentExecutionId <= 0) {
+    throw new Error('delegate_to_agent can only be used during an active agent execution.');
+  }
+
+  const currentDepth = Number(ctx?.runMeta?.delegationDepth || 0);
+  if (currentDepth >= 3) {
+    throw new Error('Maximum delegation depth reached. Ask the current agent to finish with the available information.');
+  }
+
+  const targetAgentId = Number(args?.target_agent_id ?? args?.agent_id ?? 0);
+  const targetAgentName = String(args?.target_agent_name || args?.agent_name || '').trim();
+  const title = String(args?.title || '').trim();
+  const taskText = String(args?.task || args?.prompt || args?.message || '').trim();
+  const extraContext = String(args?.context || '').trim();
+  const expectedOutput = String(args?.expected_output || 'Return the most useful result for the delegating agent.').trim();
+  const shareSession = args?.share_session !== false;
+
+  if (!taskText) throw new Error('delegate_to_agent requires task.');
+
+  let targetAgent: any = null;
+  if (Number.isFinite(targetAgentId) && targetAgentId > 0) {
+    targetAgent = db.prepare('SELECT * FROM agents WHERE id = ?').get(targetAgentId) as any;
+  } else if (targetAgentName) {
+    targetAgent = db.prepare('SELECT * FROM agents WHERE lower(name) = lower(?) LIMIT 1').get(targetAgentName) as any;
+  }
+  if (!targetAgent) {
+    throw new Error('Target agent not found. Provide target_agent_id or target_agent_name.');
+  }
+  if (Number(targetAgent.id) === Number(currentAgent.id)) {
+    throw new Error('delegate_to_agent cannot target the same agent. Continue the work directly or choose another agent.');
+  }
+  if (currentAgent.project_id != null && targetAgent.project_id != null && Number(currentAgent.project_id) !== Number(targetAgent.project_id)) {
+    throw new Error('Cross-project delegation is not allowed. Choose an agent in the same project.');
+  }
+
+  const delegationTitle = title || `${currentAgent.name} -> ${targetAgent.name}`;
+  const combinedContext = [
+    `Delegated by agent "${currentAgent.name}" (ID ${currentAgent.id}).`,
+    extraContext ? `Delegation context:\n${extraContext}` : '',
+  ].filter(Boolean).join('\n\n');
+
+  const row = await getPrisma().orchestratorAgentDelegation.create({
+    data: {
+      parentExecutionId,
+      agentId: Number(targetAgent.id),
+      role: 'delegate',
+      title: delegationTitle,
+      status: 'running',
+      task: taskText,
+    },
+    select: { id: true },
+  });
+
+  ctx?.logCallback?.({
+    type: 'delegation_start',
+    agent: currentAgent.name,
+    target_agent: targetAgent.name,
+    title: delegationTitle,
+    execution_id: parentExecutionId,
+    task: taskText,
+  });
+
+  try {
+    const result = await executeDelegatedAgentRun({
+      targetAgent,
+      task: taskText,
+      expectedOutput,
+      context: combinedContext,
+      parentExecutionId,
+      delegationTitle,
+      sessionId: shareSession ? ctx?.invocation?.sessionId : undefined,
+      userId: ctx?.invocation?.userId,
+      initiatedBy: 'delegate_to_agent',
+      delegationDepth: currentDepth + 1,
+      logForwarder: (log) => {
+        ctx?.logCallback?.({
+          ...log,
+          delegated_by: currentAgent.name,
+          delegated_to: targetAgent.name,
+          parent_execution_id: parentExecutionId,
+          delegation_title: delegationTitle,
+        });
+      },
+    });
+
+    await getPrisma().orchestratorAgentDelegation.update({
+      where: { id: row.id },
+      data: {
+        childExecutionId: Number(result.exec_id || 0) || undefined,
+        status: 'completed',
+        result: result.text,
+        updatedAt: new Date(),
+      },
+    });
+
+    return JSON.stringify({
+      delegated: true,
+      target_agent: {
+        id: Number(targetAgent.id),
+        name: String(targetAgent.name || ''),
+      },
+      delegation: {
+        id: row.id,
+        title: delegationTitle,
+        parent_execution_id: parentExecutionId,
+        child_execution_id: Number(result.exec_id || 0) || null,
+      },
+      result: result.text,
+      usage: result.usage,
+    }, null, 2);
+  } catch (e: any) {
+    const message = formatExecutionError(e, 'Delegated agent execution failed');
+    await getPrisma().orchestratorAgentDelegation.update({
+      where: { id: row.id },
+      data: {
+        status: 'failed',
+        error: message,
+        updatedAt: new Date(),
+      },
+    });
+    ctx?.logCallback?.({
+      type: 'delegation_error',
+      agent: currentAgent.name,
+      target_agent: targetAgent.name,
+      title: delegationTitle,
+      message,
+    });
+    throw new Error(message);
   }
 }
 
@@ -5103,7 +5311,7 @@ async function runKnowledgeSearch(config: any, args: any): Promise<string> {
   }
 }
 
-async function executeTool(toolName: string, args: any, mcpClients?: Map<string, Client>, toolRecord?: any): Promise<string> {
+async function executeTool(toolName: string, args: any, mcpClients?: Map<string, Client>, toolRecord?: any, execContext?: ToolExecutionContext): Promise<string> {
   console.log(`Executing tool ${toolName} with args:`, args);
 
   if (mcpClients) {
@@ -5196,6 +5404,9 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
       if (fnName === 'deploy_tool_script') {
         const result = await internalTools.deployToolScript(args);
         return JSON.stringify(result, null, 2);
+      }
+      if (fnName === 'delegate_to_agent') {
+        return await delegateToAgentTool(args, execContext);
       }
       return `[Internal Error] Unknown internal method: ${fnName}`;
     } catch (e: any) {
@@ -5595,19 +5806,30 @@ async function processJob(job: { id: number; type: string; payload: any }) {
     const { agentId, task, session_id, user_id, initiatedBy, retryOfExecutionId, parentExecutionId, delegationTitle } = job.payload || {};
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any;
     if (!agent) throw new Error('Agent not found');
-    const taskObj = { description: task, expected_output: 'The best possible answer.' };
     const logs: any[] = [];
     const session = await ensureAgentSession(agent.id, session_id, user_id);
-    const result = await runAgent(agent, taskObj, "", (l) => logs.push(l), {
-      initiatedBy: initiatedBy || 'queued_agent_run',
-      sessionId: session.id,
-      userId: session.user_id ?? user_id,
-    }, {
-      retryOfExecutionId: retryOfExecutionId ?? null,
-      parentExecutionId: parentExecutionId ?? null,
-      delegationTitle: delegationTitle ?? null,
-      executionKind: parentExecutionId ? 'delegated_child' : 'standard',
-    });
+    const result = parentExecutionId
+      ? await executeDelegatedAgentRun({
+          targetAgent: agent,
+          task: String(task || ''),
+          parentExecutionId: Number(parentExecutionId),
+          delegationTitle: String(delegationTitle || agent.name || 'Delegated task'),
+          sessionId: session.id,
+          userId: session.user_id ?? user_id,
+          initiatedBy: initiatedBy || 'delegated_agent_child',
+          delegationDepth: 1,
+          logForwarder: (l) => logs.push(l),
+        })
+      : await runAgent(agent, { description: task, expected_output: 'The best possible answer.' }, "", (l) => logs.push(l), {
+          initiatedBy: initiatedBy || 'queued_agent_run',
+          sessionId: session.id,
+          userId: session.user_id ?? user_id,
+        }, {
+          retryOfExecutionId: retryOfExecutionId ?? null,
+          parentExecutionId: null,
+          delegationTitle: null,
+          executionKind: 'standard',
+        });
     return { exec_id: result.exec_id, result: result.text, usage: result.usage, logs, session_id: session.id, user_id: session.user_id ?? user_id ?? null };
   }
 
@@ -5687,7 +5909,14 @@ interface RunResult {
 }
 
 type RunInvocation = { initiatedBy: string; sessionId?: string; userId?: string };
-type RunMeta = { retryOfExecutionId?: number | null; parentExecutionId?: number | null; executionKind?: string; delegationTitle?: string | null };
+type RunMeta = { retryOfExecutionId?: number | null; parentExecutionId?: number | null; executionKind?: string; delegationTitle?: string | null; delegationDepth?: number | null };
+type ToolExecutionContext = {
+  agent?: any;
+  executionId?: number | null;
+  invocation?: RunInvocation;
+  runMeta?: RunMeta;
+  logCallback?: (log: any) => void;
+};
 
 function formatExecutionError(error: any, fallback = 'Execution failed'): string {
   if (!error) return fallback;
@@ -6414,7 +6643,13 @@ async function runAgent(
                         toolSpan.setAttribute('tool.args', JSON.stringify(action.args));
                         toolSpan.setAttribute('tool.kind', toolKind);
                         try {
-                            const res = await executeTool(action.tool, action.args, mcpClients, toolRecord);
+                            const res = await executeTool(action.tool, action.args, mcpClients, toolRecord, {
+                              agent,
+                              executionId: execId,
+                              invocation,
+                              runMeta,
+                              logCallback,
+                            });
                             toolSpan.setStatus({ code: SpanStatusCode.OK });
                             return res;
                         } catch (e: any) {
@@ -7474,6 +7709,84 @@ function scheduleRetention() {
 async function startServer() {
   await ensurePrismaReady();
 
+  async function ensureBuiltInInternalTools() {
+    const prisma = getPrisma();
+    const name = 'delegate_to_agent';
+    const description = 'Delegate a subtask to another agent so it can use its own tools and MCP bundles, then return the child result to the current agent.';
+    const category = 'Orchestration';
+    const type = 'internal';
+    const config = {
+      method: 'delegate_to_agent',
+      requiredArgs: ['target_agent_name', 'task'],
+      argSchema: {
+        target_agent_name: 'string',
+        target_agent_id: 'number',
+        task: 'string',
+        context: 'string',
+        expected_output: 'string',
+        title: 'string',
+        share_session: 'boolean',
+      },
+      argDescriptions: {
+        target_agent_name: 'Name of the target specialist agent to delegate to.',
+        target_agent_id: 'Numeric id of the target specialist agent if you prefer an exact reference.',
+        task: 'The delegated task for the target agent to perform.',
+        context: 'Optional extra context or notes for the delegated agent.',
+        expected_output: 'Optional guidance about what the delegated agent should return.',
+        title: 'Optional title for the delegation trace entry.',
+        share_session: 'Set false to avoid sharing the current session memory with the delegated agent.',
+      },
+    };
+    const serializedConfig = JSON.stringify(config);
+    const existing = await prisma.orchestratorTool.findFirst({
+      where: { name },
+      select: { id: true, version: true, description: true, category: true, type: true, config: true },
+    });
+    if (!existing) {
+      const created = await prisma.orchestratorTool.create({
+        data: { name, description, category, type, config: serializedConfig, version: 1 },
+      });
+      await prisma.orchestratorToolVersion.create({
+        data: {
+          toolId: created.id,
+          versionNumber: 1,
+          name,
+          description,
+          category,
+          type,
+          config: serializedConfig,
+          changeKind: 'create',
+        },
+      });
+      return;
+    }
+    if (
+      existing.description === description &&
+      existing.category === category &&
+      existing.type === type &&
+      String(existing.config || '') === serializedConfig
+    ) {
+      return;
+    }
+    const nextVersion = Number(existing.version || 1) + 1;
+    await prisma.orchestratorTool.update({
+      where: { id: existing.id },
+      data: { description, category, type, config: serializedConfig, version: nextVersion, updatedAt: new Date() },
+    });
+    await prisma.orchestratorToolVersion.create({
+      data: {
+        toolId: existing.id,
+        versionNumber: nextVersion,
+        name,
+        description,
+        category,
+        type,
+        config: serializedConfig,
+        changeKind: 'update',
+      },
+    });
+  }
+
   function ensureDefaultPricing() {
     const upsert = db.prepare(`
       INSERT INTO model_pricing (model, input_usd, output_usd)
@@ -7495,6 +7808,7 @@ async function startServer() {
     await prisma.orchestratorAgent.updateMany({
       data: { status: 'idle' },
     });
+    await ensureBuiltInInternalTools();
     await refreshPersistentMirror();
     
     // Now that mirror is synced, ensure pricing is there (it writes to memory db)

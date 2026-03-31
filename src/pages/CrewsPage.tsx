@@ -391,6 +391,14 @@ export default function CrewsPage() {
     }
     return selectedCrewAgents.find((agent) => agent.agent_role === 'supervisor') || selectedCrewAgents[0] || null;
   }, [selectedCrewAgents, formData.coordinator_agent_id]);
+  const selectedSupervisorCount = useMemo(
+    () => selectedCrewAgents.filter((agent) => agent.agent_role === 'supervisor').length,
+    [selectedCrewAgents]
+  );
+  const selectedSpecialistCount = useMemo(
+    () => selectedCrewAgents.filter((agent) => agent.agent_role !== 'supervisor').length,
+    [selectedCrewAgents]
+  );
 
   return (
     <div className="space-y-8 pb-20">
@@ -418,6 +426,32 @@ export default function CrewsPage() {
             <Plus size={18} />
             Architect New Crew
             </button>
+        </div>
+      </div>
+
+      <div className="rounded-3xl border border-amber-200 bg-linear-to-r from-amber-50 via-white to-indigo-50 p-5 shadow-sm">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-3xl">
+            <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-600">Crew Strategy</div>
+            <h3 className="mt-2 text-xl font-black text-slate-900">Use hierarchical crews for coordinator plus specialist teams.</h3>
+            <p className="mt-2 text-sm leading-6 text-slate-600">
+              Sequential crews are great for fixed handoff chains. Hierarchical crews are better when one coordinator should route work to specialists with different tool or MCP ownership and then synthesize the final answer.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 lg:w-[640px]">
+            <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Sequential</div>
+              <div className="mt-2 text-sm text-slate-700">Best for deterministic step-by-step pipelines where each agent hands its output to the next one.</div>
+            </div>
+            <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Hierarchical</div>
+              <div className="mt-2 text-sm text-slate-700">Best for supervisor routing, parallel specialist work, and final synthesis from delegated child runs.</div>
+            </div>
+            <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Setup Tip</div>
+              <div className="mt-2 text-sm text-slate-700">Mark one agent as `supervisor`, attach domain integrations to specialists, and let the crew coordinator orchestrate.</div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -971,6 +1005,28 @@ export default function CrewsPage() {
                       {formData.process === 'hierarchical'
                         ? 'Coordinator plans/delegates, then synthesizes a cumulative final answer from all agent outputs.'
                         : 'Agents run in selected order. Each step receives the previous step output and contributes to one final cumulative answer.'}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Coordinator + Specialists Guidance</div>
+                    <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                        <div className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Selected Supervisors</div>
+                        <div className="mt-2 text-lg font-black text-slate-900">{selectedSupervisorCount}</div>
+                        <div className="mt-1 text-[11px] text-slate-600">Ideally one coordinator for hierarchical crews.</div>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                        <div className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Selected Specialists</div>
+                        <div className="mt-2 text-lg font-black text-slate-900">{selectedSpecialistCount}</div>
+                        <div className="mt-1 text-[11px] text-slate-600">Attach MCP bundles and domain tools to these agents.</div>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                        <div className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Recommended Pattern</div>
+                        <div className="mt-2 text-[11px] leading-5 text-slate-700">
+                          Keep the coordinator orchestration-focused. Let specialists own actual HTTP tools, local tools, and MCP bundles for their domain.
+                        </div>
+                      </div>
                     </div>
                   </div>
 

@@ -1539,6 +1539,32 @@ export default function AgentsPage() {
         </div>
       </div>
 
+      <div className="mb-6 rounded-3xl border border-indigo-200 bg-linear-to-r from-indigo-50 via-white to-cyan-50 p-5 shadow-sm">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-3xl">
+            <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-indigo-500">Coordinator Pattern</div>
+            <h3 className="mt-2 text-xl font-black text-slate-900">Set up one coordinator, many specialists.</h3>
+            <p className="mt-2 text-sm leading-6 text-slate-600">
+              Use a supervisor agent to plan, delegate, and synthesize. Keep domain tools and MCP bundles attached to specialist agents so each delegate can execute with its own capabilities.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 lg:w-[640px]">
+            <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Coordinator Agent</div>
+              <div className="mt-2 text-sm text-slate-700">Mark as `supervisor`, attach `delegate_to_agent`, keep it orchestration-focused.</div>
+            </div>
+            <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Specialist Agents</div>
+              <div className="mt-2 text-sm text-slate-700">Attach HTTP tools, local tools, and MCP bundles directly to the specialists that actually use them.</div>
+            </div>
+            <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Execution View</div>
+              <div className="mt-2 text-sm text-slate-700">Delegation chains now show parent, current, and child executions so you can trace handoffs cleanly.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {isAutoBuilding && (
           <div 
             className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200"
@@ -1764,6 +1790,30 @@ export default function AgentsPage() {
                       </button>
                     );
                   })}
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-cyan-200 bg-cyan-50/70 p-5">
+              <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-cyan-600">Architecture Guidance</div>
+              <div className="mt-3 grid grid-cols-1 lg:grid-cols-3 gap-3">
+                <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+                  <div className="text-sm font-semibold text-slate-900">Supervisor</div>
+                  <div className="mt-2 text-xs leading-5 text-slate-600">
+                    Best when this agent should route work, call `delegate_to_agent`, and synthesize outcomes instead of owning all MCPs directly.
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+                  <div className="text-sm font-semibold text-slate-900">Specialist</div>
+                  <div className="mt-2 text-xs leading-5 text-slate-600">
+                    Best when this agent should own the actual tools or MCP bundles for one domain and return focused outputs to a coordinator or crew.
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+                  <div className="text-sm font-semibold text-slate-900">Recommended Split</div>
+                  <div className="mt-2 text-xs leading-5 text-slate-600">
+                    Coordinators orchestrate. Specialists execute. Put shared business logic in prompts and keep domain integrations close to the specialist that needs them.
+                  </div>
                 </div>
               </div>
             </div>
