@@ -107,6 +107,18 @@ interface McpPackageImportResult {
   bundle?: { id: number; name: string; slug: string } | null;
 }
 
+interface McpSchemaProperty {
+  type?: string;
+  description?: string;
+}
+
+interface McpInputSchema {
+  type?: string;
+  properties?: Record<string, McpSchemaProperty>;
+  required?: string[];
+  additionalProperties?: boolean;
+}
+
 type HttpArgType = 'string' | 'number' | 'boolean' | 'object' | 'array';
 
 function tokenizeCurl(input: string): string[] {
@@ -193,6 +205,25 @@ function slugify(input: string) {
     .replace(/[^a-z0-9_-]+/g, '_')
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '');
+}
+
+function parseSchemaInputValue(type: string | undefined, raw: string) {
+  const value = raw.trim();
+  if (value === '') return undefined;
+  if (type === 'number' || type === 'integer') {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) throw new Error(`Expected a number, received "${raw}"`);
+    return parsed;
+  }
+  if (type === 'boolean') {
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    throw new Error(`Expected true or false, received "${raw}"`);
+  }
+  if (type === 'object' || type === 'array') {
+    return JSON.parse(value);
+  }
+  return raw;
 }
 
 function parseCurlCommand(command: string): {
@@ -394,6 +425,21 @@ export default function ToolsPage() {
     customHeaders: '', // JSON string of extra headers
     credentialId: ''
   });
+  const [mcpStdioConfig, setMcpStdioConfig] = useState({
+    packageName: '',
+    rawCommand: '',
+    rawArgs: '',
+    command: '',
+    args: '',
+    env: '',
+    mcpToolName: '',
+    timeoutMs: '45000',
+  });
+  const [mcpStdioSchema, setMcpStdioSchema] = useState<McpInputSchema | null>(null);
+  const [mcpStdioTestValues, setMcpStdioTestValues] = useState<Record<string, string>>({});
+  const [mcpStdioTestResult, setMcpStdioTestResult] = useState<string | null>(null);
+  const [mcpStdioTestError, setMcpStdioTestError] = useState<string | null>(null);
+  const [mcpStdioTestLoading, setMcpStdioTestLoading] = useState(false);
   const [mcpTestStatus, setMcpTestStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
   const [mcpTestMessage, setMcpTestMessage] = useState('');
   const [mcpUrlWarning, setMcpUrlWarning] = useState('');
@@ -512,6 +558,22 @@ export default function ToolsPage() {
     if (formData.type !== 'http') return;
     setHttpTestArgs(JSON.stringify(buildArgsTemplate(httpRequiredArgs, httpArgTypes), null, 2));
   }, [formData.type, httpRequiredArgs, httpArgTypes]);
+
+  useEffect(() => {
+    const toolId = typeof selectedToolId === 'number' ? selectedToolId : null;
+    if (!toolId || formData.type !== 'mcp_stdio_proxy') return;
+    const loadSchema = async () => {
+      try {
+        const res = await fetch(`/api/tools/${toolId}/mcp-schema`);
+        const data = await safeJson(res) as any;
+        if (!res.ok) throw new Error(data?.error || 'Failed to load MCP schema');
+        setMcpStdioSchema(data?.inputSchema || { type: 'object', properties: {}, required: [] });
+      } catch (e: any) {
+        setMcpStdioSchema({ type: 'object', properties: {}, required: [] });
+      }
+    };
+    void loadSchema();
+  }, [selectedToolId, formData.type]);
 
   useEffect(() => {
     const trimmed = mcpPackageName.trim();
@@ -703,6 +765,39 @@ export default function ToolsPage() {
     }
   };
 
+  const runMcpStdioTest = async () => {
+    const toolId = typeof selectedToolId === 'number' ? selectedToolId : null;
+    if (!toolId) return;
+    setMcpStdioTestError(null);
+    setMcpStdioTestResult(null);
+    setMcpStdioTestLoading(true);
+    try {
+      const properties = mcpStdioSchema?.properties || {};
+      const required = new Set((mcpStdioSchema?.required || []).map((key) => String(key)));
+      const args: Record<string, any> = {};
+      for (const [key, property] of Object.entries(properties)) {
+        const rawValue = mcpStdioTestValues[key] ?? '';
+        if (!rawValue.trim()) {
+          if (required.has(key)) throw new Error(`"${key}" is required`);
+          continue;
+        }
+        args[key] = parseSchemaInputValue((property as McpSchemaProperty)?.type, rawValue);
+      }
+      const res = await fetch(`/api/tools/${toolId}/test-run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ args }),
+      });
+      const data = await safeJson(res) as any;
+      if (!res.ok) throw new Error(data?.error || 'Failed to execute MCP stdio tool');
+      setMcpStdioTestResult(String(data?.result || ''));
+    } catch (e: any) {
+      setMcpStdioTestError(e.message || 'Failed to execute MCP stdio tool');
+    } finally {
+      setMcpStdioTestLoading(false);
+    }
+  };
+
   const handleSelectTool = (tool: Tool) => {
       setSelectedToolId(tool.id);
       setFormData({
@@ -768,6 +863,21 @@ export default function ToolsPage() {
                   customHeaders: cfg.customHeaders ? JSON.stringify(cfg.customHeaders, null, 2) : '',
                   credentialId: cfg.credentialId != null ? String(cfg.credentialId) : '',
               });
+          } else if (tool.type === 'mcp_stdio_proxy') {
+              setMcpStdioConfig({
+                  packageName: cfg.packageName || '',
+                  rawCommand: cfg.rawCommand || '',
+                  rawArgs: Array.isArray(cfg.rawArgs) ? cfg.rawArgs.join(' ') : '',
+                  command: cfg.command || '',
+                  args: Array.isArray(cfg.args) ? cfg.args.join(' ') : '',
+                  env: cfg.env ? JSON.stringify(cfg.env, null, 2) : '{}',
+                  mcpToolName: cfg.mcpToolName || '',
+                  timeoutMs: String(cfg.timeoutMs || 45000),
+              });
+              setMcpStdioSchema(null);
+              setMcpStdioTestValues({});
+              setMcpStdioTestResult(null);
+              setMcpStdioTestError(null);
           }
       } catch (e) {
           // Fallback if config is invalid JSON
@@ -795,6 +905,11 @@ export default function ToolsPage() {
         credentialId: '',
       });
       setMcpConfig({ serverUrl: '', apiKey: '', transportType: 'auto', customHeaders: '', credentialId: '' });
+      setMcpStdioConfig({ packageName: '', rawCommand: '', rawArgs: '', command: '', args: '', env: '{}', mcpToolName: '', timeoutMs: '45000' });
+      setMcpStdioSchema(null);
+      setMcpStdioTestValues({});
+      setMcpStdioTestResult(null);
+      setMcpStdioTestError(null);
       setMcpTestStatus('idle');
       setMcpTestMessage('');
       setJsonError(null);
@@ -960,6 +1075,23 @@ export default function ToolsPage() {
                 transportType: mcpConfig.transportType,
                 customHeaders: extraHeaders,
                 credentialId: mcpConfig.credentialId ? Number(mcpConfig.credentialId) : undefined,
+            };
+        } else if (formData.type === 'mcp_stdio_proxy') {
+            let parsedEnv = {};
+            if (mcpStdioConfig.env.trim()) {
+                try { parsedEnv = JSON.parse(mcpStdioConfig.env); } catch { throw new Error('Environment Variables must be valid JSON'); }
+            }
+            const rawArgs = mcpStdioConfig.rawArgs.trim() ? tokenizeCurl(`cmd ${mcpStdioConfig.rawArgs}`).slice(1) : [];
+            const wrappedArgs = mcpStdioConfig.args.trim() ? tokenizeCurl(`cmd ${mcpStdioConfig.args}`).slice(1) : [];
+            finalConfig = {
+                packageName: mcpStdioConfig.packageName,
+                rawCommand: mcpStdioConfig.rawCommand,
+                rawArgs,
+                command: mcpStdioConfig.command,
+                args: wrappedArgs,
+                env: parsedEnv,
+                mcpToolName: mcpStdioConfig.mcpToolName,
+                timeoutMs: Number(mcpStdioConfig.timeoutMs || 45000),
             };
         } else {
             finalConfig = JSON.parse(formData.config);
@@ -1378,6 +1510,7 @@ export default function ToolsPage() {
                                           <option value="python">Python Code</option>
                                           <option value="http">HTTP Request</option>
                                           <option value="mcp">MCP Server</option>
+                                          <option value="mcp_stdio_proxy">MCP Stdio Proxy</option>
                                       </select>
                                   </div>
                               </div>
@@ -2304,6 +2437,161 @@ export default function ToolsPage() {
                                                       <span className={`text-xs font-medium ${mcpTestStatus === 'ok' ? 'text-emerald-600' : 'text-red-600'}`}>
                                                           {mcpTestMessage}
                                                       </span>
+                                                  )}
+                                              </div>
+                                          </div>
+                                      </div>
+                                  )}
+
+                                  {formData.type === 'mcp_stdio_proxy' && (
+                                      <div className="space-y-5">
+                                          <div className="p-3 bg-cyan-50 border border-cyan-200 rounded-lg text-xs text-cyan-800">
+                                              <strong>MCP Stdio Proxy</strong> - this tool was imported from an npm/package-backed MCP server and runs through a local stdio bridge. You can inspect the package config, target MCP tool name, discovered input schema, and run a real test below.
+                                          </div>
+
+                                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                              <div>
+                                                  <label className="block text-sm font-medium text-slate-700 mb-1">Package Name</label>
+                                                  <input
+                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-cyan-500 outline-none font-mono text-sm"
+                                                      value={mcpStdioConfig.packageName}
+                                                      onChange={e => setMcpStdioConfig(prev => ({ ...prev, packageName: e.target.value }))}
+                                                      placeholder="meta-ads-mcp"
+                                                  />
+                                              </div>
+                                              <div>
+                                                  <label className="block text-sm font-medium text-slate-700 mb-1">Target MCP Tool Name</label>
+                                                  <input
+                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-cyan-500 outline-none font-mono text-sm"
+                                                      value={mcpStdioConfig.mcpToolName}
+                                                      onChange={e => setMcpStdioConfig(prev => ({ ...prev, mcpToolName: e.target.value }))}
+                                                      placeholder="get_ad_accounts"
+                                                  />
+                                              </div>
+                                              <div>
+                                                  <label className="block text-sm font-medium text-slate-700 mb-1">Raw Command</label>
+                                                  <input
+                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-cyan-500 outline-none font-mono text-sm"
+                                                      value={mcpStdioConfig.rawCommand}
+                                                      onChange={e => setMcpStdioConfig(prev => ({ ...prev, rawCommand: e.target.value }))}
+                                                      placeholder="npx"
+                                                  />
+                                              </div>
+                                              <div>
+                                                  <label className="block text-sm font-medium text-slate-700 mb-1">Raw Args</label>
+                                                  <input
+                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-cyan-500 outline-none font-mono text-sm"
+                                                      value={mcpStdioConfig.rawArgs}
+                                                      onChange={e => setMcpStdioConfig(prev => ({ ...prev, rawArgs: e.target.value }))}
+                                                      placeholder="-y meta-ads-mcp"
+                                                  />
+                                              </div>
+                                              <div>
+                                                  <label className="block text-sm font-medium text-slate-700 mb-1">Wrapped Runtime Command</label>
+                                                  <input
+                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg bg-slate-50 outline-none font-mono text-sm"
+                                                      value={mcpStdioConfig.command}
+                                                      onChange={e => setMcpStdioConfig(prev => ({ ...prev, command: e.target.value }))}
+                                                  />
+                                              </div>
+                                              <div>
+                                                  <label className="block text-sm font-medium text-slate-700 mb-1">Wrapped Runtime Args</label>
+                                                  <input
+                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg bg-slate-50 outline-none font-mono text-sm"
+                                                      value={mcpStdioConfig.args}
+                                                      onChange={e => setMcpStdioConfig(prev => ({ ...prev, args: e.target.value }))}
+                                                  />
+                                              </div>
+                                              <div>
+                                                  <label className="block text-sm font-medium text-slate-700 mb-1">Timeout (ms)</label>
+                                                  <input
+                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-cyan-500 outline-none font-mono text-sm"
+                                                      value={mcpStdioConfig.timeoutMs}
+                                                      onChange={e => setMcpStdioConfig(prev => ({ ...prev, timeoutMs: e.target.value }))}
+                                                      placeholder="45000"
+                                                  />
+                                              </div>
+                                          </div>
+
+                                          <div>
+                                              <label className="block text-sm font-medium text-slate-700 mb-1">Environment Variables (JSON)</label>
+                                              <textarea
+                                                  className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-cyan-500 outline-none h-32 font-mono text-sm"
+                                                  value={mcpStdioConfig.env}
+                                                  onChange={e => setMcpStdioConfig(prev => ({ ...prev, env: e.target.value }))}
+                                                  placeholder='{"META_ACCESS_TOKEN":"..."}'
+                                              />
+                                          </div>
+
+                                          <div className="border-t border-slate-200 pt-4 space-y-4">
+                                              <div>
+                                                  <div className="text-sm font-medium text-slate-700 mb-2">Discovered Input Schema</div>
+                                                  {Object.entries(mcpStdioSchema?.properties || {}).length > 0 ? (
+                                                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                          {(Object.entries(mcpStdioSchema?.properties || {}) as Array<[string, McpSchemaProperty]>).map(([key, property]) => (
+                                                              <div key={key} className="rounded-lg border border-slate-200 bg-white p-3">
+                                                                  <div className="text-sm font-semibold text-slate-900">
+                                                                      {key}
+                                                                      {(mcpStdioSchema?.required || []).includes(key) && <span className="text-red-500 ml-1">*</span>}
+                                                                  </div>
+                                                                  <div className="text-xs text-slate-500 mt-1">{property.type || 'string'}{property.description ? ` · ${property.description}` : ''}</div>
+                                                              </div>
+                                                          ))}
+                                                      </div>
+                                                  ) : (
+                                                      <div className="text-sm text-slate-500 border border-dashed border-slate-200 rounded-lg p-4">
+                                                          No structured schema was returned for this tool.
+                                                      </div>
+                                                  )}
+                                              </div>
+
+                                              <div>
+                                                  <div className="text-sm font-medium text-slate-700 mb-2">Test Execution Inputs</div>
+                                                  {Object.entries(mcpStdioSchema?.properties || {}).length > 0 ? (
+                                                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                          {(Object.entries(mcpStdioSchema?.properties || {}) as Array<[string, McpSchemaProperty]>).map(([key, property]) => (
+                                                              <div key={`test-${key}`}>
+                                                                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                                                                      {key}
+                                                                      {(mcpStdioSchema?.required || []).includes(key) && <span className="text-red-500 ml-1">*</span>}
+                                                                  </label>
+                                                                  <input
+                                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-cyan-500 outline-none font-mono text-sm"
+                                                                      value={mcpStdioTestValues[key] || ''}
+                                                                      onChange={e => setMcpStdioTestValues(prev => ({ ...prev, [key]: e.target.value }))}
+                                                                      placeholder={
+                                                                          property.type === 'object' ? '{"key":"value"}'
+                                                                          : property.type === 'array' ? '["item"]'
+                                                                          : property.type === 'boolean' ? 'true'
+                                                                          : property.type === 'number' || property.type === 'integer' ? '123'
+                                                                          : `Enter ${key}`
+                                                                      }
+                                                                  />
+                                                              </div>
+                                                          ))}
+                                                      </div>
+                                                  ) : (
+                                                      <div className="text-sm text-slate-500 border border-dashed border-slate-200 rounded-lg p-4">
+                                                          This tool can be tested without predefined schema fields, or its schema could not be discovered.
+                                                      </div>
+                                                  )}
+
+                                                  <div className="flex items-center gap-3 mt-4">
+                                                      <button
+                                                          type="button"
+                                                          onClick={runMcpStdioTest}
+                                                          disabled={mcpStdioTestLoading || selectedToolId === 'new'}
+                                                          className="px-4 py-2 text-sm font-medium bg-cyan-600 text-white rounded-lg hover:bg-cyan-700 disabled:opacity-60"
+                                                      >
+                                                          {mcpStdioTestLoading ? 'Running Test...' : 'Run MCP Tool Test'}
+                                                      </button>
+                                                      {mcpStdioTestError && <span className="text-sm text-red-600">{mcpStdioTestError}</span>}
+                                                  </div>
+
+                                                  {mcpStdioTestResult && (
+                                                      <pre className="mt-3 text-xs bg-slate-900 text-slate-100 p-3 rounded-lg overflow-x-auto whitespace-pre-wrap">
+                                                          {mcpStdioTestResult}
+                                                      </pre>
                                                   )}
                                               </div>
                                           </div>
