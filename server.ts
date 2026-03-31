@@ -79,6 +79,55 @@ type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'canceled';
 
 // pricing logic moved inside startServer
 
+function slugifyValue(input: string) {
+  return String(input || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function packageToBaseName(input: string) {
+  const cleaned = String(input || '')
+    .trim()
+    .replace(/^@/, '')
+    .replace(/[\\/]/g, '_')
+    .replace(/[^a-zA-Z0-9_-]+/g, '_');
+  return slugifyValue(cleaned);
+}
+
+async function discoverMcpPackageTools(params: {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  timeoutMs?: number;
+}) {
+  const command = String(params.command || '').trim();
+  const args = Array.isArray(params.args) ? params.args.map((value) => String(value)) : [];
+  const timeoutMs = Number(params.timeoutMs || 45000);
+  const env = {
+    ...process.env,
+    ...(params.env || {}),
+  };
+  if (!command) throw new Error('command is required');
+
+  const client = new Client({ name: 'agentic-orchestrator', version: '1.0.0' }, { capabilities: {} });
+  const transport = new StdioClientTransport({
+    command,
+    args,
+    env,
+  } as any);
+
+  try {
+    await withTimeout(client.connect(transport), timeoutMs, 'MCP stdio connect');
+    const result = await withTimeout(client.listTools(), timeoutMs, 'MCP stdio listTools');
+    return result.tools || [];
+  } finally {
+    try { await client.close(); } catch {}
+  }
+}
+
 
 // Initialize AgentOps
 if (process.env.AGENTOPS_API_KEY) {
@@ -1473,6 +1522,256 @@ app.post('/api/tools/mcp-test', async (req, res) => {
   } catch (e: any) {
     const message = e?.message || 'Connection failed';
     res.status(400).json({ error: message });
+  }
+});
+
+app.post('/api/tools/import-mcp-package', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const {
+      packageName,
+      packageCommand,
+      packageArgs,
+      env,
+      namePrefix,
+      bundleName,
+      bundleSlug,
+      bundleDescription,
+      createBundle,
+      exposeTools,
+      exposeBundle,
+      timeoutMs,
+    } = req.body || {};
+
+    const normalizedPackageName = String(packageName || '').trim();
+    if (!normalizedPackageName) return res.status(400).json({ error: 'packageName is required' });
+
+    const command = String(packageCommand || 'npx').trim();
+    const args = Array.isArray(packageArgs) && packageArgs.length
+      ? packageArgs.map((value: any) => String(value))
+      : ['-y', normalizedPackageName];
+
+    const envObject = env && typeof env === 'object' && !Array.isArray(env)
+      ? Object.fromEntries(
+          Object.entries(env)
+            .filter(([key]) => String(key || '').trim())
+            .map(([key, value]) => [String(key).trim(), String(value ?? '')])
+        )
+      : {};
+
+    const discoveredTools = await discoverMcpPackageTools({
+      command,
+      args,
+      env: envObject,
+      timeoutMs: Number(timeoutMs || 45000),
+    });
+
+    if (!discoveredTools.length) {
+      return res.status(400).json({ error: `No MCP tools were discovered from package "${normalizedPackageName}".` });
+    }
+
+    const packageBaseName = packageToBaseName(normalizedPackageName) || 'mcp_package';
+    const resolvedPrefix = slugifyValue(namePrefix || `npm_${packageBaseName}`) || `npm_${packageBaseName}`;
+    const now = new Date();
+    const createdOrUpdatedTools: Array<{ id: number; name: string; mcpToolName: string }> = [];
+
+    for (const discoveredTool of discoveredTools) {
+      const mcpToolName = String((discoveredTool as any)?.name || '').trim();
+      if (!mcpToolName) continue;
+      const localToolName = `${resolvedPrefix}_${slugifyValue(mcpToolName) || 'tool'}`;
+      const toolDescription = String((discoveredTool as any)?.description || '').trim()
+        || `Imported from npm MCP package "${normalizedPackageName}" as stdio tool "${mcpToolName}".`;
+      const config = {
+        packageName: normalizedPackageName,
+        command,
+        args,
+        env: envObject,
+        mcpToolName,
+        timeoutMs: Number(timeoutMs || 45000),
+      };
+      const serializedConfig = JSON.stringify(config);
+      const resolvedCategory = inferToolCategory(localToolName, toolDescription, 'mcp_stdio_proxy', config, 'MCP');
+      const existing = await prisma.orchestratorTool.findFirst({
+        where: { name: localToolName },
+        select: { id: true, version: true },
+      });
+
+      let toolId: number;
+      let versionNumber: number;
+      if (existing) {
+        versionNumber = Number(existing.version || 1) + 1;
+        await prisma.orchestratorTool.update({
+          where: { id: existing.id },
+          data: {
+            description: toolDescription,
+            category: resolvedCategory,
+            type: 'mcp_stdio_proxy',
+            config: serializedConfig,
+            version: versionNumber,
+            updatedAt: now,
+          },
+        });
+        await prisma.orchestratorToolVersion.create({
+          data: {
+            toolId: existing.id,
+            versionNumber,
+            name: localToolName,
+            description: toolDescription,
+            category: resolvedCategory,
+            type: 'mcp_stdio_proxy',
+            config: serializedConfig,
+            changeKind: 'update',
+            createdAt: now,
+          },
+        });
+        toolId = existing.id;
+      } else {
+        const created = await prisma.orchestratorTool.create({
+          data: {
+            name: localToolName,
+            description: toolDescription,
+            category: resolvedCategory,
+            type: 'mcp_stdio_proxy',
+            config: serializedConfig,
+            version: 1,
+            updatedAt: now,
+          },
+        });
+        await prisma.orchestratorToolVersion.create({
+          data: {
+            toolId: created.id,
+            versionNumber: 1,
+            name: localToolName,
+            description: toolDescription,
+            category: resolvedCategory,
+            type: 'mcp_stdio_proxy',
+            config: serializedConfig,
+            changeKind: 'create',
+            createdAt: now,
+          },
+        });
+        toolId = created.id;
+      }
+
+      createdOrUpdatedTools.push({ id: toolId, name: localToolName, mcpToolName });
+
+      if (exposeTools !== false) {
+        const exposedName = `tool_${resolvedPrefix}_${slugifyValue(mcpToolName) || 'tool'}`;
+        const currentVersion = Number((await prisma.orchestratorMcpExposedToolVersion.aggregate({
+          where: { toolId },
+          _max: { versionNumber: true },
+        }))._max.versionNumber || 0);
+
+        await prisma.orchestratorMcpExposedTool.upsert({
+          where: { toolId },
+          update: {
+            exposedName,
+            description: toolDescription,
+            updatedAt: now,
+          },
+          create: {
+            toolId,
+            exposedName,
+            description: toolDescription,
+          },
+        });
+        await prisma.orchestratorMcpExposedToolVersion.create({
+          data: {
+            toolId,
+            versionNumber: currentVersion + 1,
+            exposedName,
+            description: toolDescription,
+            isExposed: true,
+            changeKind: currentVersion === 0 ? 'create' : 'update',
+            createdAt: now,
+          },
+        });
+      }
+    }
+
+    let createdBundle: { id: number; name: string; slug: string } | null = null;
+    if (createBundle !== false && createdOrUpdatedTools.length) {
+      const resolvedBundleName = String(bundleName || `${normalizedPackageName} Bundle`).trim() || `${normalizedPackageName} Bundle`;
+      const resolvedBundleSlug = slugifyValue(bundleSlug || `${packageBaseName}_bundle`) || `${packageBaseName}_bundle`;
+      const resolvedBundleDescription = typeof bundleDescription === 'string' && bundleDescription.trim()
+        ? bundleDescription.trim()
+        : `Imported bundle for npm MCP package "${normalizedPackageName}".`;
+      const existingBundle = await prisma.orchestratorMcpBundle.findUnique({
+        where: { slug: resolvedBundleSlug },
+        select: { id: true },
+      });
+
+      let bundleId: number;
+      const previousVersion = existingBundle
+        ? Number((await prisma.orchestratorMcpBundleVersion.aggregate({
+            where: { bundleId: existingBundle.id },
+            _max: { versionNumber: true },
+          }))._max.versionNumber || 0)
+        : 0;
+
+      if (existingBundle) {
+        await prisma.orchestratorMcpBundle.update({
+          where: { id: existingBundle.id },
+          data: {
+            name: resolvedBundleName,
+            description: resolvedBundleDescription,
+            isExposed: exposeBundle !== false,
+            updatedAt: now,
+          },
+        });
+        bundleId = existingBundle.id;
+      } else {
+        const bundle = await prisma.orchestratorMcpBundle.create({
+          data: {
+            name: resolvedBundleName,
+            slug: resolvedBundleSlug,
+            description: resolvedBundleDescription,
+            isExposed: exposeBundle !== false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        bundleId = bundle.id;
+      }
+
+      await prisma.orchestratorMcpBundleTool.deleteMany({ where: { bundleId } });
+      await prisma.orchestratorMcpBundleTool.createMany({
+        data: createdOrUpdatedTools.map((tool) => ({
+          bundleId,
+          toolId: tool.id,
+          createdAt: now,
+          updatedAt: now,
+        })),
+        skipDuplicates: true,
+      });
+      await prisma.orchestratorMcpBundleVersion.create({
+        data: {
+          bundleId,
+          versionNumber: previousVersion + 1,
+          name: resolvedBundleName,
+          slug: resolvedBundleSlug,
+          description: resolvedBundleDescription,
+          toolIds: JSON.stringify(createdOrUpdatedTools.map((tool) => tool.id)),
+          changeKind: previousVersion === 0 ? 'create' : 'update',
+          createdAt: now,
+        },
+      });
+      createdBundle = { id: bundleId, name: resolvedBundleName, slug: resolvedBundleSlug };
+    }
+
+    await refreshPersistentMirror();
+
+    res.json({
+      success: true,
+      packageName: normalizedPackageName,
+      command,
+      args,
+      discoveredCount: discoveredTools.length,
+      tools: createdOrUpdatedTools,
+      bundle: createdBundle,
+    });
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to import MCP package' });
   }
 });
 

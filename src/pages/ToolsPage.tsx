@@ -97,6 +97,16 @@ interface HttpAuthConfig {
   credentialId: string;
 }
 
+interface McpPackageImportResult {
+  success: boolean;
+  packageName: string;
+  command: string;
+  args: string[];
+  discoveredCount: number;
+  tools: Array<{ id: number; name: string; mcpToolName: string }>;
+  bundle?: { id: number; name: string; slug: string } | null;
+}
+
 type HttpArgType = 'string' | 'number' | 'boolean' | 'object' | 'array';
 
 function tokenizeCurl(input: string): string[] {
@@ -174,6 +184,15 @@ function buildArgsTemplate(args: string[], argTypes: Record<string, HttpArgType>
     out[key] = getDefaultArgValue(argTypes[key] || 'string');
   }
   return out;
+}
+
+function slugify(input: string) {
+  return String(input || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
 }
 
 function parseCurlCommand(command: string): {
@@ -351,6 +370,19 @@ export default function ToolsPage() {
   const [mcpImportError, setMcpImportError] = useState<string | null>(null);
   const [mcpImportLoading, setMcpImportLoading] = useState(false);
   const [mcpImportSuccess, setMcpImportSuccess] = useState<string | null>(null);
+  const [mcpPackageName, setMcpPackageName] = useState('');
+  const [mcpPackageCommand, setMcpPackageCommand] = useState('npx');
+  const [mcpPackageArgs, setMcpPackageArgs] = useState('');
+  const [mcpPackageEnv, setMcpPackageEnv] = useState('{\n  "META_ACCESS_TOKEN": ""\n}');
+  const [mcpPackagePrefix, setMcpPackagePrefix] = useState('');
+  const [mcpPackageBundleName, setMcpPackageBundleName] = useState('');
+  const [mcpPackageBundleSlug, setMcpPackageBundleSlug] = useState('');
+  const [mcpPackageCreateBundle, setMcpPackageCreateBundle] = useState(true);
+  const [mcpPackageExposeTools, setMcpPackageExposeTools] = useState(true);
+  const [mcpPackageExposeBundle, setMcpPackageExposeBundle] = useState(true);
+  const [mcpPackageImportLoading, setMcpPackageImportLoading] = useState(false);
+  const [mcpPackageImportError, setMcpPackageImportError] = useState<string | null>(null);
+  const [mcpPackageImportResult, setMcpPackageImportResult] = useState<McpPackageImportResult | null>(null);
   const [httpTestArgs, setHttpTestArgs] = useState('{"query":"example"}');
   const [httpTestResult, setHttpTestResult] = useState<string | null>(null);
   const [httpTestError, setHttpTestError] = useState<string | null>(null);
@@ -480,6 +512,23 @@ export default function ToolsPage() {
     if (formData.type !== 'http') return;
     setHttpTestArgs(JSON.stringify(buildArgsTemplate(httpRequiredArgs, httpArgTypes), null, 2));
   }, [formData.type, httpRequiredArgs, httpArgTypes]);
+
+  useEffect(() => {
+    const trimmed = mcpPackageName.trim();
+    if (!trimmed) return;
+    if (!mcpPackagePrefix.trim()) {
+      setMcpPackagePrefix(`npm_${slugify(trimmed.replace(/^@/, '').replace(/[\\/]/g, '_'))}`);
+    }
+    if (!mcpPackageBundleName.trim()) {
+      setMcpPackageBundleName(`${trimmed} Bundle`);
+    }
+    if (!mcpPackageBundleSlug.trim()) {
+      setMcpPackageBundleSlug(`${slugify(trimmed.replace(/^@/, '').replace(/[\\/]/g, '_'))}_bundle`);
+    }
+    if (!mcpPackageArgs.trim()) {
+      setMcpPackageArgs(`-y ${trimmed}`);
+    }
+  }, [mcpPackageName]);
 
   const categories = useMemo(() => {
     const cats = new Set(tools.map(t => t.category || 'General'));
@@ -1041,6 +1090,61 @@ export default function ToolsPage() {
       setMcpImportError(e.message || 'Failed to import MCP config');
     } finally {
       setMcpImportLoading(false);
+    }
+  };
+
+  const importMcpPackage = async () => {
+    setMcpPackageImportError(null);
+    setMcpPackageImportResult(null);
+    setMcpPackageImportLoading(true);
+    try {
+      const packageName = mcpPackageName.trim();
+      if (!packageName) throw new Error('Package name is required');
+
+      let env: Record<string, string> = {};
+      if (mcpPackageEnv.trim()) {
+        const parsedEnv = JSON.parse(mcpPackageEnv);
+        if (!parsedEnv || typeof parsedEnv !== 'object' || Array.isArray(parsedEnv)) {
+          throw new Error('Environment must be a JSON object');
+        }
+        env = Object.fromEntries(
+          Object.entries(parsedEnv).map(([key, value]) => [String(key), String(value ?? '')])
+        );
+      }
+
+      const args = mcpPackageArgs.trim()
+        ? tokenizeCurl(`cmd ${mcpPackageArgs}`).slice(1)
+        : ['-y', packageName];
+
+      const res = await fetch('/api/tools/import-mcp-package', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          packageName,
+          packageCommand: mcpPackageCommand.trim() || 'npx',
+          packageArgs: args,
+          env,
+          namePrefix: mcpPackagePrefix.trim(),
+          bundleName: mcpPackageBundleName.trim(),
+          bundleSlug: mcpPackageBundleSlug.trim(),
+          createBundle: mcpPackageCreateBundle,
+          exposeTools: mcpPackageExposeTools,
+          exposeBundle: mcpPackageExposeBundle,
+        }),
+      });
+      const data = await safeJson(res) as McpPackageImportResult | { error?: string } | null;
+      if (!res.ok) throw new Error((data as any)?.error || 'Failed to import MCP package');
+      const result = data as McpPackageImportResult;
+      setMcpPackageImportResult(result);
+      const list = await fetchTools();
+      if (Array.isArray(list) && result.tools.length > 0) {
+        const first = list.find((tool: any) => Number(tool.id) === Number(result.tools[0].id));
+        if (first) handleSelectTool(first);
+      }
+    } catch (e: any) {
+      setMcpPackageImportError(e.message || 'Failed to import MCP package');
+    } finally {
+      setMcpPackageImportLoading(false);
     }
   };
 
@@ -1887,6 +1991,138 @@ export default function ToolsPage() {
 
                                   {formData.type === 'mcp' && (
                                       <div className="space-y-4">
+                                          <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-4 space-y-4">
+                                              <div className="flex items-start justify-between gap-3">
+                                                  <div>
+                                                      <label className="block text-sm font-medium text-slate-800 mb-1">Import from npm MCP package</label>
+                                                      <p className="text-xs text-slate-600">
+                                                          Paste a package like <code className="bg-white px-1 rounded">meta-ads-mcp</code> and the app will run it over stdio, discover its MCP tools, register local proxy tools, and optionally create an exposed MCP bundle.
+                                                      </p>
+                                                  </div>
+                                                  <div className="text-[11px] px-2 py-1 rounded-full bg-white border border-emerald-200 text-emerald-700 font-medium">
+                                                      Automated
+                                                  </div>
+                                              </div>
+
+                                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                  <div>
+                                                      <label className="block text-sm font-medium text-slate-700 mb-1">Package Name</label>
+                                                      <input
+                                                          type="text"
+                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none font-mono text-sm"
+                                                          value={mcpPackageName}
+                                                          onChange={e => setMcpPackageName(e.target.value)}
+                                                          placeholder="meta-ads-mcp"
+                                                      />
+                                                  </div>
+                                                  <div>
+                                                      <label className="block text-sm font-medium text-slate-700 mb-1">Command</label>
+                                                      <input
+                                                          type="text"
+                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none font-mono text-sm"
+                                                          value={mcpPackageCommand}
+                                                          onChange={e => setMcpPackageCommand(e.target.value)}
+                                                          placeholder="npx"
+                                                      />
+                                                  </div>
+                                                  <div className="md:col-span-2">
+                                                      <label className="block text-sm font-medium text-slate-700 mb-1">Command Args</label>
+                                                      <input
+                                                          type="text"
+                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none font-mono text-sm"
+                                                          value={mcpPackageArgs}
+                                                          onChange={e => setMcpPackageArgs(e.target.value)}
+                                                          placeholder="-y meta-ads-mcp"
+                                                      />
+                                                      <p className="text-xs text-slate-500 mt-1">The backend will launch <code className="bg-white px-1 rounded">{mcpPackageCommand || 'npx'}</code> with these args to discover MCP tools.</p>
+                                                  </div>
+                                                  <div>
+                                                      <label className="block text-sm font-medium text-slate-700 mb-1">Local Tool Prefix</label>
+                                                      <input
+                                                          type="text"
+                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none font-mono text-sm"
+                                                          value={mcpPackagePrefix}
+                                                          onChange={e => setMcpPackagePrefix(e.target.value)}
+                                                          placeholder="npm_meta_ads_mcp"
+                                                      />
+                                                  </div>
+                                                  <div>
+                                                      <label className="block text-sm font-medium text-slate-700 mb-1">Bundle Name</label>
+                                                      <input
+                                                          type="text"
+                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none text-sm"
+                                                          value={mcpPackageBundleName}
+                                                          onChange={e => setMcpPackageBundleName(e.target.value)}
+                                                          placeholder="meta-ads-mcp Bundle"
+                                                      />
+                                                  </div>
+                                                  <div className="md:col-span-2">
+                                                      <label className="block text-sm font-medium text-slate-700 mb-1">Bundle Slug</label>
+                                                      <input
+                                                          type="text"
+                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none font-mono text-sm"
+                                                          value={mcpPackageBundleSlug}
+                                                          onChange={e => setMcpPackageBundleSlug(e.target.value)}
+                                                          placeholder="meta_ads_mcp_bundle"
+                                                      />
+                                                  </div>
+                                                  <div className="md:col-span-2">
+                                                      <label className="block text-sm font-medium text-slate-700 mb-1">Environment Variables (JSON)</label>
+                                                      <textarea
+                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none h-28 font-mono text-xs"
+                                                          value={mcpPackageEnv}
+                                                          onChange={e => setMcpPackageEnv(e.target.value)}
+                                                          placeholder={"{\n  \"META_ACCESS_TOKEN\": \"...\",\n  \"META_APP_SECRET\": \"...\"\n}"}
+                                                      />
+                                                  </div>
+                                              </div>
+
+                                              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                                                  <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                                                      <input type="checkbox" checked={mcpPackageCreateBundle} onChange={e => setMcpPackageCreateBundle(e.target.checked)} />
+                                                      <span>Create MCP bundle</span>
+                                                  </label>
+                                                  <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                                                      <input type="checkbox" checked={mcpPackageExposeTools} onChange={e => setMcpPackageExposeTools(e.target.checked)} />
+                                                      <span>Expose individual tools</span>
+                                                  </label>
+                                                  <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                                                      <input type="checkbox" checked={mcpPackageExposeBundle} onChange={e => setMcpPackageExposeBundle(e.target.checked)} disabled={!mcpPackageCreateBundle} />
+                                                      <span>Expose bundle for serving</span>
+                                                  </label>
+                                              </div>
+
+                                              <div className="flex items-center justify-between gap-3 flex-wrap">
+                                                  <button
+                                                      type="button"
+                                                      className="px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60"
+                                                      onClick={importMcpPackage}
+                                                      disabled={!mcpPackageName.trim() || mcpPackageImportLoading}
+                                                  >
+                                                      {mcpPackageImportLoading ? 'Importing package...' : 'Import npm MCP Package'}
+                                                  </button>
+                                                  {mcpPackageImportError && (
+                                                      <span className="text-xs text-red-600">{mcpPackageImportError}</span>
+                                                  )}
+                                              </div>
+
+                                              {mcpPackageImportResult && (
+                                                  <div className="rounded-lg border border-emerald-200 bg-white px-3 py-3 text-sm text-slate-700 space-y-2">
+                                                      <div className="font-medium text-emerald-700">
+                                                          Imported {mcpPackageImportResult.discoveredCount} MCP tool{mcpPackageImportResult.discoveredCount === 1 ? '' : 's'} from <code className="bg-emerald-50 px-1 rounded">{mcpPackageImportResult.packageName}</code>.
+                                                      </div>
+                                                      <div className="text-xs text-slate-600">
+                                                          Local proxies: {mcpPackageImportResult.tools.map(tool => tool.name).join(', ')}
+                                                      </div>
+                                                      {mcpPackageImportResult.bundle && (
+                                                          <div className="text-xs text-slate-600">
+                                                              Bundle ready at <code className="bg-emerald-50 px-1 rounded">/mcp/bundle/{mcpPackageImportResult.bundle.slug}</code>.
+                                                          </div>
+                                                      )}
+                                                  </div>
+                                              )}
+                                          </div>
+
                                           <div>
                                               <label className="block text-sm font-medium text-slate-700 mb-1">Import from MCP Config (claude_desktop_config.json)</label>
                                               <textarea
