@@ -49,7 +49,7 @@ function isJsonRpcLine(line) {
 function createStdoutFilter(onPacketLine, onLogLine) {
   let pending = '';
 
-  return (chunk) => {
+  const processChunk = (chunk) => {
     pending += toBuffer(chunk).toString('utf8');
 
     while (true) {
@@ -68,6 +68,19 @@ function createStdoutFilter(onPacketLine, onLogLine) {
       }
     }
   };
+
+  processChunk.flush = () => {
+    const line = pending;
+    pending = '';
+    if (!line.trim()) return;
+    if (isJsonRpcLine(line)) {
+      onPacketLine(line.endsWith('\n') ? line : `${line}\n`);
+    } else {
+      onLogLine(line.endsWith('\n') ? line : `${line}\n`);
+    }
+  };
+
+  return processChunk;
 }
 
 const parsed = parseArgs(process.argv.slice(2));
@@ -106,6 +119,9 @@ const forwardStdout = createStdoutFilter(
 );
 
 child.stdout.on('data', forwardStdout);
+child.stdout.on('end', () => {
+  forwardStdout.flush?.();
+});
 child.stderr.on('data', (chunk) => process.stderr.write(chunk));
 
 child.on('error', (error) => {
@@ -114,6 +130,7 @@ child.on('error', (error) => {
 });
 
 child.on('close', (code, signal) => {
+  forwardStdout.flush?.();
   if (signal) {
     process.stderr.write(`mcp-stdio-wrapper child terminated by signal ${signal}\n`);
     process.exit(1);

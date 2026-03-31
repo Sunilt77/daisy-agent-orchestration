@@ -612,10 +612,10 @@ export default function ToolsPage() {
           .some((value) => String(value).toLowerCase().includes(query))
       );
     }
-    if (categoryFilter !== 'All') {
+    if (categoryFilter && categoryFilter.toLowerCase() !== 'all') {
       list = list.filter(t => (t.category || 'General') === categoryFilter);
     }
-    if (typeFilter !== 'All') {
+    if (typeFilter && typeFilter.toLowerCase() !== 'all') {
       list = list.filter(t => (t.type || 'custom') === typeFilter);
     }
     return [...list].sort((a, b) => {
@@ -625,7 +625,7 @@ export default function ToolsPage() {
       if (catA > catB) return 1;
       return a.name.localeCompare(b.name);
     });
-  }, [tools, categoryFilter]);
+  }, [tools, toolSearch, categoryFilter, typeFilter]);
 
   const pagedTools = useMemo(() => {
     const start = (toolsPage - 1) * toolsPageSize;
