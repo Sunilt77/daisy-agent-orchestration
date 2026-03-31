@@ -102,6 +102,7 @@ export default function CrewPage() {
   const [copied, setCopied] = useState(false);
   const runSectionRef = React.useRef<HTMLDivElement | null>(null);
   const streamRef = useRef<EventSource | null>(null);
+  const executionIdRef = useRef<number | null>(null);
   const [threadMessages, setThreadMessages] = useState<CrewThreadMessage[]>([]);
   const [threadLinkedExecutionIds, setThreadLinkedExecutionIds] = useState<number[]>([]);
 
@@ -132,6 +133,10 @@ export default function CrewPage() {
   }, [threadMessages, threadLinkedExecutionIds, threadStorageKey]);
 
   useEffect(() => {
+    executionIdRef.current = executionId;
+  }, [executionId]);
+
+  useEffect(() => {
     if (!isRunning || !executionId) return;
     if (streamRef.current) {
       streamRef.current.close();
@@ -140,6 +145,7 @@ export default function CrewPage() {
     const es = new EventSource(`/api/executions/${executionId}/stream`);
     streamRef.current = es;
     es.addEventListener('update', (event: MessageEvent) => {
+      if (streamRef.current !== es) return;
       try {
         const data = JSON.parse(event.data || '{}');
         const nextLogs = Array.isArray(data.logs) ? data.logs : [];
@@ -158,12 +164,14 @@ export default function CrewPage() {
       }
     });
     es.addEventListener('done', () => {
+      if (streamRef.current !== es) return;
       setIsRunning(false);
       void fetchLogs(Number(executionId));
       es.close();
       streamRef.current = null;
     });
     es.onerror = () => {
+      if (streamRef.current !== es) return;
       void fetchLogs(Number(executionId));
       es.close();
       streamRef.current = null;
@@ -215,6 +223,9 @@ export default function CrewPage() {
     if (!resolvedExecutionId) return;
     const res = await fetch(`/api/executions/${resolvedExecutionId}`);
     const data = await res.json();
+    if (executionIdRef.current != null && resolvedExecutionId !== Number(executionIdRef.current)) {
+      return;
+    }
     setLogs(data.logs || []);
     const finalResult = Array.isArray(data.logs)
       ? ([...data.logs].reverse().find((entry: any) => entry.type === 'crew_result' || entry.type === 'crew_summary')?.result || '')
@@ -284,7 +295,7 @@ export default function CrewPage() {
       if (!data?.executionId) {
         throw new Error('Crew started but no execution id was returned');
       }
-      setExecutionId(data.executionId);
+      setExecutionId(Number(data.executionId));
       setInitialInput('');
     } catch (e: any) {
       setIsRunning(false);
@@ -754,7 +765,10 @@ export default function CrewPage() {
           </div>
 
           <div className="flex justify-between items-center">
-            <h2 className="text-xl font-semibold text-slate-800">Workflow Tasks</h2>
+            <div>
+              <h2 className="text-xl font-semibold text-slate-800">Workflow Tasks</h2>
+              <p className="text-sm text-slate-500 mt-1">The live canvas highlights the active node, flowing path, and current tool call so the crew feels more like an operator console than a static task list.</p>
+            </div>
             <button 
               onClick={() => setIsAddingTask(true)}
               className="text-indigo-600 hover:text-indigo-700 text-sm font-medium flex items-center gap-1"
@@ -825,7 +839,9 @@ export default function CrewPage() {
                 tasks={tasks} 
                 agents={agents} 
                 onNodeClick={setSelectedTask} 
-                processType={crew.process} 
+                processType={crew.process}
+                logs={logs}
+                isRunning={isRunning}
               />
             ) : (
               !isAddingTask && (
