@@ -82,6 +82,43 @@ interface BundleTestPayload {
   tools: McpTestTool[];
 }
 
+interface LocalMcpRuntime {
+  runtime_key: string;
+  package_name: string;
+  runtime_label: string;
+  transport: string;
+  runtime_mode: string;
+  raw_command: string;
+  raw_args: string[];
+  env_keys: string[];
+  timeout_ms: number;
+  tool_count: number;
+  exposed_tool_count: number;
+  bundle_count: number;
+  attached_agent_count: number;
+  recommended_endpoint?: string | null;
+  updated_at?: string | null;
+  tools: Array<{
+    id: number;
+    name: string;
+    description?: string;
+    mcp_tool_name?: string;
+    exposed_name?: string | null;
+    is_exposed: boolean;
+  }>;
+  bundles: Array<{
+    id: number;
+    name: string;
+    slug: string;
+    description?: string | null;
+    is_exposed: boolean;
+  }>;
+  agent_links: Array<{
+    id: number;
+    name: string;
+  }>;
+}
+
 function slugify(input: string) {
   return input.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_').replace(/_+/g, '_');
 }
@@ -114,6 +151,7 @@ function formatDisplayedMcpToolName(name?: string | null) {
 export default function McpPage() {
   const [rows, setRows] = useState<ExposedToolRow[]>([]);
   const [bundles, setBundles] = useState<McpBundle[]>([]);
+  const [localRuntimes, setLocalRuntimes] = useState<LocalMcpRuntime[]>([]);
   const [authToken, setAuthToken] = useState<string>('');
   const [tokenSaved, setTokenSaved] = useState<boolean>(false);
   const [credentials, setCredentials] = useState<CredentialOption[]>([]);
@@ -165,17 +203,20 @@ export default function McpPage() {
   const load = async () => {
     setLoadError('');
     try {
-      const [toolsRes, cfgRes, bundlesRes] = await Promise.all([
+      const [toolsRes, cfgRes, bundlesRes, runtimesRes] = await Promise.all([
         fetch('/api/mcp/exposed-tools'),
         fetch('/api/mcp/config'),
         fetch('/api/mcp/bundles'),
+        fetch('/api/mcp/local-packages'),
       ]);
       const credRes = await fetch(`/api/credentials?category=${encodeURIComponent(credentialCategory)}`).catch(() => null);
       const tools = await toolsRes.json().catch(() => []);
       const cfg = await cfgRes.json().catch(() => ({}));
       const bundleRows = await bundlesRes.json().catch(() => []);
+      const runtimeRows = await runtimesRes.json().catch(() => []);
       setRows(Array.isArray(tools) ? tools : []);
       setBundles(Array.isArray(bundleRows) ? bundleRows : []);
+      setLocalRuntimes(Array.isArray(runtimeRows) ? runtimeRows : []);
       if (credRes) {
         const creds = await credRes.json().catch(() => []);
         setCredentials(Array.isArray(creds) ? creds : []);
@@ -635,6 +676,107 @@ export default function McpPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
+          <div className="bg-white rounded-xl border border-slate-200 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2 text-slate-800 font-semibold">
+                <Activity size={18} /> Local MCP Runtimes ({localRuntimes.length})
+              </div>
+              <div className="text-xs text-slate-500">Imported npm MCP packages that run on this server and can be exposed or attached to agents.</div>
+            </div>
+
+            {localRuntimes.length === 0 && (
+              <div className="text-sm text-slate-500 border border-dashed border-slate-200 rounded-lg p-4">
+                No local npm MCP runtimes discovered yet. Import one from the Tools page to run it on this platform.
+              </div>
+            )}
+
+            <div className="space-y-3">
+              {localRuntimes.map((runtime) => {
+                const primaryBundle = runtime.bundles[0] || null;
+                const endpoint = runtime.recommended_endpoint ? `${origin}${runtime.recommended_endpoint}` : '';
+                return (
+                  <div key={runtime.runtime_key} className="border border-emerald-200 rounded-xl p-4 bg-emerald-50/40 shadow-sm">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold text-slate-900">{runtime.runtime_label}</div>
+                        <div className="text-xs text-slate-600 mt-1">{runtime.runtime_mode}</div>
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                          <span className="rounded-full bg-white/90 px-2 py-1 border border-emerald-100">{runtime.tool_count} tools</span>
+                          <span className="rounded-full bg-white/90 px-2 py-1 border border-emerald-100">{runtime.exposed_tool_count} exposed tools</span>
+                          <span className="rounded-full bg-white/90 px-2 py-1 border border-emerald-100">{runtime.bundle_count} bundles</span>
+                          <span className="rounded-full bg-white/90 px-2 py-1 border border-emerald-100">{runtime.attached_agent_count} agents</span>
+                        </div>
+                        <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                          <div className="rounded-lg border border-white/80 bg-white/80 p-3">
+                            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Runtime Command</div>
+                            <code className="mt-2 block whitespace-pre-wrap break-all text-slate-700">
+                              {[runtime.raw_command, ...runtime.raw_args].filter(Boolean).join(' ')}
+                            </code>
+                          </div>
+                          <div className="rounded-lg border border-white/80 bg-white/80 p-3">
+                            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Platform Exposure</div>
+                            <div className="mt-2 text-slate-700">
+                              {primaryBundle ? `Primary bundle: ${primaryBundle.name}` : 'No bundle created yet'}
+                            </div>
+                            {endpoint && (
+                              <code className="mt-2 block whitespace-pre-wrap break-all text-slate-700">{endpoint}</code>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-1 xl:grid-cols-3 gap-3">
+                      <div className="rounded-xl border border-white/80 bg-white/80 p-3">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Env Keys</div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {runtime.env_keys.length > 0 ? runtime.env_keys.map((key) => (
+                            <span key={key} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">{key}</span>
+                          )) : (
+                            <span className="text-xs text-slate-500">No env vars configured</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-white/80 bg-white/80 p-3">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Bundles</div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {runtime.bundles.length > 0 ? runtime.bundles.map((bundle) => (
+                            <span key={bundle.id} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                              {bundle.name}{bundle.is_exposed ? ' · exposed' : ' · hidden'}
+                            </span>
+                          )) : (
+                            <span className="text-xs text-slate-500">Not bundled yet</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-white/80 bg-white/80 p-3">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Attached Agents</div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {runtime.agent_links.length > 0 ? runtime.agent_links.map((agent) => (
+                            <span key={agent.id} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">{agent.name}</span>
+                          )) : (
+                            <span className="text-xs text-slate-500">Not attached yet</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 rounded-xl border border-white/80 bg-white/80 p-3">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Runtime Tools</div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {runtime.tools.map((tool) => (
+                          <span key={tool.id} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                            {formatDisplayedMcpToolName(tool.exposed_name || tool.mcp_tool_name || tool.name)}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
           <div className="bg-white rounded-xl border border-slate-200 p-6">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2 text-slate-800 font-semibold">

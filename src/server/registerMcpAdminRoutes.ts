@@ -37,6 +37,187 @@ export function registerMcpAdminRoutes({
   getToolInputSchemaForRecord,
   executeTool,
 }: RegisterMcpAdminRoutesDeps) {
+  app.get('/api/mcp/local-packages', async (_req, res) => {
+    try {
+      const tools = db.prepare(`
+        SELECT id, name, description, config, updated_at
+        FROM tools
+        WHERE type = 'mcp_stdio_proxy'
+        ORDER BY name COLLATE NOCASE ASC
+      `).all() as any[];
+      const bundleLinks = db.prepare(`
+        SELECT mbt.tool_id, b.id AS bundle_id, b.name AS bundle_name, b.slug AS bundle_slug, b.description AS bundle_description, b.is_exposed AS bundle_is_exposed
+        FROM mcp_bundle_tools mbt
+        JOIN mcp_bundles b ON b.id = mbt.bundle_id
+        ORDER BY b.name COLLATE NOCASE ASC
+      `).all() as any[];
+      const exposedTools = db.prepare(`
+        SELECT tool_id, exposed_name
+        FROM mcp_exposed_tools
+      `).all() as any[];
+      const directAgentLinks = db.prepare(`
+        SELECT amt.tool_id, a.id AS agent_id, a.name AS agent_name
+        FROM agent_mcp_tools amt
+        JOIN agents a ON a.id = amt.agent_id
+        ORDER BY a.name COLLATE NOCASE ASC
+      `).all() as any[];
+      const bundleAgentLinks = db.prepare(`
+        SELECT amb.bundle_id, a.id AS agent_id, a.name AS agent_name
+        FROM agent_mcp_bundles amb
+        JOIN agents a ON a.id = amb.agent_id
+        ORDER BY a.name COLLATE NOCASE ASC
+      `).all() as any[];
+
+      const bundlesByToolId = new Map<number, any[]>();
+      for (const row of bundleLinks) {
+        const key = Number(row.tool_id);
+        if (!bundlesByToolId.has(key)) bundlesByToolId.set(key, []);
+        bundlesByToolId.get(key)!.push({
+          id: Number(row.bundle_id),
+          name: String(row.bundle_name || ''),
+          slug: String(row.bundle_slug || ''),
+          description: row.bundle_description ? String(row.bundle_description) : null,
+          is_exposed: Boolean(row.bundle_is_exposed),
+        });
+      }
+
+      const exposureByToolId = new Map<number, string>();
+      for (const row of exposedTools) {
+        exposureByToolId.set(Number(row.tool_id), String(row.exposed_name || ''));
+      }
+
+      const directAgentsByToolId = new Map<number, any[]>();
+      for (const row of directAgentLinks) {
+        const key = Number(row.tool_id);
+        if (!directAgentsByToolId.has(key)) directAgentsByToolId.set(key, []);
+        directAgentsByToolId.get(key)!.push({
+          id: Number(row.agent_id),
+          name: String(row.agent_name || ''),
+        });
+      }
+
+      const bundleAgentsByBundleId = new Map<number, any[]>();
+      for (const row of bundleAgentLinks) {
+        const key = Number(row.bundle_id);
+        if (!bundleAgentsByBundleId.has(key)) bundleAgentsByBundleId.set(key, []);
+        bundleAgentsByBundleId.get(key)!.push({
+          id: Number(row.agent_id),
+          name: String(row.agent_name || ''),
+        });
+      }
+
+      const runtimes = new Map<string, any>();
+
+      for (const tool of tools) {
+        let config: any = {};
+        try {
+          config = tool.config ? JSON.parse(tool.config) : {};
+        } catch {
+          config = {};
+        }
+
+        const packageName = String(config?.packageName || '').trim() || 'unknown-package';
+        const rawCommand = String(config?.rawCommand || config?.command || '').trim();
+        const rawArgs = Array.isArray(config?.rawArgs)
+          ? config.rawArgs.map((value: any) => String(value))
+          : (Array.isArray(config?.args) ? config.args.map((value: any) => String(value)) : []);
+        const envObject = config?.env && typeof config.env === 'object' && !Array.isArray(config.env)
+          ? Object.fromEntries(
+              Object.entries(config.env)
+                .map(([key, value]) => [String(key).trim(), String(value ?? '')] as const)
+                .filter(([key]) => key.length > 0),
+            )
+          : {};
+        const envSignature = JSON.stringify(
+          Object.keys(envObject)
+            .sort()
+            .map((key) => [key, envObject[key]])
+        );
+        const runtimeKey = JSON.stringify({
+          packageName,
+          rawCommand,
+          rawArgs,
+          envSignature,
+          timeoutMs: Number(config?.timeoutMs || 45000),
+        });
+
+        if (!runtimes.has(runtimeKey)) {
+          runtimes.set(runtimeKey, {
+            runtime_key: runtimeKey,
+            package_name: packageName,
+            runtime_label: packageName,
+            transport: 'local_stdio',
+            runtime_mode: 'Runs locally on this server via stdio whenever a tool is invoked.',
+            raw_command: rawCommand,
+            raw_args: rawArgs,
+            env_keys: Object.keys(envObject).sort(),
+            timeout_ms: Number(config?.timeoutMs || 45000),
+            tools: [],
+            bundles: [],
+            agent_links: [],
+            exposed_tool_count: 0,
+            tool_count: 0,
+            attached_agent_count: 0,
+            bundle_count: 0,
+            recommended_endpoint: null as null | string,
+            updated_at: tool.updated_at || null,
+          });
+        }
+
+        const runtime = runtimes.get(runtimeKey)!;
+        const toolId = Number(tool.id);
+        const bundles = bundlesByToolId.get(toolId) || [];
+        const directAgents = directAgentsByToolId.get(toolId) || [];
+        const bundleAgents = bundles.flatMap((bundle) => bundleAgentsByBundleId.get(Number(bundle.id)) || []);
+        const allAgents = [...directAgents, ...bundleAgents];
+
+        runtime.tools.push({
+          id: toolId,
+          name: String(tool.name || ''),
+          description: tool.description ? String(tool.description) : '',
+          mcp_tool_name: String(config?.mcpToolName || '').trim(),
+          exposed_name: exposureByToolId.get(toolId) || null,
+          is_exposed: exposureByToolId.has(toolId),
+        });
+
+        if (exposureByToolId.has(toolId)) runtime.exposed_tool_count += 1;
+
+        for (const bundle of bundles) {
+          if (!runtime.bundles.some((entry: any) => Number(entry.id) === Number(bundle.id))) {
+            runtime.bundles.push(bundle);
+          }
+        }
+
+        for (const agent of allAgents) {
+          if (!runtime.agent_links.some((entry: any) => Number(entry.id) === Number(agent.id))) {
+            runtime.agent_links.push(agent);
+          }
+        }
+
+        if (!runtime.updated_at || String(tool.updated_at || '') > String(runtime.updated_at || '')) {
+          runtime.updated_at = tool.updated_at || runtime.updated_at;
+        }
+      }
+
+      const payload = Array.from(runtimes.values())
+        .map((runtime: any) => {
+          runtime.tools.sort((a: any, b: any) => String(a.name).localeCompare(String(b.name)));
+          runtime.bundles.sort((a: any, b: any) => String(a.name).localeCompare(String(b.name)));
+          runtime.agent_links.sort((a: any, b: any) => String(a.name).localeCompare(String(b.name)));
+          runtime.tool_count = runtime.tools.length;
+          runtime.bundle_count = runtime.bundles.length;
+          runtime.attached_agent_count = runtime.agent_links.length;
+          runtime.recommended_endpoint = runtime.bundles[0]?.slug ? `/mcp/bundle/${encodeURIComponent(String(runtime.bundles[0].slug))}` : null;
+          return runtime;
+        })
+        .sort((a: any, b: any) => String(a.package_name).localeCompare(String(b.package_name)));
+
+      res.json(payload);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || 'Failed to load local MCP packages' });
+    }
+  });
+
   app.get('/api/mcp/config', (_req, res) => {
     const token = getSetting(settingsKeyMcpAuthToken);
     res.json({ auth_token: token || null });

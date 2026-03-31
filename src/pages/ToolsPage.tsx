@@ -1510,7 +1510,7 @@ export default function ToolsPage() {
                                           <option value="python">Python Code</option>
                                           <option value="http">HTTP Request</option>
                                           <option value="mcp">MCP Server</option>
-                                          <option value="mcp_stdio_proxy">MCP Stdio Proxy</option>
+                                          <option value="mcp_stdio_proxy">Local MCP Runtime Tool</option>
                                       </select>
                                   </div>
                               </div>
@@ -2446,7 +2446,7 @@ export default function ToolsPage() {
                                   {formData.type === 'mcp_stdio_proxy' && (
                                       <div className="space-y-5">
                                           <div className="p-3 bg-cyan-50 border border-cyan-200 rounded-lg text-xs text-cyan-800">
-                                              <strong>MCP Stdio Proxy</strong> - this tool was imported from an npm/package-backed MCP server and runs through a local stdio bridge. You can inspect the package config, target MCP tool name, discovered input schema, and run a real test below.
+                                              <strong>Local MCP Runtime Tool</strong> - this tool is part of an npm-installed MCP package that runs on this server. The platform invokes it locally over stdio, can expose it through MCP bundles, and can attach those bundles to agents.
                                           </div>
 
                                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
