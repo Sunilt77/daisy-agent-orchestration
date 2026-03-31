@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { Plus, Trash2, User, Brain, Target, ScrollText, Wrench, Edit, Globe, Terminal, Copy, Check, X, Folder, Activity, Key, Sparkles, Play, Loader2, ExternalLink, Gauge, Search, List, LayoutGrid, ArrowUpDown } from 'lucide-react';
+import { Plus, Trash2, User, Brain, Target, ScrollText, Wrench, Edit, Globe, Terminal, Copy, Check, X, Folder, Activity, Key, Sparkles, Play, Loader2, ExternalLink, Gauge, Search, List, LayoutGrid, ArrowUpDown, AudioLines } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Pagination from '../components/Pagination';
 import { LiveAgentCard } from '../components/LiveAgentCard';
@@ -813,12 +813,13 @@ async function safeJson(res: Response) {
 }
 
 export default function AgentsPage() {
-  type AgentOptionalConfig =
+type AgentOptionalConfig =
     | 'agent_role'
     | 'backstory'
     | 'goal'
     | 'system_prompt'
     | 'advanced'
+    | 'voice'
     | 'project'
     | 'tools'
     | 'mcp'
@@ -846,6 +847,13 @@ export default function AgentsPage() {
     retry_policy: 'standard',
     timeout_ms: '',
     is_exposed: false,
+    voice_id: 'JBFqnCBsd6RMkjVDRZzb',
+    tts_model_id: 'eleven_multilingual_v2',
+    stt_model_id: 'scribe_v1',
+    voice_output_format: 'mp3_44100_128',
+    voice_sample_rate: '16000',
+    voice_language_code: 'en',
+    voice_auto_tts: true,
     project_id: '' as string | number,
     toolIds: [] as number[],
     mcp_tool_ids: [] as number[],
@@ -909,6 +917,7 @@ export default function AgentsPage() {
     { key: 'goal', label: 'Mission Goal' },
     { key: 'system_prompt', label: 'System Prompt' },
     { key: 'advanced', label: 'Advanced LLM Settings' },
+    { key: 'voice', label: 'Voice Runtime' },
     { key: 'tools', label: 'Tools Access' },
     { key: 'mcp', label: 'Direct MCP Connections' },
   ];
@@ -1282,6 +1291,27 @@ export default function AgentsPage() {
         const data = await safeJson(res) as any;
         throw new Error(data?.error || 'Failed to save agent');
       }
+      const savedAgent = await safeJson(res) as any;
+      const savedAgentId = Number(savedAgent?.id || editingId);
+      if (Number.isFinite(savedAgentId) && savedAgentId > 0) {
+        const voiceRes = await fetch(`/api/voice/agents/${savedAgentId}/profile`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            voice_id: formData.voice_id,
+            tts_model_id: formData.tts_model_id,
+            stt_model_id: formData.stt_model_id,
+            output_format: formData.voice_output_format,
+            sample_rate: Number(formData.voice_sample_rate || 16000),
+            language_code: formData.voice_language_code,
+            auto_tts: Boolean(formData.voice_auto_tts),
+          }),
+        });
+        if (!voiceRes.ok) {
+          const data = await safeJson(voiceRes) as any;
+          throw new Error(data?.error || 'Agent saved, but voice profile failed to save');
+        }
+      }
       setAgentSaveNotice({ type: 'success', message: editingId ? 'Agent updated successfully.' : 'Agent created successfully.' });
       fetchAgents();
       setTimeout(() => {
@@ -1313,6 +1343,13 @@ export default function AgentsPage() {
       retry_policy: 'standard',
       timeout_ms: '',
       is_exposed: false,
+      voice_id: 'JBFqnCBsd6RMkjVDRZzb',
+      tts_model_id: 'eleven_multilingual_v2',
+      stt_model_id: 'scribe_v1',
+      voice_output_format: 'mp3_44100_128',
+      voice_sample_rate: '16000',
+      voice_language_code: 'en',
+      voice_auto_tts: true,
       project_id: '',
       toolIds: [],
       mcp_tool_ids: [],
@@ -1329,17 +1366,26 @@ export default function AgentsPage() {
     setIsCreating(true);
   };
 
-  const startEdit = (agent: Agent) => {
+  const startEdit = async (agent: Agent) => {
       const initialConfigs: AgentOptionalConfig[] = [];
       if (agent.agent_role) initialConfigs.push('agent_role');
       if (agent.backstory) initialConfigs.push('backstory');
       if (agent.goal) initialConfigs.push('goal');
       if (agent.system_prompt) initialConfigs.push('system_prompt');
       if (agent.temperature != null || agent.max_tokens != null || agent.memory_window != null || agent.max_iterations != null || agent.timeout_ms != null || agent.retry_policy) initialConfigs.push('advanced');
+      initialConfigs.push('voice');
       if (agent.project_id) initialConfigs.push('project');
       if ((agent.tools || []).length > 0) initialConfigs.push('tools');
       if ((agent.mcp_tool_ids || []).length > 0 || (agent.mcp_bundle_ids || []).length > 0) initialConfigs.push('mcp');
       if (agent.is_exposed) initialConfigs.push('exposure');
+
+      let voiceProfile: any = null;
+      try {
+        const res = await fetch(`/api/voice/agents/${agent.id}/profile`);
+        voiceProfile = res.ok ? await safeJson(res) : null;
+      } catch {
+        voiceProfile = null;
+      }
 
       setFormData({
           name: agent.name,
@@ -1358,6 +1404,13 @@ export default function AgentsPage() {
           retry_policy: agent.retry_policy || 'standard',
           timeout_ms: agent.timeout_ms ?? '',
           is_exposed: agent.is_exposed || false,
+          voice_id: String(voiceProfile?.voice_id || 'JBFqnCBsd6RMkjVDRZzb'),
+          tts_model_id: String(voiceProfile?.tts_model_id || 'eleven_multilingual_v2'),
+          stt_model_id: String(voiceProfile?.stt_model_id || 'scribe_v1'),
+          voice_output_format: String(voiceProfile?.output_format || 'mp3_44100_128'),
+          voice_sample_rate: String(voiceProfile?.sample_rate || 16000),
+          voice_language_code: String(voiceProfile?.language_code || 'en'),
+          voice_auto_tts: Boolean(voiceProfile?.auto_tts ?? true),
           project_id: agent.project_id || '',
           toolIds: agent.tools ? agent.tools.map(t => t.id) : [],
           mcp_tool_ids: Array.isArray(agent.mcp_tool_ids) ? agent.mcp_tool_ids : [],
@@ -2210,6 +2263,91 @@ export default function AgentsPage() {
                   <label className="text-sm font-medium text-slate-700">Tools Enabled</label>
                 </div>
               </div>
+            </div>
+            )}
+
+            {showAgentConfig('voice') && (
+            <div className="border border-emerald-100 rounded-xl p-4 bg-emerald-50/40 space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="flex items-center gap-2 text-sm font-medium text-emerald-950">
+                  <AudioLines size={16} className="text-emerald-600" />
+                  Voice Runtime
+                </label>
+                <Link to="/voice" className="text-xs text-emerald-700 hover:text-emerald-900 font-medium">
+                  Open Voice Console
+                </Link>
+              </div>
+              <p className="text-xs text-emerald-900/75">
+                Save ElevenLabs voice defaults on the agent so browser voice sessions, websocket consumers, and test consoles all inherit the same runtime profile.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Voice ID</label>
+                  <input
+                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm"
+                    value={formData.voice_id}
+                    onChange={e => setFormData({ ...formData, voice_id: e.target.value })}
+                    placeholder="JBFqnCBsd6RMkjVDRZzb"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">TTS Model</label>
+                  <input
+                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm"
+                    value={formData.tts_model_id}
+                    onChange={e => setFormData({ ...formData, tts_model_id: e.target.value })}
+                    placeholder="eleven_multilingual_v2"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">STT Model</label>
+                  <input
+                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm"
+                    value={formData.stt_model_id}
+                    onChange={e => setFormData({ ...formData, stt_model_id: e.target.value })}
+                    placeholder="scribe_v1"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Output Format</label>
+                  <input
+                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm"
+                    value={formData.voice_output_format}
+                    onChange={e => setFormData({ ...formData, voice_output_format: e.target.value })}
+                    placeholder="mp3_44100_128"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Sample Rate</label>
+                  <input
+                    type="number"
+                    min="8000"
+                    step="1000"
+                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white"
+                    value={formData.voice_sample_rate}
+                    onChange={e => setFormData({ ...formData, voice_sample_rate: e.target.value })}
+                    placeholder="16000"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Language</label>
+                  <input
+                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm"
+                    value={formData.voice_language_code}
+                    onChange={e => setFormData({ ...formData, voice_language_code: e.target.value })}
+                    placeholder="en"
+                  />
+                </div>
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500"
+                  checked={formData.voice_auto_tts}
+                  onChange={e => setFormData({ ...formData, voice_auto_tts: e.target.checked })}
+                />
+                <span className="text-sm text-slate-700">Auto-play TTS replies for this agent</span>
+              </label>
             </div>
             )}
 
