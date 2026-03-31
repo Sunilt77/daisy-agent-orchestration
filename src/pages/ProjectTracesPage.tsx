@@ -3,6 +3,29 @@ import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Activity, DollarSign, Clock, MessageSquare, Filter, Search } from 'lucide-react';
 import Pagination from '../components/Pagination';
 
+function formatToolTraceName(rawName?: string | null) {
+  const raw = String(rawName || '').trim();
+  if (!raw) return 'Unknown tool';
+  const normalized = raw.replace(/-/g, '_');
+  const bundleSplitIndex = normalized.indexOf('_tool_');
+  if (bundleSplitIndex >= 0) {
+    let bundleName = normalized.slice(0, bundleSplitIndex);
+    let toolName = normalized.slice(bundleSplitIndex + 6);
+    bundleName = bundleName.replace(/^mcp_bundle_/, '').replace(/^bundle_/, '').replace(/_bundle$/, '');
+    toolName = toolName.replace(/^tool_/, '').replace(/^npm_/, '').replace(/_mcp_server_/, '_').replace(/_mcp_/, '_');
+    const bundlePrefix = bundleName.replace(/_mcp$/, '');
+    if (bundlePrefix && toolName.startsWith(bundlePrefix + '_')) {
+      toolName = toolName.slice(bundlePrefix.length + 1);
+    }
+    return `${bundleName} / ${toolName}`;
+  }
+  return normalized
+    .replace(/^mcp_bundle_/, '')
+    .replace(/^bundle_/, '')
+    .replace(/^mcp_/, '')
+    .replace(/^tool_/, '');
+}
+
 interface Trace {
   id: number;
   agent_id: number;
@@ -623,7 +646,7 @@ export default function ProjectTracesPage() {
                   className={`p-3 rounded-lg border cursor-pointer transition-colors ${selectedToolTrace?.id === trace.id ? 'bg-indigo-50 border-indigo-200' : 'bg-white border-slate-200 hover:border-indigo-300'}`}
                 >
                   <div className="flex justify-between items-start mb-1">
-                    <span className="font-medium text-slate-900 text-sm truncate">{trace.tool_name}</span>
+                    <span className="font-medium text-slate-900 text-sm truncate">{formatToolTraceName(trace.tool_name)}</span>
                     <span className="text-xs text-slate-500 whitespace-nowrap ml-2">
                       {new Date(trace.created_at).toLocaleTimeString()}
                     </span>

@@ -26,6 +26,34 @@ function getMcpBundleDependencies(db: any, bundleId: number) {
   };
 }
 
+function slugifyCompactMcpValue(input: string) {
+  return String(input || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function compactExposedToolName(input: string, fallback = 'tool') {
+  const normalized = slugifyCompactMcpValue(input)
+    .replace(/^tool_+/, '')
+    .replace(/^mcp_+/, '')
+    .replace(/_mcp_server$/i, '')
+    .replace(/_mcp$/i, '')
+    .replace(/_server$/i, '');
+  return normalized || slugifyCompactMcpValue(fallback) || 'tool';
+}
+
+function compactBundleSlug(input: string, fallback = 'mcp_bundle') {
+  const normalized = slugifyCompactMcpValue(input)
+    .replace(/^bundle_+/, '')
+    .replace(/^mcp_bundle_+/, '')
+    .replace(/_bundle$/i, '');
+  const base = normalized || slugifyCompactMcpValue(fallback).replace(/^bundle_+/, '').replace(/^mcp_bundle_+/, '').replace(/_bundle$/i, '') || 'mcp';
+  return `${base}_bundle`;
+}
+
 export function registerMcpAdminRoutes({
   app,
   db,
@@ -353,9 +381,10 @@ export function registerMcpAdminRoutes({
         return res.json({ exposed: false });
       }
 
-      const name = typeof exposed_name === 'string' && exposed_name.trim()
-        ? exposed_name.trim()
-        : String(tool.name).toLowerCase().replace(/[^a-z0-9_\\-]/g, '_');
+      const name = compactExposedToolName(
+        typeof exposed_name === 'string' && exposed_name.trim() ? exposed_name.trim() : String(tool.name || ''),
+        String(tool.name || 'tool'),
+      );
       const desc = typeof description === 'string' && description.trim()
         ? description.trim()
         : (tool.description || '');
@@ -652,9 +681,10 @@ export function registerMcpAdminRoutes({
     const parsedIds = Array.isArray(tool_ids) ? [...new Set(tool_ids.map((v: any) => Number(v)).filter((n: number) => Number.isFinite(n)))] : [];
     if (!parsedIds.length) return res.status(400).json({ error: 'tool_ids must include at least one tool' });
     const cleanName = typeof name === 'string' && name.trim() ? name.trim() : 'MCP Bundle';
-    const cleanSlug = (typeof slug === 'string' && slug.trim() ? slug.trim() : cleanName.toLowerCase())
-      .replace(/[^a-z0-9_-]/gi, '_')
-      .toLowerCase();
+    const cleanSlug = compactBundleSlug(
+      typeof slug === 'string' && slug.trim() ? slug.trim() : cleanName,
+      cleanName,
+    );
     if (!cleanSlug) return res.status(400).json({ error: 'Invalid slug' });
     const isExposed = is_exposed !== false;
 

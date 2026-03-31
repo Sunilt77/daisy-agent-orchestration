@@ -123,6 +123,34 @@ function slugify(input: string) {
   return input.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_').replace(/_+/g, '_');
 }
 
+function compactToolAlias(input: string, fallback = 'tool') {
+  const normalized = slugify(input)
+    .replace(/^tool_+/, '')
+    .replace(/^mcp_+/, '')
+    .replace(/_mcp_server$/i, '')
+    .replace(/_mcp$/i, '')
+    .replace(/_server$/i, '');
+  return normalized || slugify(fallback) || 'tool';
+}
+
+function compactBundleSlug(input: string, fallback = 'mcp bundle') {
+  const normalized = slugify(input)
+    .replace(/^bundle_+/, '')
+    .replace(/^mcp_bundle_+/, '')
+    .replace(/_bundle$/i, '');
+  const base = normalized || slugify(fallback).replace(/^bundle_+/, '').replace(/^mcp_bundle_+/, '').replace(/_bundle$/i, '') || 'mcp';
+  return `${base}_bundle`;
+}
+
+function humanizeCompactName(input: string) {
+  const compact = compactToolAlias(input, input);
+  return compact
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
 function stringifyTestValue(type: string | undefined, raw: string) {
   const value = raw.trim();
   if (value === '') return undefined;
@@ -145,7 +173,7 @@ function stringifyTestValue(type: string | undefined, raw: string) {
 function formatDisplayedMcpToolName(name?: string | null) {
   const value = String(name || '').trim();
   if (!value) return '';
-  return value.startsWith('tool_') ? value : `tool_${value}`;
+  return `tool_${compactToolAlias(value, value)}`;
 }
 
 export default function McpPage() {
@@ -159,7 +187,7 @@ export default function McpPage() {
   const [selectedCredentialId, setSelectedCredentialId] = useState<string>('');
   const [copied, setCopied] = useState<string>('');
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
-  const [bulkPrefix, setBulkPrefix] = useState<string>('tool_');
+  const [bulkPrefix, setBulkPrefix] = useState<string>('');
   const [bundleName, setBundleName] = useState<string>('Selected Tools Bundle');
   const [bundleSlug, setBundleSlug] = useState<string>('selected_tools_bundle');
   const [bundleDescription, setBundleDescription] = useState<string>('A grouped MCP exposure of selected tools.');
@@ -242,7 +270,7 @@ export default function McpPage() {
 
   useEffect(() => {
     if (bundleName.trim() && !isSlugManual) {
-      setBundleSlug(slugify(bundleName));
+      setBundleSlug(compactBundleSlug(bundleName, bundleName));
     }
   }, [bundleName, isSlugManual]);
 
@@ -252,8 +280,9 @@ export default function McpPage() {
     if (selectedTools.length === 0) return;
 
     if (!isNameManual) {
+      const primaryLabel = selectedTools[0].exposed_name || selectedTools[0].tool_name;
       const suggestedName = selectedTools.length === 1 
-        ? `${selectedTools[0].tool_name} Bundle`
+        ? `${humanizeCompactName(primaryLabel)} Bundle`
         : `${selectedTools.length} Tools Bundle`;
       setBundleName(suggestedName);
     }
@@ -307,6 +336,7 @@ export default function McpPage() {
     setIsDescriptionManual(false);
     setBundleName('Selected Tools Bundle');
     setBundleDescription('A grouped MCP exposure of selected tools.');
+    setBundleSlug('selected_tools_bundle');
   };
 
   const toggleSelect = (toolId: number) => {
@@ -325,7 +355,9 @@ export default function McpPage() {
   const bulkExpose = async () => {
     const targets = rows.filter(r => selectedIds.includes(r.tool_id));
     for (const row of targets) {
-      const exposedName = (bulkPrefix || 'tool_') + row.tool_name.toLowerCase().replace(/\s+/g, '_');
+      const prefix = compactToolAlias(bulkPrefix || '', '');
+      const toolBase = compactToolAlias(row.exposed_name || row.tool_name, row.tool_name);
+      const exposedName = prefix ? `${prefix}_${toolBase}` : toolBase;
       await fetch(`/api/mcp/exposed-tools/${row.tool_id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -348,7 +380,7 @@ export default function McpPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: bundleName.trim() || 'MCP Bundle',
-          slug: slugify(bundleSlug || bundleName || 'mcp_bundle'),
+          slug: compactBundleSlug(bundleSlug || bundleName || 'mcp bundle', bundleName || 'mcp bundle'),
           description: bundleDescription.trim() || null,
           tool_ids: selectedIds,
         })
@@ -922,7 +954,7 @@ export default function McpPage() {
                   className="w-full px-3 py-2 rounded-lg text-xs font-mono border border-slate-300 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all"
                   value={bulkPrefix}
                   onChange={(e) => setBulkPrefix(e.target.value)}
-                  placeholder="tool_"
+                  placeholder="meta_ads"
                 />
               </div>
               <button onClick={bulkExpose} disabled={selectedIds.length === 0} className="px-4 py-2 rounded-lg text-xs font-bold bg-emerald-600 text-white disabled:opacity-50 shadow-lg shadow-emerald-100 hover:bg-emerald-700 transition-all whitespace-nowrap">
@@ -1109,12 +1141,12 @@ export default function McpPage() {
                           </label>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-                          <input
-                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all outline-none"
-                            value={row.exposed_name || ''}
-                            onChange={(e) => updateRow(row.tool_id, { exposed_name: e.target.value })}
-                            placeholder={`tool_${row.tool_name.toLowerCase().replace(/\s+/g, '_')}`}
-                          />
+                            <input
+                              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all outline-none"
+                              value={row.exposed_name || ''}
+                              onChange={(e) => updateRow(row.tool_id, { exposed_name: e.target.value })}
+                              placeholder={compactToolAlias(row.tool_name, row.tool_name)}
+                            />
                           <div className="flex items-center gap-2">
                             <input
                               className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all outline-none"

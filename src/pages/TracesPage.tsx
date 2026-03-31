@@ -2,6 +2,29 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Activity, BarChart3, Bot, Clock3, DollarSign, Filter, MessageSquare, Search, TrendingUp, Wrench, X } from 'lucide-react';
 import Pagination from '../components/Pagination';
+
+function formatToolTraceName(rawName?: string | null) {
+  const raw = String(rawName || '').trim();
+  if (!raw) return 'Unknown tool';
+  const normalized = raw.replace(/-/g, '_');
+  const bundleSplitIndex = normalized.indexOf('_tool_');
+  if (bundleSplitIndex >= 0) {
+    let bundleName = normalized.slice(0, bundleSplitIndex);
+    let toolName = normalized.slice(bundleSplitIndex + 6);
+    bundleName = bundleName.replace(/^mcp_bundle_/, '').replace(/^bundle_/, '').replace(/_bundle$/, '');
+    toolName = toolName.replace(/^tool_/, '').replace(/^npm_/, '').replace(/_mcp_server_/, '_').replace(/_mcp_/, '_');
+    const bundlePrefix = bundleName.replace(/_mcp$/, '');
+    if (bundlePrefix && toolName.startsWith(bundlePrefix + '_')) {
+      toolName = toolName.slice(bundlePrefix.length + 1);
+    }
+    return `${bundleName} / ${toolName}`;
+  }
+  return normalized
+    .replace(/^mcp_bundle_/, '')
+    .replace(/^bundle_/, '')
+    .replace(/^mcp_/, '')
+    .replace(/^tool_/, '');
+}
 import { loadPersisted, savePersisted } from '../utils/persistence';
 
 type LocalProject = { id: number; name: string; description?: string; created_at?: string };
@@ -844,7 +867,7 @@ export default function TracesPage() {
                       className="border-t border-slate-100 hover:bg-slate-50 cursor-pointer"
                     >
                       <td className="px-4 py-3">
-                        <div className="font-medium text-slate-900">{t.tool_name}</div>
+                        <div className="font-medium text-slate-900">{formatToolTraceName(t.tool_name)}</div>
                         <div className="text-xs text-slate-400 uppercase">{t.tool_type || 'custom'}</div>
                       </td>
                       <td className="px-4 py-3">
@@ -1014,7 +1037,7 @@ export default function TracesPage() {
             </div>
             <div className="p-6 overflow-y-auto space-y-6">
               <div className="flex flex-wrap items-center gap-3 text-sm text-slate-500 bg-slate-50 p-3 rounded-lg border border-slate-100">
-                <span className="font-semibold text-slate-800">{selectedToolTrace.tool_name}</span>
+                <span className="font-semibold text-slate-800">{formatToolTraceName(selectedToolTrace.tool_name)}</span>
                 <span className="text-slate-300">|</span>
                 <span className="px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded text-xs font-bold uppercase">{selectedToolTrace.tool_type || 'custom'}</span>
                 <span className="text-slate-300">|</span>

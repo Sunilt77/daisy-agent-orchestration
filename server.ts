@@ -97,6 +97,33 @@ function packageToBaseName(input: string) {
   return slugifyValue(cleaned);
 }
 
+function compactMcpPackageAlias(input: string) {
+  const base = packageToBaseName(input)
+    .replace(/^npm_/, '')
+    .replace(/_mcp_server$/i, '')
+    .replace(/_mcp$/i, '')
+    .replace(/_server$/i, '');
+  return slugifyValue(base) || 'mcp';
+}
+
+function buildImportedMcpPrefix(packageName: string, namePrefix?: string) {
+  const explicit = slugifyValue(String(namePrefix || ''));
+  if (explicit) return explicit;
+  return compactMcpPackageAlias(packageName);
+}
+
+function buildImportedMcpExposedName(prefix: string, mcpToolName: string) {
+  const cleanPrefix = slugifyValue(prefix) || 'mcp';
+  const cleanToolName = slugifyValue(mcpToolName) || 'tool';
+  return `${cleanPrefix}_${cleanToolName}`;
+}
+
+function buildExposedMcpToolAlias(exposedName: string) {
+  const value = String(exposedName || '').trim();
+  if (!value) return 'tool';
+  return value.startsWith('tool_') ? value : `tool_${value}`;
+}
+
 function getKnownMcpPackageConfigError(packageName: string, env?: Record<string, string>) {
   const normalizedPackage = String(packageName || '').trim().toLowerCase();
   const normalizedEnv = env && typeof env === 'object' ? env : {};
@@ -1656,8 +1683,7 @@ app.post('/api/tools/import-mcp-package', async (req, res) => {
       return res.status(400).json({ error: `No MCP tools were discovered from package "${normalizedPackageName}".` });
     }
 
-    const packageBaseName = packageToBaseName(normalizedPackageName) || 'mcp_package';
-    const resolvedPrefix = slugifyValue(namePrefix || `npm_${packageBaseName}`) || `npm_${packageBaseName}`;
+    const resolvedPrefix = buildImportedMcpPrefix(normalizedPackageName, namePrefix);
     const now = new Date();
     const createdOrUpdatedTools: Array<{ id: number; name: string; mcpToolName: string }> = [];
 
@@ -1745,7 +1771,7 @@ app.post('/api/tools/import-mcp-package', async (req, res) => {
       createdOrUpdatedTools.push({ id: toolId, name: localToolName, mcpToolName });
 
       if (exposeTools !== false) {
-        const exposedName = `tool_${resolvedPrefix}_${slugifyValue(mcpToolName) || 'tool'}`;
+        const exposedName = buildImportedMcpExposedName(resolvedPrefix, mcpToolName);
         const currentVersion = Number((await prisma.orchestratorMcpExposedToolVersion.aggregate({
           where: { toolId },
           _max: { versionNumber: true },
@@ -1780,8 +1806,9 @@ app.post('/api/tools/import-mcp-package', async (req, res) => {
 
     let createdBundle: { id: number; name: string; slug: string } | null = null;
     if (createBundle !== false && createdOrUpdatedTools.length) {
+      const packageAlias = compactMcpPackageAlias(normalizedPackageName);
       const resolvedBundleName = String(bundleName || `${normalizedPackageName} Bundle`).trim() || `${normalizedPackageName} Bundle`;
-      const resolvedBundleSlug = slugifyValue(bundleSlug || `${packageBaseName}_bundle`) || `${packageBaseName}_bundle`;
+      const resolvedBundleSlug = slugifyValue(bundleSlug || `${packageAlias}_bundle`) || `${packageAlias}_bundle`;
       const resolvedBundleDescription = typeof bundleDescription === 'string' && bundleDescription.trim()
         ? bundleDescription.trim()
         : `Imported bundle for npm MCP package "${normalizedPackageName}".`;
@@ -3819,7 +3846,7 @@ app.get('/mcp/manifest', (req, res) => {
     }));
 
     const toolTools = exposedTools.map(t => ({
-        name: `tool_${t.exposed_name}`,
+        name: buildExposedMcpToolAlias(String(t.exposed_name || t.name || '')),
         description: `[TOOL] ${t.description || t.name}`,
         inputSchema: {
             type: "object",
@@ -5931,7 +5958,7 @@ async function runAgent(
           for (const mcpTool of directMcpTools) {
             scopedTools.push({
               id: null,
-              name: `mcp_tool_${mcpTool.exposed_name}`,
+              name: `mcp_${normalizeMcpName(String(mcpTool.exposed_name || mcpTool.tool_name || ''))}`,
               type: 'mcp',
               description: mcpTool.exposed_description || `MCP tool: ${mcpTool.tool_name}`,
               config: JSON.stringify({
@@ -5944,7 +5971,7 @@ async function runAgent(
           for (const bundle of mcpBundles) {
             scopedTools.push({
               id: null,
-              name: `mcp_bundle_${bundle.slug}`,
+              name: `bundle_${normalizeMcpName(String(bundle.slug || bundle.name || 'bundle'))}`,
               type: 'mcp',
               description: bundle.description || `MCP bundle: ${bundle.name}`,
               config: JSON.stringify({
