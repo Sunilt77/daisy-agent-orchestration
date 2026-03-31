@@ -119,6 +119,7 @@ export default function CredentialsPage() {
     'notion',
     'stripe',
     'internal_api',
+    'elevenlabs_voice',
   ];
 
   return (
@@ -184,6 +185,7 @@ export default function CredentialsPage() {
                 <option value="http">HTTP Tools</option>
                 <option value="mcp">MCP Tools</option>
                 <option value="llm">LLM Providers</option>
+                <option value="voice">Voice / Audio</option>
                 <option value="database">Database</option>
               </select>
             </div>

@@ -62,6 +62,7 @@ import * as internalTools from './src/orchestrator/internalTools.js';
 import { registerOrchestratorConfigRoutes } from './src/server/registerOrchestratorConfigRoutes';
 import { registerMcpAdminRoutes } from './src/server/registerMcpAdminRoutes';
 import { registerRuntimeControlRoutes } from './src/server/registerRuntimeControlRoutes';
+import { WebSocketServer, WebSocket } from 'ws';
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -758,6 +759,252 @@ async function saveSessionConversation(sessionId: string, messages: Array<{ role
 
 async function saveSessionSummary(sessionId: string, summary: string) {
   await saveRuntimeSessionSummary(sessionId, summary);
+}
+
+type VoiceSessionRow = {
+  id: string;
+  agent_id: number;
+  status: string;
+  transport: string;
+  voice_provider: string;
+  voice_id: string | null;
+  tts_model_id: string | null;
+  stt_model_id: string | null;
+  transcript: string | null;
+  reply_text: string | null;
+  meta: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type VoiceSocketContext = {
+  sessionId: string;
+  agentId: number;
+  voiceId: string;
+  ttsModelId: string;
+  sttModelId: string;
+  outputFormat: string;
+  audioMimeType: string;
+  audioChunks: Buffer[];
+  sampleRate: number;
+  languageCode: string;
+  autoTts: boolean;
+  sttSocket?: WebSocket | null;
+};
+
+const DEFAULT_VOICE_ID = process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'JBFqnCBsd6RMkjVDRZzb';
+const DEFAULT_TTS_MODEL = process.env.ELEVENLABS_DEFAULT_TTS_MODEL || 'eleven_multilingual_v2';
+const DEFAULT_STT_MODEL = process.env.ELEVENLABS_DEFAULT_STT_MODEL || 'scribe_v1';
+const DEFAULT_TTS_FORMAT = process.env.ELEVENLABS_DEFAULT_OUTPUT_FORMAT || 'mp3_44100_128';
+const DEFAULT_STT_SAMPLE_RATE = Number(process.env.ELEVENLABS_DEFAULT_SAMPLE_RATE || 16000);
+const voiceSocketContexts = new Map<WebSocket, VoiceSocketContext>();
+let voiceWss: WebSocketServer | null = null;
+
+function getAgentVoiceProfile(agentId: number) {
+  const row = db.prepare('SELECT * FROM agent_voice_profiles WHERE agent_id = ?').get(agentId) as any;
+  if (!row) return null;
+  return {
+    agent_id: row.agent_id,
+    voice_provider: row.voice_provider || 'elevenlabs',
+    voice_id: row.voice_id || DEFAULT_VOICE_ID,
+    tts_model_id: row.tts_model_id || DEFAULT_TTS_MODEL,
+    stt_model_id: row.stt_model_id || DEFAULT_STT_MODEL,
+    output_format: row.output_format || DEFAULT_TTS_FORMAT,
+    sample_rate: Number(row.sample_rate || DEFAULT_STT_SAMPLE_RATE),
+    language_code: row.language_code || 'en',
+    auto_tts: Boolean(row.auto_tts ?? 1),
+    meta: safeJsonParse(row.meta, {}),
+  };
+}
+
+function saveAgentVoiceProfile(agentId: number, payload: any) {
+  db.prepare(`
+    INSERT INTO agent_voice_profiles (
+      agent_id, voice_provider, voice_id, tts_model_id, stt_model_id, output_format, sample_rate, language_code, auto_tts, meta, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(agent_id) DO UPDATE SET
+      voice_provider = excluded.voice_provider,
+      voice_id = excluded.voice_id,
+      tts_model_id = excluded.tts_model_id,
+      stt_model_id = excluded.stt_model_id,
+      output_format = excluded.output_format,
+      sample_rate = excluded.sample_rate,
+      language_code = excluded.language_code,
+      auto_tts = excluded.auto_tts,
+      meta = excluded.meta,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(
+    agentId,
+    'elevenlabs',
+    String(payload.voice_id || DEFAULT_VOICE_ID),
+    String(payload.tts_model_id || DEFAULT_TTS_MODEL),
+    String(payload.stt_model_id || DEFAULT_STT_MODEL),
+    String(payload.output_format || DEFAULT_TTS_FORMAT),
+    Number(payload.sample_rate || DEFAULT_STT_SAMPLE_RATE),
+    String(payload.language_code || 'en'),
+    payload.auto_tts === false ? 0 : 1,
+    JSON.stringify(payload.meta || {}),
+  );
+}
+
+function getVoiceCredentialApiKey() {
+  const credential = db.prepare(`
+    SELECT api_key
+    FROM credentials
+    WHERE provider IN ('elevenlabs_voice', 'elevenlabs')
+    ORDER BY CASE WHEN provider = 'elevenlabs_voice' THEN 0 ELSE 1 END, id ASC
+    LIMIT 1
+  `).get() as any;
+  return String(credential?.api_key || process.env.ELEVENLABS_API_KEY || '').trim();
+}
+
+function appendVoiceSessionEvent(sessionId: string, type: string, payload: any) {
+  db.prepare('INSERT INTO voice_session_events (session_id, type, payload) VALUES (?, ?, ?)')
+    .run(sessionId, type, JSON.stringify(payload ?? {}));
+  db.prepare('UPDATE voice_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
+}
+
+function updateVoiceSession(sessionId: string, patch: Partial<{
+  status: string;
+  transcript: string;
+  reply_text: string;
+  voice_id: string;
+  tts_model_id: string;
+  stt_model_id: string;
+  meta: any;
+}>) {
+  const fields: string[] = [];
+  const values: any[] = [];
+  if (patch.status != null) { fields.push('status = ?'); values.push(patch.status); }
+  if (patch.transcript != null) { fields.push('transcript = ?'); values.push(patch.transcript); }
+  if (patch.reply_text != null) { fields.push('reply_text = ?'); values.push(patch.reply_text); }
+  if (patch.voice_id != null) { fields.push('voice_id = ?'); values.push(patch.voice_id); }
+  if (patch.tts_model_id != null) { fields.push('tts_model_id = ?'); values.push(patch.tts_model_id); }
+  if (patch.stt_model_id != null) { fields.push('stt_model_id = ?'); values.push(patch.stt_model_id); }
+  if (patch.meta != null) { fields.push('meta = ?'); values.push(JSON.stringify(patch.meta)); }
+  fields.push('updated_at = CURRENT_TIMESTAMP');
+  if (!fields.length) return;
+  values.push(sessionId);
+  db.prepare(`UPDATE voice_sessions SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+function createVoiceSession(agentId: number, options?: Partial<VoiceSocketContext>) {
+  const sessionId = randomUUID();
+  db.prepare(`
+    INSERT INTO voice_sessions (
+      id, agent_id, status, transport, voice_provider, voice_id, tts_model_id, stt_model_id, transcript, reply_text, meta
+    ) VALUES (?, ?, 'connected', 'websocket', 'elevenlabs', ?, ?, ?, '', '', ?)
+  `).run(
+    sessionId,
+    agentId,
+    options?.voiceId || DEFAULT_VOICE_ID,
+    options?.ttsModelId || DEFAULT_TTS_MODEL,
+    options?.sttModelId || DEFAULT_STT_MODEL,
+    JSON.stringify({ output_format: options?.outputFormat || DEFAULT_TTS_FORMAT }),
+  );
+  appendVoiceSessionEvent(sessionId, 'session.started', { agent_id: agentId });
+  return sessionId;
+}
+
+function getVoiceSession(sessionId: string) {
+  return db.prepare('SELECT * FROM voice_sessions WHERE id = ?').get(sessionId) as VoiceSessionRow | undefined;
+}
+
+async function transcribeVoiceAudio(buffer: Buffer, mimeType: string, sttModelId: string) {
+  const apiKey = getVoiceCredentialApiKey();
+  if (!apiKey) throw new Error('ElevenLabs voice credential is not configured.');
+  const form = new FormData();
+  form.set('model_id', sttModelId || DEFAULT_STT_MODEL);
+  const extension = mimeType.includes('wav') ? 'wav' : mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mpeg') ? 'mp3' : 'webm';
+  form.set('file', new Blob([buffer], { type: mimeType || 'audio/webm' }), `voice-input.${extension}`);
+  const res = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
+    method: 'POST',
+    headers: { 'xi-api-key': apiKey },
+    body: form,
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`ElevenLabs STT failed (${res.status}): ${detail || 'Unknown error'}`);
+  }
+  const data: any = await res.json().catch(() => ({}));
+  return String(data?.text || data?.transcript || '').trim();
+}
+
+async function synthesizeVoiceAudio(text: string, voiceId: string, ttsModelId: string, outputFormat: string) {
+  const apiKey = getVoiceCredentialApiKey();
+  if (!apiKey) throw new Error('ElevenLabs voice credential is not configured.');
+  const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`, {
+    method: 'POST',
+    headers: {
+      'xi-api-key': apiKey,
+      'Content-Type': 'application/json',
+      'Accept': 'audio/mpeg',
+    },
+    body: JSON.stringify({
+      text,
+      model_id: ttsModelId || DEFAULT_TTS_MODEL,
+      output_format: outputFormat || DEFAULT_TTS_FORMAT,
+    }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`ElevenLabs TTS failed (${res.status}): ${detail || 'Unknown error'}`);
+  }
+  const arrayBuffer = await res.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
+function sendVoiceSocketEvent(ws: WebSocket, type: string, payload: any = {}) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type, ...payload }));
+}
+
+function openRealtimeSttSocket(ctx: VoiceSocketContext, browserSocket: WebSocket) {
+  const apiKey = getVoiceCredentialApiKey();
+  if (!apiKey) throw new Error('ElevenLabs voice credential is not configured.');
+  if (ctx.sttSocket && ctx.sttSocket.readyState === WebSocket.OPEN) return ctx.sttSocket;
+
+  const url = `wss://api.elevenlabs.io/v1/speech-to-text/realtime?model_id=${encodeURIComponent(ctx.sttModelId || DEFAULT_STT_MODEL)}&sample_rate=${encodeURIComponent(String(ctx.sampleRate || DEFAULT_STT_SAMPLE_RATE))}`;
+  const sttSocket = new WebSocket(url, {
+    headers: {
+      'xi-api-key': apiKey,
+    },
+  });
+
+  sttSocket.on('open', () => {
+    sendVoiceSocketEvent(browserSocket, 'stt.socket.open', { sessionId: ctx.sessionId });
+  });
+
+  sttSocket.on('message', (raw) => {
+    try {
+      const payload = JSON.parse(String(raw || '{}'));
+      appendVoiceSessionEvent(ctx.sessionId, 'stt.realtime', payload);
+      const partial = String(payload?.text || payload?.transcript || '').trim();
+      const normalizedType = payload?.is_final || payload?.final ? 'stt.final' : 'stt.partial';
+      if (partial) {
+        if (normalizedType === 'stt.final') {
+          updateVoiceSession(ctx.sessionId, { transcript: partial });
+        }
+        sendVoiceSocketEvent(browserSocket, normalizedType, { sessionId: ctx.sessionId, text: partial, raw: payload });
+      } else {
+        sendVoiceSocketEvent(browserSocket, 'stt.event', { sessionId: ctx.sessionId, raw: payload });
+      }
+    } catch {
+      sendVoiceSocketEvent(browserSocket, 'stt.event', { sessionId: ctx.sessionId, raw: String(raw || '') });
+    }
+  });
+
+  sttSocket.on('close', () => {
+    if (ctx.sttSocket === sttSocket) ctx.sttSocket = null;
+    sendVoiceSocketEvent(browserSocket, 'stt.socket.closed', { sessionId: ctx.sessionId });
+  });
+
+  sttSocket.on('error', (error: any) => {
+    sendVoiceSocketEvent(browserSocket, 'error', { message: error?.message || 'Realtime STT socket error' });
+  });
+
+  ctx.sttSocket = sttSocket;
+  return sttSocket;
 }
 
 function formatConversation(messages: Array<{ role: string; content: string; ts?: string }>): string {
@@ -3720,6 +3967,55 @@ app.post('/api/agents/:id/chat/stream', localRunLimiter, async (req, res) => {
       clearInterval(ping);
       if (!closed) res.end();
     }
+});
+
+app.get('/api/voice/agents', (_req, res) => {
+  const agents = db.prepare('SELECT id, name, role, provider, model, status FROM agents ORDER BY id ASC').all() as any[];
+  res.json(agents.map((agent) => ({
+    ...agent,
+    voice_profile: getAgentVoiceProfile(Number(agent.id)),
+  })));
+});
+
+app.get('/api/voice/agents/:id/profile', (req, res) => {
+  const agentId = Number(req.params.id);
+  if (!Number.isFinite(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  res.json(getAgentVoiceProfile(agentId) || {
+    agent_id: agentId,
+    voice_provider: 'elevenlabs',
+    voice_id: DEFAULT_VOICE_ID,
+    tts_model_id: DEFAULT_TTS_MODEL,
+    stt_model_id: DEFAULT_STT_MODEL,
+    output_format: DEFAULT_TTS_FORMAT,
+    sample_rate: DEFAULT_STT_SAMPLE_RATE,
+    language_code: 'en',
+    auto_tts: true,
+    meta: {},
+  });
+});
+
+app.put('/api/voice/agents/:id/profile', (req, res) => {
+  const agentId = Number(req.params.id);
+  if (!Number.isFinite(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  saveAgentVoiceProfile(agentId, req.body || {});
+  res.json(getAgentVoiceProfile(agentId));
+});
+
+app.get('/api/voice/sessions/:id', (req, res) => {
+  const sessionId = String(req.params.id || '');
+  const session = getVoiceSession(sessionId);
+  if (!session) return res.status(404).json({ error: 'Voice session not found' });
+  const events = db.prepare('SELECT id, type, payload, created_at FROM voice_session_events WHERE session_id = ? ORDER BY id ASC').all(sessionId) as any[];
+  res.json({
+    ...session,
+    meta: safeJsonParse(session.meta, {}),
+    events: events.map((row) => ({
+      id: row.id,
+      type: row.type,
+      created_at: row.created_at,
+      payload: safeJsonParse(row.payload, {}),
+    })),
+  });
 });
 
 // --- MCP (Model Context Protocol) Support ---
@@ -7626,6 +7922,15 @@ async function shutdown(signal: string) {
   }
 
   try {
+    if (voiceWss) {
+      await new Promise<void>((resolve) => voiceWss!.close(() => resolve()));
+      voiceWss = null;
+    }
+  } catch (e) {
+    console.error('Failed to close voice websocket server:', e);
+  }
+
+  try {
     if (viteServer) {
       await viteServer.close();
       viteServer = null;
@@ -7732,6 +8037,270 @@ function scheduleRetention() {
 
   runCleanup().catch(() => undefined);
   setInterval(() => runCleanup().catch(() => undefined), 24 * 60 * 60 * 1000);
+}
+
+function initializeVoiceWebSocketServer(server: import('http').Server) {
+  if (voiceWss) {
+    try { voiceWss.close(); } catch {}
+    voiceWss = null;
+  }
+
+  const wss = new WebSocketServer({ noServer: true });
+  voiceWss = wss;
+
+  wss.on('connection', (ws, request) => {
+    const url = new URL(request.url || '/ws/voice', `http://${request.headers.host || 'localhost'}`);
+    const agentId = Number(url.searchParams.get('agentId') || 0);
+    const storedProfile = Number.isFinite(agentId) && agentId > 0 ? getAgentVoiceProfile(agentId) : null;
+    const initialVoiceId = url.searchParams.get('voiceId') || storedProfile?.voice_id || DEFAULT_VOICE_ID;
+    const initialTtsModelId = url.searchParams.get('ttsModelId') || storedProfile?.tts_model_id || DEFAULT_TTS_MODEL;
+    const initialSttModelId = url.searchParams.get('sttModelId') || storedProfile?.stt_model_id || DEFAULT_STT_MODEL;
+    const initialOutputFormat = url.searchParams.get('outputFormat') || storedProfile?.output_format || DEFAULT_TTS_FORMAT;
+    const initialMimeType = url.searchParams.get('audioMimeType') || 'audio/webm';
+    const initialSampleRate = Number(url.searchParams.get('sampleRate') || storedProfile?.sample_rate || DEFAULT_STT_SAMPLE_RATE);
+    const initialLanguageCode = url.searchParams.get('languageCode') || storedProfile?.language_code || 'en';
+    const initialAutoTts = String(url.searchParams.get('autoTts') || String(storedProfile?.auto_tts ?? true)) !== 'false';
+
+    if (!Number.isFinite(agentId) || agentId <= 0) {
+      sendVoiceSocketEvent(ws, 'error', { message: 'agentId query param is required' });
+      ws.close();
+      return;
+    }
+
+    const agent = db.prepare('SELECT id, name, role, provider, model FROM agents WHERE id = ?').get(agentId) as any;
+    if (!agent) {
+      sendVoiceSocketEvent(ws, 'error', { message: 'Agent not found' });
+      ws.close();
+      return;
+    }
+
+    const sessionId = createVoiceSession(agentId, {
+      voiceId: initialVoiceId,
+      ttsModelId: initialTtsModelId,
+      sttModelId: initialSttModelId,
+      outputFormat: initialOutputFormat,
+      audioMimeType: initialMimeType,
+      audioChunks: [],
+      sessionId: '',
+      agentId,
+    } as any);
+
+    const context: VoiceSocketContext = {
+      sessionId,
+      agentId,
+      voiceId: initialVoiceId,
+      ttsModelId: initialTtsModelId,
+      sttModelId: initialSttModelId,
+      outputFormat: initialOutputFormat,
+      audioMimeType: initialMimeType,
+      audioChunks: [],
+      sampleRate: initialSampleRate,
+      languageCode: initialLanguageCode,
+      autoTts: initialAutoTts,
+      sttSocket: null,
+    };
+    voiceSocketContexts.set(ws, context);
+
+    sendVoiceSocketEvent(ws, 'session.started', {
+      sessionId,
+      agent: { id: agent.id, name: agent.name, role: agent.role, provider: agent.provider, model: agent.model },
+      voice: {
+        voiceId: context.voiceId,
+        ttsModelId: context.ttsModelId,
+        sttModelId: context.sttModelId,
+        outputFormat: context.outputFormat,
+        sampleRate: context.sampleRate,
+        languageCode: context.languageCode,
+        autoTts: context.autoTts,
+      },
+    });
+
+    ws.on('message', async (raw) => {
+      const current = voiceSocketContexts.get(ws);
+      if (!current) return;
+      try {
+        const message = JSON.parse(String(raw || '{}'));
+        const type = String(message?.type || '');
+        if (!type) return;
+
+        if (type === 'session.update') {
+          current.voiceId = String(message.voiceId || current.voiceId || DEFAULT_VOICE_ID);
+          current.ttsModelId = String(message.ttsModelId || current.ttsModelId || DEFAULT_TTS_MODEL);
+          current.sttModelId = String(message.sttModelId || current.sttModelId || DEFAULT_STT_MODEL);
+          current.outputFormat = String(message.outputFormat || current.outputFormat || DEFAULT_TTS_FORMAT);
+          current.audioMimeType = String(message.audioMimeType || current.audioMimeType || 'audio/webm');
+          current.sampleRate = Number(message.sampleRate || current.sampleRate || DEFAULT_STT_SAMPLE_RATE);
+          current.languageCode = String(message.languageCode || current.languageCode || 'en');
+          current.autoTts = typeof message.autoTts === 'boolean' ? message.autoTts : current.autoTts;
+          updateVoiceSession(current.sessionId, {
+            voice_id: current.voiceId,
+            tts_model_id: current.ttsModelId,
+            stt_model_id: current.sttModelId,
+            meta: {
+              output_format: current.outputFormat,
+              audio_mime_type: current.audioMimeType,
+              sample_rate: current.sampleRate,
+              language_code: current.languageCode,
+              auto_tts: current.autoTts,
+            },
+          });
+          appendVoiceSessionEvent(current.sessionId, 'session.updated', {
+            voiceId: current.voiceId,
+            ttsModelId: current.ttsModelId,
+            sttModelId: current.sttModelId,
+            outputFormat: current.outputFormat,
+            sampleRate: current.sampleRate,
+            languageCode: current.languageCode,
+            autoTts: current.autoTts,
+          });
+          sendVoiceSocketEvent(ws, 'session.updated', { sessionId: current.sessionId });
+          return;
+        }
+
+        if (type === 'audio.stream') {
+          const chunk = String(message.chunk || '');
+          if (!chunk) return;
+          const sttSocket = openRealtimeSttSocket(current, ws);
+          if (sttSocket.readyState === WebSocket.OPEN) {
+            sttSocket.send(JSON.stringify({
+              audio: chunk,
+              language_code: current.languageCode,
+            }));
+          }
+          return;
+        }
+
+        if (type === 'audio.append') {
+          const chunk = String(message.chunk || '');
+          if (!chunk) return;
+          current.audioChunks.push(Buffer.from(chunk, 'base64'));
+          sendVoiceSocketEvent(ws, 'audio.buffered', {
+            sessionId: current.sessionId,
+            chunks: current.audioChunks.length,
+            bytes: current.audioChunks.reduce((total, part) => total + part.length, 0),
+          });
+          return;
+        }
+
+        if (type === 'session.stop') {
+          if (current.sttSocket && current.sttSocket.readyState === WebSocket.OPEN) {
+            current.sttSocket.close();
+          }
+          updateVoiceSession(current.sessionId, { status: 'closed' });
+          appendVoiceSessionEvent(current.sessionId, 'session.stopped', {});
+          sendVoiceSocketEvent(ws, 'session.stopped', { sessionId: current.sessionId });
+          ws.close();
+          return;
+        }
+
+        if (type === 'transcript.commit') {
+          const agentRow = db.prepare('SELECT * FROM agents WHERE id = ?').get(current.agentId) as any;
+          if (!agentRow) throw new Error('Agent not found');
+
+          let transcript = String(message.text || '').trim();
+          if (!transcript) {
+            const existingTranscript = String(getVoiceSession(current.sessionId)?.transcript || '').trim();
+            if (existingTranscript) {
+              transcript = existingTranscript;
+            } else {
+              const audioBuffer = Buffer.concat(current.audioChunks);
+              if (!audioBuffer.length) throw new Error('Provide text or recorded audio before commit.');
+              sendVoiceSocketEvent(ws, 'stt.processing', { sessionId: current.sessionId });
+              transcript = await transcribeVoiceAudio(audioBuffer, current.audioMimeType, current.sttModelId);
+              current.audioChunks = [];
+            }
+          }
+
+          if (!transcript) throw new Error('No transcript was produced.');
+
+          updateVoiceSession(current.sessionId, { status: 'processing', transcript });
+          appendVoiceSessionEvent(current.sessionId, 'stt.final', { text: transcript });
+          sendVoiceSocketEvent(ws, 'stt.final', { sessionId: current.sessionId, text: transcript });
+
+          const agentSession = await ensureAgentSession(current.agentId, current.sessionId, `voice_${current.sessionId}`);
+          sendVoiceSocketEvent(ws, 'runtime.event', { event: { type: 'status', message: 'Agent execution started' } });
+
+          const result = await runAgent(
+            agentRow,
+            { description: transcript, expected_output: 'A helpful spoken response.' },
+            '',
+            (log) => {
+              appendVoiceSessionEvent(current.sessionId, 'runtime.event', log);
+              sendVoiceSocketEvent(ws, 'runtime.event', { event: log });
+            },
+            {
+              initiatedBy: 'voice_console',
+              sessionId: agentSession.id,
+              userId: agentSession.user_id ?? `voice_${current.sessionId}`,
+            }
+          );
+
+          const reply = String(result?.text || '').trim();
+          updateVoiceSession(current.sessionId, { status: 'speaking', reply_text: reply });
+          appendVoiceSessionEvent(current.sessionId, 'agent.reply', {
+            text: reply,
+            execution_id: result?.exec_id ?? null,
+            usage: result?.usage ?? null,
+          });
+          sendVoiceSocketEvent(ws, 'agent.reply', {
+            sessionId: current.sessionId,
+            text: reply,
+            executionId: result?.exec_id ?? null,
+            usage: result?.usage ?? null,
+          });
+
+          if (reply && current.autoTts) {
+            sendVoiceSocketEvent(ws, 'tts.processing', { sessionId: current.sessionId });
+            const audio = await synthesizeVoiceAudio(reply, current.voiceId, current.ttsModelId, current.outputFormat);
+            appendVoiceSessionEvent(current.sessionId, 'tts.audio', {
+              bytes: audio.length,
+              output_format: current.outputFormat,
+            });
+            sendVoiceSocketEvent(ws, 'tts.audio', {
+              sessionId: current.sessionId,
+              audio: audio.toString('base64'),
+              mimeType: current.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
+              outputFormat: current.outputFormat,
+            });
+          }
+
+          updateVoiceSession(current.sessionId, { status: 'completed' });
+          appendVoiceSessionEvent(current.sessionId, 'session.completed', {});
+          sendVoiceSocketEvent(ws, 'session.completed', { sessionId: current.sessionId });
+          return;
+        }
+
+        sendVoiceSocketEvent(ws, 'error', { message: `Unsupported voice event: ${type}` });
+      } catch (error: any) {
+        const currentSessionId = voiceSocketContexts.get(ws)?.sessionId;
+        if (currentSessionId) {
+          updateVoiceSession(currentSessionId, { status: 'failed' });
+          appendVoiceSessionEvent(currentSessionId, 'error', { message: error?.message || 'Voice session failed' });
+        }
+        sendVoiceSocketEvent(ws, 'error', { message: error?.message || 'Voice session failed' });
+      }
+    });
+
+    ws.on('close', () => {
+      const current = voiceSocketContexts.get(ws);
+      if (current) {
+        if (current.sttSocket && current.sttSocket.readyState === WebSocket.OPEN) {
+          current.sttSocket.close();
+        }
+        updateVoiceSession(current.sessionId, { status: 'closed' });
+        appendVoiceSessionEvent(current.sessionId, 'socket.closed', {});
+      }
+      voiceSocketContexts.delete(ws);
+    });
+  });
+
+  server.on('upgrade', (request, socket, head) => {
+    const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
+    if (url.pathname !== '/ws/voice') return;
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  });
 }
 
 async function startServer() {
@@ -7864,6 +8433,7 @@ async function startServer() {
   httpServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+  initializeVoiceWebSocketServer(httpServer);
 
   scheduleRetention();
   startJobWorker();
