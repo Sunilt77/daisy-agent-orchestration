@@ -5097,6 +5097,34 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
         }
       }
     }
+
+    // Some models choose the raw MCP tool name instead of the generated prefixed alias.
+    // Fall back to probing connected MCP clients directly before treating the tool as local/mock.
+    const fallbackErrors: string[] = [];
+    for (const [, client] of mcpClients.entries()) {
+      try {
+        const result = await client.callTool({
+          name: toolName,
+          arguments: args,
+        });
+        if (result.isError) {
+          const text = (result.content as any[]).map((c) => c.type === 'text' ? c.text : '').join('\n');
+          fallbackErrors.push(text || `MCP tool ${toolName} returned an error`);
+          continue;
+        }
+        return (result.content as any[]).map((c) => c.type === 'text' ? c.text : JSON.stringify(c)).join('\n');
+      } catch (e: any) {
+        const message = String(e?.message || e || '');
+        fallbackErrors.push(message);
+      }
+    }
+
+    if (fallbackErrors.length > 0) {
+      const fatalError = fallbackErrors.find((message) => !/not found|unknown tool|method not found|-32601/i.test(message));
+      if (fatalError) {
+        return `[Error executing MCP tool] ${fatalError}`;
+      }
+    }
   }
 
   const tool = toolRecord || db.prepare('SELECT * FROM tools WHERE name = ?').get(toolName);

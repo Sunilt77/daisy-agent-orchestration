@@ -105,6 +105,12 @@ function stringifyTestValue(type: string | undefined, raw: string) {
   return raw;
 }
 
+function formatDisplayedMcpToolName(name?: string | null) {
+  const value = String(name || '').trim();
+  if (!value) return '';
+  return value.startsWith('tool_') ? value : `tool_${value}`;
+}
+
 export default function McpPage() {
   const [rows, setRows] = useState<ExposedToolRow[]>([]);
   const [bundles, setBundles] = useState<McpBundle[]>([]);
@@ -145,6 +151,7 @@ export default function McpPage() {
   const [expandedBundleIds, setExpandedBundleIds] = useState<number[]>([]);
   const [bundleTestState, setBundleTestState] = useState<BundleTestPayload | null>(null);
   const [bundleTestLoading, setBundleTestLoading] = useState(false);
+  const [bundleTestLoadingId, setBundleTestLoadingId] = useState<number | null>(null);
   const [bundleTestSelectedToolId, setBundleTestSelectedToolId] = useState<string>('');
   const [bundleTestValues, setBundleTestValues] = useState<Record<string, string>>({});
   const [bundleTestError, setBundleTestError] = useState<string>('');
@@ -503,6 +510,7 @@ export default function McpPage() {
 
   const openBundleTester = async (bundle: McpBundle) => {
     setBundleTestLoading(true);
+    setBundleTestLoadingId(bundle.id);
     setBundleTestError('');
     setBundleTestResult('');
     setBundleTestValues({});
@@ -519,6 +527,7 @@ export default function McpPage() {
       setLoadError(e.message || 'Failed to open bundle tester');
     } finally {
       setBundleTestLoading(false);
+      setBundleTestLoadingId(null);
     }
   };
 
@@ -686,10 +695,10 @@ export default function McpPage() {
                         </button>
                         <button
                           onClick={() => void openBundleTester(bundle)}
-                          disabled={bundleTestLoading}
+                          disabled={bundleTestLoading && bundleTestLoadingId === bundle.id}
                           className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-50 text-cyan-700 border border-cyan-200"
                         >
-                          {bundleTestLoading ? 'Loading...' : 'Test Tools'}
+                          {bundleTestLoading && bundleTestLoadingId === bundle.id ? 'Loading...' : 'Test Tools'}
                         </button>
                         <button
                           onClick={() => toggleBundleExposure(bundle.id, !bundle.is_exposed)}
@@ -725,7 +734,7 @@ export default function McpPage() {
                       <div className="mt-3 flex flex-wrap gap-2">
                         {visibleTools.map((t) => (
                         <span key={t.tool_id} className="text-[11px] px-2 py-1 rounded bg-white border border-slate-200 text-slate-700">
-                          {t.exposed_name ? `tool_${t.exposed_name}` : t.tool_name}
+                          {formatDisplayedMcpToolName(t.exposed_name || t.tool_name)}
                         </span>
                         ))}
                         {!isExpanded && hiddenCount > 0 && (
@@ -1124,7 +1133,7 @@ export default function McpPage() {
                       <div className="flex flex-wrap gap-2">
                         {connectBundle.tools.map((tool) => (
                           <span key={tool.tool_id} className="text-[11px] px-2 py-1 rounded bg-slate-100 border border-slate-200 text-slate-700">
-                            {tool.exposed_name ? `tool_${tool.exposed_name}` : tool.tool_name}
+                            {formatDisplayedMcpToolName(tool.exposed_name || tool.tool_name)}
                           </span>
                         ))}
                       </div>
