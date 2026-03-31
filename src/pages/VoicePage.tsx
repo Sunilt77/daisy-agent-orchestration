@@ -37,7 +37,7 @@ export default function VoicePage() {
   const [targetId, setTargetId] = useState<string>('');
   const [voiceId, setVoiceId] = useState('JBFqnCBsd6RMkjVDRZzb');
   const [ttsModelId, setTtsModelId] = useState('eleven_multilingual_v2');
-  const [sttModelId, setSttModelId] = useState('scribe_v1');
+  const [sttModelId, setSttModelId] = useState('scribe_v2_realtime');
   const [outputFormat, setOutputFormat] = useState('mp3_44100_128');
   const [sampleRate, setSampleRate] = useState(16000);
   const [languageCode, setLanguageCode] = useState('en');
@@ -154,7 +154,7 @@ export default function VoicePage() {
     if (!selectedTarget?.voice_profile) return;
     setVoiceId(String(selectedTarget.voice_profile.voice_id || 'JBFqnCBsd6RMkjVDRZzb'));
     setTtsModelId(String(selectedTarget.voice_profile.tts_model_id || 'eleven_multilingual_v2'));
-    setSttModelId(String(selectedTarget.voice_profile.stt_model_id || 'scribe_v1'));
+    setSttModelId(String(selectedTarget.voice_profile.stt_model_id || 'scribe_v2_realtime'));
     setOutputFormat(String(selectedTarget.voice_profile.output_format || 'mp3_44100_128'));
     setSampleRate(Number(selectedTarget.voice_profile.sample_rate || 16000));
     setLanguageCode(String(selectedTarget.voice_profile.language_code || 'en'));

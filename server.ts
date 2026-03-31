@@ -801,7 +801,7 @@ type VoiceSocketContext = {
 
 const DEFAULT_VOICE_ID = process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'JBFqnCBsd6RMkjVDRZzb';
 const DEFAULT_TTS_MODEL = process.env.ELEVENLABS_DEFAULT_TTS_MODEL || 'eleven_multilingual_v2';
-const DEFAULT_STT_MODEL = process.env.ELEVENLABS_DEFAULT_STT_MODEL || 'scribe_v1';
+const DEFAULT_STT_MODEL = process.env.ELEVENLABS_DEFAULT_STT_MODEL || 'scribe_v2_realtime';
 const DEFAULT_TTS_FORMAT = process.env.ELEVENLABS_DEFAULT_OUTPUT_FORMAT || 'mp3_44100_128';
 const DEFAULT_STT_SAMPLE_RATE = Number(process.env.ELEVENLABS_DEFAULT_SAMPLE_RATE || 16000);
 const voiceSocketContexts = new Map<WebSocket, VoiceSocketContext>();
@@ -4285,6 +4285,96 @@ app.get('/api/voice/targets', (_req, res) => {
       is_exposed: Boolean(crew.is_exposed),
       coordinator_agent_id: crew.coordinator_agent_id ? Number(crew.coordinator_agent_id) : null,
     })),
+  });
+});
+
+app.get('/api/voice/exposed', (req, res) => {
+  const origin = `${req.protocol}://${req.get('host')}`;
+  const exposedAgents = db.prepare('SELECT id, name, role, provider, model, status, is_exposed FROM agents WHERE is_exposed = 1 ORDER BY id ASC').all() as any[];
+  const exposedCrews = db.prepare('SELECT id, name, process, coordinator_agent_id, is_exposed FROM crews WHERE is_exposed = 1 ORDER BY id ASC').all() as any[];
+  res.json({
+    agents: exposedAgents.map((agent) => ({
+      id: Number(agent.id),
+      type: 'agent',
+      name: agent.name,
+      subtitle: agent.role || 'Agent',
+      provider: agent.provider || null,
+      model: agent.model || null,
+      status: agent.status || null,
+      is_exposed: true,
+      voice_profile: getAgentVoiceProfile(Number(agent.id)) || {
+        agent_id: Number(agent.id),
+        voice_provider: 'elevenlabs',
+        voice_id: DEFAULT_VOICE_ID,
+        tts_model_id: DEFAULT_TTS_MODEL,
+        stt_model_id: DEFAULT_STT_MODEL,
+        output_format: DEFAULT_TTS_FORMAT,
+        sample_rate: DEFAULT_STT_SAMPLE_RATE,
+        language_code: 'en',
+        auto_tts: true,
+        meta: {},
+      },
+      voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=agent&targetId=${Number(agent.id)}`,
+      voice_http_hint: `${origin}/api/voice/exposed/agent/${Number(agent.id)}`,
+    })),
+    crews: exposedCrews.map((crew) => ({
+      id: Number(crew.id),
+      type: 'crew',
+      name: crew.name,
+      subtitle: `${crew.process || 'sequential'} crew`,
+      process: crew.process || 'sequential',
+      is_exposed: true,
+      coordinator_agent_id: crew.coordinator_agent_id ? Number(crew.coordinator_agent_id) : null,
+      voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=crew&targetId=${Number(crew.id)}`,
+      voice_http_hint: `${origin}/api/voice/exposed/crew/${Number(crew.id)}`,
+    })),
+  });
+});
+
+app.get('/api/voice/exposed/:type/:id', (req, res) => {
+  const origin = `${req.protocol}://${req.get('host')}`;
+  const type = req.params.type === 'crew' ? 'crew' : 'agent';
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'Invalid target id' });
+
+  if (type === 'crew') {
+    const crew = db.prepare('SELECT id, name, process, coordinator_agent_id, is_exposed FROM crews WHERE id = ? AND is_exposed = 1').get(id) as any;
+    if (!crew) return res.status(404).json({ error: 'Exposed voice crew not found' });
+    return res.json({
+      id: Number(crew.id),
+      type: 'crew',
+      name: crew.name,
+      process: crew.process || 'sequential',
+      is_exposed: true,
+      coordinator_agent_id: crew.coordinator_agent_id ? Number(crew.coordinator_agent_id) : null,
+      voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=crew&targetId=${Number(crew.id)}`,
+    });
+  }
+
+  const agent = db.prepare('SELECT id, name, role, provider, model, status, is_exposed FROM agents WHERE id = ? AND is_exposed = 1').get(id) as any;
+  if (!agent) return res.status(404).json({ error: 'Exposed voice agent not found' });
+  res.json({
+    id: Number(agent.id),
+    type: 'agent',
+    name: agent.name,
+    role: agent.role || 'Agent',
+    provider: agent.provider || null,
+    model: agent.model || null,
+    status: agent.status || null,
+    is_exposed: true,
+    voice_profile: getAgentVoiceProfile(Number(agent.id)) || {
+      agent_id: Number(agent.id),
+      voice_provider: 'elevenlabs',
+      voice_id: DEFAULT_VOICE_ID,
+      tts_model_id: DEFAULT_TTS_MODEL,
+      stt_model_id: DEFAULT_STT_MODEL,
+      output_format: DEFAULT_TTS_FORMAT,
+      sample_rate: DEFAULT_STT_SAMPLE_RATE,
+      language_code: 'en',
+      auto_tts: true,
+      meta: {},
+    },
+    voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=agent&targetId=${Number(agent.id)}`,
   });
 });
 

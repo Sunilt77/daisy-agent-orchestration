@@ -849,7 +849,7 @@ type AgentOptionalConfig =
     is_exposed: false,
     voice_id: 'JBFqnCBsd6RMkjVDRZzb',
     tts_model_id: 'eleven_multilingual_v2',
-    stt_model_id: 'scribe_v1',
+    stt_model_id: 'scribe_v2_realtime',
     voice_output_format: 'mp3_44100_128',
     voice_sample_rate: '16000',
     voice_language_code: 'en',
@@ -1345,7 +1345,7 @@ type AgentOptionalConfig =
       is_exposed: false,
       voice_id: 'JBFqnCBsd6RMkjVDRZzb',
       tts_model_id: 'eleven_multilingual_v2',
-      stt_model_id: 'scribe_v1',
+      stt_model_id: 'scribe_v2_realtime',
       voice_output_format: 'mp3_44100_128',
       voice_sample_rate: '16000',
       voice_language_code: 'en',
@@ -1406,7 +1406,7 @@ type AgentOptionalConfig =
           is_exposed: agent.is_exposed || false,
           voice_id: String(voiceProfile?.voice_id || 'JBFqnCBsd6RMkjVDRZzb'),
           tts_model_id: String(voiceProfile?.tts_model_id || 'eleven_multilingual_v2'),
-          stt_model_id: String(voiceProfile?.stt_model_id || 'scribe_v1'),
+          stt_model_id: String(voiceProfile?.stt_model_id || 'scribe_v2_realtime'),
           voice_output_format: String(voiceProfile?.output_format || 'mp3_44100_128'),
           voice_sample_rate: String(voiceProfile?.sample_rate || 16000),
           voice_language_code: String(voiceProfile?.language_code || 'en'),
@@ -2305,7 +2305,7 @@ type AgentOptionalConfig =
                     className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm"
                     value={formData.stt_model_id}
                     onChange={e => setFormData({ ...formData, stt_model_id: e.target.value })}
-                    placeholder="scribe_v1"
+                    placeholder="scribe_v2_realtime"
                   />
                 </div>
                 <div>
