@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { Plus, Trash2, User, Brain, Target, ScrollText, Wrench, Edit, Globe, Terminal, Copy, Check, X, Folder, Activity, Key, Sparkles, Play, Loader2, ExternalLink, Gauge, Search, List, LayoutGrid, ArrowUpDown, AudioLines } from 'lucide-react';
+import { Plus, Trash2, User, Brain, Target, ScrollText, Wrench, Edit, Globe, Terminal, Copy, Check, X, Folder, Activity, Key, Sparkles, Play, Loader2, ExternalLink, Gauge, Search, List, LayoutGrid, ArrowUpDown, AudioLines, Radio } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Pagination from '../components/Pagination';
 import { LiveAgentCard } from '../components/LiveAgentCard';
@@ -681,6 +681,7 @@ const ConnectionModal = ({ agent, onClose }: { agent: Agent; onClose: () => void
     const [copied, setCopied] = useState(false);
     const origin = window.location.origin;
     const apiUrl = `${origin}/api/agents/${agent.id}/run`;
+    const voiceWsUrl = `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=agent&targetId=${agent.id}`;
     
     const curlCommand = `curl -X POST ${apiUrl} \\
   -H "Content-Type: application/json" \\
@@ -737,6 +738,27 @@ const ConnectionModal = ({ agent, onClose }: { agent: Agent; onClose: () => void
                             </button>
                             <pre className="text-xs text-slate-300 font-mono overflow-x-auto whitespace-pre-wrap">
                                 {curlCommand}
+                            </pre>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h4 className="text-lg font-semibold text-slate-800 mb-3 flex items-center gap-2">
+                            <Radio size={18} className="text-cyan-600" />
+                            Voice WebSocket
+                        </h4>
+                        <p className="text-sm text-slate-600 mb-3">
+                            Connect a realtime voice client directly to this exposed agent over WebSocket.
+                        </p>
+                        <div className="bg-slate-900 rounded-lg p-4 relative group">
+                            <button 
+                                onClick={() => copyToClipboard(voiceWsUrl)}
+                                className="absolute top-3 right-3 text-slate-400 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                            >
+                                {copied ? <Check size={16} /> : <Copy size={16} />}
+                            </button>
+                            <pre className="text-xs text-slate-300 font-mono overflow-x-auto whitespace-pre-wrap">
+                                {voiceWsUrl}
                             </pre>
                         </div>
                     </div>
@@ -1471,6 +1493,7 @@ type AgentOptionalConfig =
 
   const supervisorCount = useMemo(() => agents.filter((agent) => agent.agent_role === 'supervisor').length, [agents]);
   const specialistCount = useMemo(() => agents.filter((agent) => agent.agent_role !== 'supervisor').length, [agents]);
+  const appOrigin = typeof window !== 'undefined' ? window.location.origin : '';
 
   return (
     <div>
@@ -2496,6 +2519,20 @@ type AgentOptionalConfig =
                 <p className="text-xs text-slate-500 mt-1 ml-6">
                     If checked, this agent can be called directly via the API or used as a tool in the Model Context Protocol.
                 </p>
+                {formData.is_exposed && editingId && (
+                  <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 space-y-3">
+                    <div className="text-sm font-semibold text-cyan-900 flex items-center gap-2">
+                      <Radio size={16} />
+                      Voice WebSocket
+                    </div>
+                    <div className="text-xs text-cyan-900/80">
+                      External realtime voice clients can connect directly to this exposed agent using the websocket endpoint below.
+                    </div>
+                    <div className="rounded-lg border border-cyan-100 bg-white px-3 py-2 font-mono text-xs break-all">
+                      {appOrigin.replace(/^http/, 'ws')}/ws/voice?targetType=agent&targetId={editingId}
+                    </div>
+                  </div>
+                )}
             </div>
             )}
             

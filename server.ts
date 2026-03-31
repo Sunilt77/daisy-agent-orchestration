@@ -860,6 +860,24 @@ function getAgentVoiceProfile(agentId: number) {
   };
 }
 
+function getCrewVoiceProfile(crewId: number) {
+  ensureVoiceTables();
+  const row = db.prepare('SELECT * FROM crew_voice_profiles WHERE crew_id = ?').get(crewId) as any;
+  if (!row) return null;
+  return {
+    crew_id: row.crew_id,
+    voice_provider: row.voice_provider || 'elevenlabs',
+    voice_id: row.voice_id || DEFAULT_VOICE_ID,
+    tts_model_id: row.tts_model_id || DEFAULT_TTS_MODEL,
+    stt_model_id: row.stt_model_id || DEFAULT_STT_MODEL,
+    output_format: row.output_format || DEFAULT_TTS_FORMAT,
+    sample_rate: Number(row.sample_rate || DEFAULT_STT_SAMPLE_RATE),
+    language_code: row.language_code || 'en',
+    auto_tts: Boolean(row.auto_tts ?? 1),
+    meta: safeJsonParse(row.meta, {}),
+  };
+}
+
 function saveAgentVoiceProfile(agentId: number, payload: any) {
   ensureVoiceTables();
   db.prepare(`
@@ -879,6 +897,37 @@ function saveAgentVoiceProfile(agentId: number, payload: any) {
       updated_at = CURRENT_TIMESTAMP
   `).run(
     agentId,
+    'elevenlabs',
+    String(payload.voice_id || DEFAULT_VOICE_ID),
+    String(payload.tts_model_id || DEFAULT_TTS_MODEL),
+    String(payload.stt_model_id || DEFAULT_STT_MODEL),
+    String(payload.output_format || DEFAULT_TTS_FORMAT),
+    Number(payload.sample_rate || DEFAULT_STT_SAMPLE_RATE),
+    String(payload.language_code || 'en'),
+    payload.auto_tts === false ? 0 : 1,
+    JSON.stringify(payload.meta || {}),
+  );
+}
+
+function saveCrewVoiceProfile(crewId: number, payload: any) {
+  ensureVoiceTables();
+  db.prepare(`
+    INSERT INTO crew_voice_profiles (
+      crew_id, voice_provider, voice_id, tts_model_id, stt_model_id, output_format, sample_rate, language_code, auto_tts, meta, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(crew_id) DO UPDATE SET
+      voice_provider = excluded.voice_provider,
+      voice_id = excluded.voice_id,
+      tts_model_id = excluded.tts_model_id,
+      stt_model_id = excluded.stt_model_id,
+      output_format = excluded.output_format,
+      sample_rate = excluded.sample_rate,
+      language_code = excluded.language_code,
+      auto_tts = excluded.auto_tts,
+      meta = excluded.meta,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(
+    crewId,
     'elevenlabs',
     String(payload.voice_id || DEFAULT_VOICE_ID),
     String(payload.tts_model_id || DEFAULT_TTS_MODEL),
@@ -4284,6 +4333,7 @@ app.get('/api/voice/targets', (_req, res) => {
       process: crew.process || 'sequential',
       is_exposed: Boolean(crew.is_exposed),
       coordinator_agent_id: crew.coordinator_agent_id ? Number(crew.coordinator_agent_id) : null,
+      voice_profile: getCrewVoiceProfile(Number(crew.id)),
     })),
   });
 });
@@ -4325,6 +4375,18 @@ app.get('/api/voice/exposed', (req, res) => {
       process: crew.process || 'sequential',
       is_exposed: true,
       coordinator_agent_id: crew.coordinator_agent_id ? Number(crew.coordinator_agent_id) : null,
+      voice_profile: getCrewVoiceProfile(Number(crew.id)) || {
+        crew_id: Number(crew.id),
+        voice_provider: 'elevenlabs',
+        voice_id: DEFAULT_VOICE_ID,
+        tts_model_id: DEFAULT_TTS_MODEL,
+        stt_model_id: DEFAULT_STT_MODEL,
+        output_format: DEFAULT_TTS_FORMAT,
+        sample_rate: DEFAULT_STT_SAMPLE_RATE,
+        language_code: 'en',
+        auto_tts: true,
+        meta: {},
+      },
       voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=crew&targetId=${Number(crew.id)}`,
       voice_http_hint: `${origin}/api/voice/exposed/crew/${Number(crew.id)}`,
     })),
@@ -4347,6 +4409,18 @@ app.get('/api/voice/exposed/:type/:id', (req, res) => {
       process: crew.process || 'sequential',
       is_exposed: true,
       coordinator_agent_id: crew.coordinator_agent_id ? Number(crew.coordinator_agent_id) : null,
+      voice_profile: getCrewVoiceProfile(Number(crew.id)) || {
+        crew_id: Number(crew.id),
+        voice_provider: 'elevenlabs',
+        voice_id: DEFAULT_VOICE_ID,
+        tts_model_id: DEFAULT_TTS_MODEL,
+        stt_model_id: DEFAULT_STT_MODEL,
+        output_format: DEFAULT_TTS_FORMAT,
+        sample_rate: DEFAULT_STT_SAMPLE_RATE,
+        language_code: 'en',
+        auto_tts: true,
+        meta: {},
+      },
       voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=crew&targetId=${Number(crew.id)}`,
     });
   }
@@ -4376,6 +4450,30 @@ app.get('/api/voice/exposed/:type/:id', (req, res) => {
     },
     voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=agent&targetId=${Number(agent.id)}`,
   });
+});
+
+app.get('/api/voice/crews/:id/profile', (req, res) => {
+  const crewId = Number(req.params.id);
+  if (!Number.isFinite(crewId)) return res.status(400).json({ error: 'Invalid crew id' });
+  res.json(getCrewVoiceProfile(crewId) || {
+    crew_id: crewId,
+    voice_provider: 'elevenlabs',
+    voice_id: DEFAULT_VOICE_ID,
+    tts_model_id: DEFAULT_TTS_MODEL,
+    stt_model_id: DEFAULT_STT_MODEL,
+    output_format: DEFAULT_TTS_FORMAT,
+    sample_rate: DEFAULT_STT_SAMPLE_RATE,
+    language_code: 'en',
+    auto_tts: true,
+    meta: {},
+  });
+});
+
+app.put('/api/voice/crews/:id/profile', (req, res) => {
+  const crewId = Number(req.params.id);
+  if (!Number.isFinite(crewId)) return res.status(400).json({ error: 'Invalid crew id' });
+  saveCrewVoiceProfile(crewId, req.body || {});
+  res.json(getCrewVoiceProfile(crewId));
 });
 
 app.get('/api/voice/agents/:id/profile', (req, res) => {
@@ -5434,6 +5532,7 @@ app.get('/api/crews', async (req, res) => {
         created_at: crew.createdAt,
         updated_at: crew.updatedAt,
         agents: agentsByCrewId.get(crew.id) || [],
+        voice_profile: getCrewVoiceProfile(Number(crew.id)),
         coordinator_agent: coordinatorAgent ? {
           id: coordinatorAgent.id,
           name: coordinatorAgent.name,

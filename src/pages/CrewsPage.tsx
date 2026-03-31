@@ -3,7 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { 
   Plus, Trash2, Users, Brain, Target, Edit, Sparkles, 
   Check, X, Folder, Activity, Key, Play, Loader2, 
-  ExternalLink, Shield, Zap, Globe, Save, ArrowRight, Search, List, LayoutGrid, ArrowUpDown
+  ExternalLink, Shield, Zap, Globe, Save, ArrowRight, Search, List, LayoutGrid, ArrowUpDown, AudioLines, Radio
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Pagination from '../components/Pagination';
@@ -27,11 +27,20 @@ interface Crew {
   max_runtime_ms?: number;
   max_cost_usd?: number;
   max_tool_calls?: number;
+  voice_profile?: {
+    voice_id?: string;
+    tts_model_id?: string;
+    stt_model_id?: string;
+    output_format?: string;
+    sample_rate?: number;
+    language_code?: string;
+    auto_tts?: boolean;
+  } | null;
   agents: Agent[];
 }
 
 export default function CrewsPage() {
-  type CrewOptionalConfig = 'description' | 'limits' | 'exposure';
+  type CrewOptionalConfig = 'description' | 'limits' | 'voice' | 'exposure';
   const navigate = useNavigate();
   const [crews, setCrews] = useState<Crew[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -60,7 +69,14 @@ export default function CrewsPage() {
     is_exposed: false,
     max_runtime_ms: 120000,
     max_cost_usd: 5.0,
-    max_tool_calls: 20
+    max_tool_calls: 20,
+    voice_id: 'JBFqnCBsd6RMkjVDRZzb',
+    tts_model_id: 'eleven_multilingual_v2',
+    stt_model_id: 'scribe_v2_realtime',
+    voice_output_format: 'mp3_44100_128',
+    voice_sample_rate: 16000,
+    voice_language_code: 'en',
+    voice_auto_tts: true,
   });
 
   const [projects, setProjects] = useState<{id: number, name: string}[]>([]);
@@ -82,6 +98,7 @@ export default function CrewsPage() {
   const crewConfigOptions: Array<{ key: CrewOptionalConfig; label: string }> = [
     { key: 'description', label: 'Functional Brief' },
     { key: 'limits', label: 'Runtime/Cost Limits' },
+    { key: 'voice', label: 'Voice Runtime' },
     { key: 'exposure', label: 'MCP Exposure' },
   ];
   const showCrewConfig = (key: CrewOptionalConfig) => visibleCrewConfigs.includes(key);
@@ -248,6 +265,7 @@ export default function CrewsPage() {
       const initialConfigs: CrewOptionalConfig[] = [];
       if (crew.description) initialConfigs.push('description');
       if (crew.max_runtime_ms || crew.max_cost_usd || crew.max_tool_calls) initialConfigs.push('limits');
+      if (crew.voice_profile) initialConfigs.push('voice');
       if (crew.is_exposed) initialConfigs.push('exposure');
       setVisibleCrewConfigs(initialConfigs);
       setFormData({
@@ -259,7 +277,14 @@ export default function CrewsPage() {
         is_exposed: !!crew.is_exposed,
         max_runtime_ms: crew.max_runtime_ms || 120000,
         max_cost_usd: crew.max_cost_usd || 5.0,
-        max_tool_calls: crew.max_tool_calls || 20
+        max_tool_calls: crew.max_tool_calls || 20,
+        voice_id: String(crew.voice_profile?.voice_id || 'JBFqnCBsd6RMkjVDRZzb'),
+        tts_model_id: String(crew.voice_profile?.tts_model_id || 'eleven_multilingual_v2'),
+        stt_model_id: String(crew.voice_profile?.stt_model_id || 'scribe_v2_realtime'),
+        voice_output_format: String(crew.voice_profile?.output_format || 'mp3_44100_128'),
+        voice_sample_rate: Number(crew.voice_profile?.sample_rate || 16000),
+        voice_language_code: String(crew.voice_profile?.language_code || 'en'),
+        voice_auto_tts: Boolean(crew.voice_profile?.auto_tts ?? true),
       });
     } else {
       setEditingCrew(null);
@@ -273,7 +298,14 @@ export default function CrewsPage() {
         is_exposed: false,
         max_runtime_ms: 120000,
         max_cost_usd: 5.0,
-        max_tool_calls: 20
+        max_tool_calls: 20,
+        voice_id: 'JBFqnCBsd6RMkjVDRZzb',
+        tts_model_id: 'eleven_multilingual_v2',
+        stt_model_id: 'scribe_v2_realtime',
+        voice_output_format: 'mp3_44100_128',
+        voice_sample_rate: 16000,
+        voice_language_code: 'en',
+        voice_auto_tts: true,
       });
     }
     setIsModalOpen(true);
@@ -305,6 +337,24 @@ export default function CrewsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || 'Failed to save crew');
+      const savedCrewId = Number(data?.id || editingCrew?.id);
+      if (Number.isFinite(savedCrewId) && savedCrewId > 0) {
+        const voiceRes = await fetch(`/api/voice/crews/${savedCrewId}/profile`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            voice_id: formData.voice_id,
+            tts_model_id: formData.tts_model_id,
+            stt_model_id: formData.stt_model_id,
+            output_format: formData.voice_output_format,
+            sample_rate: Number(formData.voice_sample_rate || 16000),
+            language_code: formData.voice_language_code,
+            auto_tts: Boolean(formData.voice_auto_tts),
+          }),
+        });
+        const voiceData = await voiceRes.json().catch(() => ({}));
+        if (!voiceRes.ok) throw new Error(voiceData?.error || 'Crew saved, but voice profile failed to save');
+      }
       setIsModalOpen(false);
       loadData();
     } catch (e: any) {
@@ -399,6 +449,7 @@ export default function CrewsPage() {
     () => selectedCrewAgents.filter((agent) => agent.agent_role !== 'supervisor').length,
     [selectedCrewAgents]
   );
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
 
   return (
     <div className="space-y-8 pb-20">
@@ -1129,24 +1180,85 @@ export default function CrewsPage() {
                   </div>
                   )}
 
-                  {showCrewConfig('exposure') && (
-                  <div className="flex items-center justify-between p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
-                    <div className="flex items-center gap-3">
-                       <Globe size={20} className="text-indigo-600" />
-                       <div>
-                         <p className="text-sm font-bold text-slate-900">Expose to Neural Command (MCP)</p>
-                         <p className="text-[10px] text-indigo-600 font-bold uppercase tracking-wider">Make this crew invokable as an MCP tool</p>
-                       </div>
+                  {showCrewConfig('voice') && (
+                  <div className="border border-emerald-100 rounded-2xl p-4 bg-emerald-50/40 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="flex items-center gap-2 text-sm font-medium text-emerald-950">
+                        <AudioLines size={16} className="text-emerald-600" />
+                        Voice Runtime
+                      </label>
+                      <Link to="/voice" className="text-xs text-emerald-700 hover:text-emerald-900 font-medium">
+                        Open Voice Console
+                      </Link>
                     </div>
-                    <label className="relative inline-flex items-center cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={formData.is_exposed}
-                        onChange={e => setFormData({ ...formData, is_exposed: e.target.checked })}
-                        className="sr-only peer"
-                      />
-                      <div className="w-11 h-6 bg-indigo-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                    <p className="text-xs text-emerald-900/75">
+                      Save voice defaults on this crew so live voice sessions can invoke the whole crew with its own STT/TTS profile.
+                    </p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Voice ID</label>
+                        <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_id} onChange={e => setFormData({ ...formData, voice_id: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">TTS Model</label>
+                        <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.tts_model_id} onChange={e => setFormData({ ...formData, tts_model_id: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">STT Model</label>
+                        <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.stt_model_id} onChange={e => setFormData({ ...formData, stt_model_id: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Output Format</label>
+                        <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_output_format} onChange={e => setFormData({ ...formData, voice_output_format: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Sample Rate</label>
+                        <input type="number" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-bold text-slate-900" value={formData.voice_sample_rate} onChange={e => setFormData({ ...formData, voice_sample_rate: Number(e.target.value) || 16000 })} />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Language</label>
+                        <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_language_code} onChange={e => setFormData({ ...formData, voice_language_code: e.target.value })} />
+                      </div>
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" checked={formData.voice_auto_tts} onChange={e => setFormData({ ...formData, voice_auto_tts: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                      <span className="text-sm text-slate-700">Auto-play TTS replies for this crew</span>
                     </label>
+                  </div>
+                  )}
+
+                  {showCrewConfig('exposure') && (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
+                      <div className="flex items-center gap-3">
+                         <Globe size={20} className="text-indigo-600" />
+                         <div>
+                           <p className="text-sm font-bold text-slate-900">Expose to Neural Command (MCP)</p>
+                           <p className="text-[10px] text-indigo-600 font-bold uppercase tracking-wider">Make this crew invokable as MCP, API, and voice runtime</p>
+                         </div>
+                      </div>
+                      <label className="relative inline-flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={formData.is_exposed}
+                          onChange={e => setFormData({ ...formData, is_exposed: e.target.checked })}
+                          className="sr-only peer"
+                        />
+                        <div className="w-11 h-6 bg-indigo-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                      </label>
+                    </div>
+                    {formData.is_exposed && editingCrew && (
+                      <div className="rounded-2xl border border-cyan-200 bg-cyan-50 p-4 space-y-3">
+                        <div className="flex items-center gap-2 text-sm font-semibold text-cyan-900">
+                          <Radio size={16} />
+                          Voice Connection
+                        </div>
+                        <div className="text-xs text-cyan-900/80">Use this websocket endpoint to connect external realtime voice clients to the crew.</div>
+                        <div className="rounded-xl bg-white border border-cyan-100 px-3 py-2 font-mono text-xs break-all">
+                          {origin.replace(/^http/, 'ws')}/ws/voice?targetType=crew&targetId={editingCrew.id}
+                        </div>
+                      </div>
+                    )}
                   </div>
                   )}
                 </div>

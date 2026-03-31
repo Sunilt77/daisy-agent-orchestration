@@ -757,6 +757,22 @@ export function initDb() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS crew_voice_profiles (
+      crew_id INTEGER PRIMARY KEY,
+      voice_provider TEXT DEFAULT 'elevenlabs',
+      voice_id TEXT,
+      tts_model_id TEXT,
+      stt_model_id TEXT,
+      output_format TEXT,
+      sample_rate INTEGER DEFAULT 16000,
+      language_code TEXT DEFAULT 'en',
+      auto_tts INTEGER DEFAULT 1,
+      meta TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (crew_id) REFERENCES crews(id) ON DELETE CASCADE
+    );
   `);
     }
 
@@ -1059,6 +1075,22 @@ export function ensureVoiceTables() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS crew_voice_profiles (
+        crew_id INTEGER PRIMARY KEY,
+        voice_provider TEXT DEFAULT 'elevenlabs',
+        voice_id TEXT,
+        tts_model_id TEXT,
+        stt_model_id TEXT,
+        output_format TEXT,
+        sample_rate INTEGER DEFAULT 16000,
+        language_code TEXT DEFAULT 'en',
+        auto_tts INTEGER DEFAULT 1,
+        meta TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (crew_id) REFERENCES crews(id) ON DELETE CASCADE
       );
     `);
   } catch (e) {
