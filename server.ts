@@ -97,10 +97,33 @@ function packageToBaseName(input: string) {
   return slugifyValue(cleaned);
 }
 
+function getKnownMcpPackageConfigError(packageName: string, env?: Record<string, string>) {
+  const normalizedPackage = String(packageName || '').trim().toLowerCase();
+  const normalizedEnv = env && typeof env === 'object' ? env : {};
+  const hasValue = (key: string) => String(normalizedEnv[key] || '').trim().length > 0;
+
+  if (normalizedPackage === 'meta-ads-mcp') {
+    if (!hasValue('META_ACCESS_TOKEN')) {
+      return 'meta-ads-mcp requires META_ACCESS_TOKEN. Add it in the Environment Variables JSON before importing or using this MCP.';
+    }
+  }
+
+  return null;
+}
+
+function buildWrappedStdioCommand(command: string, args: string[]) {
+  const wrapperPath = path.resolve(process.cwd(), 'scripts', 'mcp-stdio-wrapper.mjs');
+  return {
+    command: 'node',
+    args: [wrapperPath, '--command', String(command || '').trim(), '--args-json', JSON.stringify(args || [])],
+  };
+}
+
 async function discoverMcpPackageTools(params: {
   command: string;
   args: string[];
   env?: Record<string, string>;
+  packageName?: string;
   timeoutMs?: number;
 }) {
   const command = String(params.command || '').trim();
@@ -111,11 +134,14 @@ async function discoverMcpPackageTools(params: {
     ...(params.env || {}),
   };
   if (!command) throw new Error('command is required');
+  const knownConfigError = getKnownMcpPackageConfigError(String(params.packageName || ''), params.env);
+  if (knownConfigError) throw new Error(knownConfigError);
+  const wrapped = buildWrappedStdioCommand(command, args);
 
   const client = new Client({ name: 'agentic-orchestrator', version: '1.0.0' }, { capabilities: {} });
   const transport = new StdioClientTransport({
-    command,
-    args,
+    command: wrapped.command,
+    args: wrapped.args,
     env,
   } as any);
 
@@ -126,6 +152,63 @@ async function discoverMcpPackageTools(params: {
   } finally {
     try { await client.close(); } catch {}
   }
+}
+
+async function getToolInputSchemaForRecord(tool: any): Promise<any> {
+  if (!tool) return { type: 'object', properties: {}, additionalProperties: true };
+
+  let config: any = {};
+  try {
+    config = tool.config ? JSON.parse(tool.config) : {};
+  } catch {
+    config = {};
+  }
+
+  if (tool.type === 'http') {
+    const requiredArgs = Array.isArray(config?.requiredArgs) ? config.requiredArgs.map((value: any) => String(value)) : [];
+    const argSchema = config?.argSchema && typeof config.argSchema === 'object' ? config.argSchema : {};
+    const properties = Object.fromEntries(
+      requiredArgs.map((name: string) => {
+        const normalized = normalizeMcpName(String(name || ''));
+        const type = String(argSchema[name] || argSchema[normalized] || 'string');
+        return [normalized || name, { type }];
+      }),
+    );
+    return {
+      type: 'object',
+      properties,
+      required: requiredArgs.map((name: string) => normalizeMcpName(name) || name),
+      additionalProperties: true,
+    };
+  }
+
+  if (tool.type === 'mcp_stdio_proxy') {
+    const rawCommand = String(config?.rawCommand || '').trim() || String(config?.command || '').trim();
+    const rawArgs = Array.isArray(config?.rawArgs) ? config.rawArgs.map((x: any) => String(x)) : [];
+    const envFromConfig = config?.env && typeof config.env === 'object' ? (config.env as Record<string, string>) : {};
+    const packageName = String(config?.packageName || '').trim();
+    const discovered = await discoverMcpPackageTools({
+      command: rawCommand,
+      args: rawArgs.length ? rawArgs : (Array.isArray(config?.args) ? config.args.map((x: any) => String(x)) : []),
+      env: envFromConfig,
+      packageName,
+      timeoutMs: Number(config?.timeoutMs || 45000),
+    });
+    const mcpToolName = String(config?.mcpToolName || '').trim();
+    const matched = discovered.find((entry: any) => String(entry?.name || '').trim() === mcpToolName);
+    if (matched?.inputSchema) return matched.inputSchema;
+    return {
+      type: 'object',
+      properties: {},
+      additionalProperties: true,
+    };
+  }
+
+  return {
+    type: 'object',
+    properties: {},
+    additionalProperties: true,
+  };
 }
 
 
@@ -868,6 +951,8 @@ registerMcpAdminRoutes({
   setSetting,
   refreshPersistentMirror,
   settingsKeyMcpAuthToken: SETTINGS_KEY_MCP_AUTH_TOKEN,
+  getToolInputSchemaForRecord,
+  executeTool,
 });
 
 // Per-project platform linkage (local project -> platform project)
@@ -1563,6 +1648,7 @@ app.post('/api/tools/import-mcp-package', async (req, res) => {
       command,
       args,
       env: envObject,
+      packageName: normalizedPackageName,
       timeoutMs: Number(timeoutMs || 45000),
     });
 
@@ -1581,10 +1667,13 @@ app.post('/api/tools/import-mcp-package', async (req, res) => {
       const localToolName = `${resolvedPrefix}_${slugifyValue(mcpToolName) || 'tool'}`;
       const toolDescription = String((discoveredTool as any)?.description || '').trim()
         || `Imported from npm MCP package "${normalizedPackageName}" as stdio tool "${mcpToolName}".`;
+      const wrapped = buildWrappedStdioCommand(command, args);
       const config = {
         packageName: normalizedPackageName,
-        command,
-        args,
+        rawCommand: command,
+        rawArgs: args,
+        command: wrapped.command,
+        args: wrapped.args,
         env: envObject,
         mcpToolName,
         timeoutMs: Number(timeoutMs || 45000),
@@ -1772,6 +1861,49 @@ app.post('/api/tools/import-mcp-package', async (req, res) => {
     });
   } catch (e: any) {
     res.status(400).json({ error: e?.message || 'Failed to import MCP package' });
+  }
+});
+
+app.get('/api/tools/:id/mcp-schema', async (req, res) => {
+  try {
+    const toolId = Number(req.params.id);
+    if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
+    const tool = db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId) as any;
+    if (!tool) return res.status(404).json({ error: 'Tool not found' });
+    const inputSchema = await getToolInputSchemaForRecord(tool);
+    res.json({
+      tool: {
+        id: tool.id,
+        name: tool.name,
+        description: tool.description || '',
+        type: tool.type,
+      },
+      inputSchema,
+    });
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to inspect MCP schema' });
+  }
+});
+
+app.post('/api/tools/:id/test-run', async (req, res) => {
+  try {
+    const toolId = Number(req.params.id);
+    if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
+    const tool = db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId) as any;
+    if (!tool) return res.status(404).json({ error: 'Tool not found' });
+    const args = req.body?.args && typeof req.body.args === 'object' ? req.body.args : {};
+    const result = await executeTool(tool.name, args, undefined, tool);
+    res.json({
+      success: true,
+      tool: {
+        id: tool.id,
+        name: tool.name,
+        type: tool.type,
+      },
+      result,
+    });
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to execute tool test' });
   }
 });
 
@@ -5025,6 +5157,10 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
     }
     const timeoutMs = Number(config?.timeoutMs || 45000);
     const envFromConfig = config?.env && typeof config.env === 'object' ? (config.env as Record<string, string>) : {};
+    const knownConfigError = getKnownMcpPackageConfigError(String(config?.packageName || ''), envFromConfig);
+    if (knownConfigError) {
+      return `[MCP Stdio Error] ${knownConfigError}`;
+    }
     const env = { ...process.env, ...envFromConfig };
 
     const client = new Client({ name: 'agentic-orchestrator', version: '1.0.0' }, { capabilities: {} });

@@ -58,8 +58,51 @@ interface CredentialOption {
   category?: string;
 }
 
+interface McpTestTool {
+  tool_id: number;
+  tool_name: string;
+  exposed_name?: string | null;
+  description?: string;
+  tool_type?: string;
+  inputSchema?: {
+    type?: string;
+    properties?: Record<string, { type?: string; description?: string }>;
+    required?: string[];
+    additionalProperties?: boolean;
+  };
+}
+
+interface BundleTestPayload {
+  bundle: {
+    id: number;
+    name: string;
+    slug: string;
+    description?: string;
+  };
+  tools: McpTestTool[];
+}
+
 function slugify(input: string) {
   return input.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_').replace(/_+/g, '_');
+}
+
+function stringifyTestValue(type: string | undefined, raw: string) {
+  const value = raw.trim();
+  if (value === '') return undefined;
+  if (type === 'number' || type === 'integer') {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) throw new Error(`Expected a number, received "${raw}"`);
+    return parsed;
+  }
+  if (type === 'boolean') {
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    throw new Error(`Expected true or false, received "${raw}"`);
+  }
+  if (type === 'object' || type === 'array') {
+    return JSON.parse(value);
+  }
+  return raw;
 }
 
 export default function McpPage() {
@@ -100,6 +143,13 @@ export default function McpPage() {
   const [restoringVersionId, setRestoringVersionId] = useState<number | null>(null);
   const [bundleDeleteState, setBundleDeleteState] = useState<null | { bundle: McpBundle; message?: string }>(null);
   const [expandedBundleIds, setExpandedBundleIds] = useState<number[]>([]);
+  const [bundleTestState, setBundleTestState] = useState<BundleTestPayload | null>(null);
+  const [bundleTestLoading, setBundleTestLoading] = useState(false);
+  const [bundleTestSelectedToolId, setBundleTestSelectedToolId] = useState<string>('');
+  const [bundleTestValues, setBundleTestValues] = useState<Record<string, string>>({});
+  const [bundleTestError, setBundleTestError] = useState<string>('');
+  const [bundleTestResult, setBundleTestResult] = useState<string>('');
+  const [bundleTestRunning, setBundleTestRunning] = useState(false);
 
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
   const streamableUrl = `${origin}/mcp`;
@@ -451,6 +501,69 @@ export default function McpPage() {
     ));
   };
 
+  const openBundleTester = async (bundle: McpBundle) => {
+    setBundleTestLoading(true);
+    setBundleTestError('');
+    setBundleTestResult('');
+    setBundleTestValues({});
+    setBundleTestSelectedToolId('');
+    try {
+      const res = await fetch(`/api/mcp/bundles/${bundle.id}/test-tools`);
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error || 'Failed to load bundle tools');
+      setBundleTestState(data);
+      if (Array.isArray(data?.tools) && data.tools.length > 0) {
+        setBundleTestSelectedToolId(String(data.tools[0].tool_id));
+      }
+    } catch (e: any) {
+      setLoadError(e.message || 'Failed to open bundle tester');
+    } finally {
+      setBundleTestLoading(false);
+    }
+  };
+
+  const selectedBundleTestTool = useMemo(() => {
+    if (!bundleTestState) return null;
+    return bundleTestState.tools.find((tool) => String(tool.tool_id) === bundleTestSelectedToolId) || null;
+  }, [bundleTestState, bundleTestSelectedToolId]);
+
+  const runBundleToolTest = async () => {
+    if (!bundleTestState || !selectedBundleTestTool) return;
+    setBundleTestError('');
+    setBundleTestResult('');
+    setBundleTestRunning(true);
+    try {
+      const schema = selectedBundleTestTool.inputSchema || { properties: {}, required: [] };
+      const properties = schema.properties || {};
+      const required = new Set((schema.required || []).map((key) => String(key)));
+      const args: Record<string, any> = {};
+      for (const [key, property] of Object.entries(properties) as Array<[string, { type?: string; description?: string }]>) {
+        const rawValue = bundleTestValues[key] ?? '';
+        if (!rawValue.trim()) {
+          if (required.has(key)) throw new Error(`"${key}" is required`);
+          continue;
+        }
+        args[key] = stringifyTestValue(property?.type, rawValue);
+      }
+
+      const res = await fetch(`/api/mcp/bundles/${bundleTestState.bundle.id}/test-run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tool_id: selectedBundleTestTool.tool_id,
+          args,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error || 'Failed to execute bundle tool');
+      setBundleTestResult(String(data?.result || ''));
+    } catch (e: any) {
+      setBundleTestError(e.message || 'Failed to execute bundle tool');
+    } finally {
+      setBundleTestRunning(false);
+    }
+  };
+
   const getBundleVersionToolIds = (toolIds?: string) => {
     if (!toolIds) return [];
     try {
@@ -570,6 +683,13 @@ export default function McpPage() {
                           className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200"
                         >
                           Connect
+                        </button>
+                        <button
+                          onClick={() => void openBundleTester(bundle)}
+                          disabled={bundleTestLoading}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-50 text-cyan-700 border border-cyan-200"
+                        >
+                          {bundleTestLoading ? 'Loading...' : 'Test Tools'}
                         </button>
                         <button
                           onClick={() => toggleBundleExposure(bundle.id, !bundle.is_exposed)}
@@ -1113,6 +1233,103 @@ export default function McpPage() {
             <div className="p-5 border-t border-slate-100 bg-slate-50 flex justify-end gap-2">
               <button onClick={() => setBundleDeleteState(null)} className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100">Cancel</button>
               <button onClick={() => void deleteBundle(bundleDeleteState.bundle.id, true)} className="px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700">Force Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {bundleTestState && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-white w-full max-w-4xl rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
+            <div className="p-5 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <div className="text-lg font-semibold text-slate-900">Test Bundle Tools</div>
+                <div className="text-xs text-slate-500">{bundleTestState.bundle.name} · {bundleTestState.bundle.slug}</div>
+              </div>
+              <button onClick={() => setBundleTestState(null)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
+            </div>
+            <div className="p-5 grid grid-cols-1 lg:grid-cols-[260px,1fr] gap-5 max-h-[75vh] overflow-y-auto">
+              <div className="space-y-2">
+                <div className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Tools</div>
+                {bundleTestState.tools.map((tool) => (
+                  <button
+                    key={tool.tool_id}
+                    onClick={() => {
+                      setBundleTestSelectedToolId(String(tool.tool_id));
+                      setBundleTestValues({});
+                      setBundleTestError('');
+                      setBundleTestResult('');
+                    }}
+                    className={`w-full text-left rounded-xl border px-3 py-3 ${bundleTestSelectedToolId === String(tool.tool_id) ? 'border-cyan-300 bg-cyan-50' : 'border-slate-200 bg-white'}`}
+                  >
+                    <div className="text-sm font-semibold text-slate-900">{tool.exposed_name || tool.tool_name}</div>
+                    <div className="text-xs text-slate-500 mt-1">{tool.description || 'No description'}</div>
+                  </button>
+                ))}
+              </div>
+              <div className="space-y-4">
+                {selectedBundleTestTool ? (
+                  <>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="text-sm font-semibold text-slate-900">{selectedBundleTestTool.exposed_name || selectedBundleTestTool.tool_name}</div>
+                      <div className="text-xs text-slate-500 mt-1">{selectedBundleTestTool.description || 'No description'}</div>
+                    </div>
+
+                    {Object.entries(selectedBundleTestTool.inputSchema?.properties || {}).length > 0 ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {(Object.entries(selectedBundleTestTool.inputSchema?.properties || {}) as Array<[string, { type?: string; description?: string }]>).map(([key, property]) => {
+                          const isRequired = (selectedBundleTestTool.inputSchema?.required || []).includes(key);
+                          return (
+                            <div key={key}>
+                              <label className="block text-sm font-medium text-slate-700 mb-1">
+                                {key} {isRequired && <span className="text-red-500">*</span>}
+                              </label>
+                              <input
+                                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-cyan-500"
+                                value={bundleTestValues[key] || ''}
+                                onChange={(e) => setBundleTestValues((prev) => ({ ...prev, [key]: e.target.value }))}
+                                placeholder={
+                                  property?.type === 'object' ? '{"key":"value"}'
+                                  : property?.type === 'array' ? '["item"]'
+                                  : property?.type === 'boolean' ? 'true'
+                                  : property?.type === 'number' || property?.type === 'integer' ? '123'
+                                  : `Enter ${key}`
+                                }
+                              />
+                              <div className="mt-1 text-xs text-slate-500">
+                                {(property?.type || 'string')}{property?.description ? ` · ${property.description}` : ''}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="text-sm text-slate-500 border border-dashed border-slate-200 rounded-lg p-4">
+                        This tool does not declare structured inputs. Run it directly if it accepts empty args.
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => void runBundleToolTest()}
+                        disabled={bundleTestRunning}
+                        className="px-4 py-2 rounded-lg bg-cyan-600 text-white hover:bg-cyan-700 disabled:opacity-60 text-sm font-semibold"
+                      >
+                        {bundleTestRunning ? 'Running...' : 'Run Tool Test'}
+                      </button>
+                      {bundleTestError && <div className="text-sm text-red-600">{bundleTestError}</div>}
+                    </div>
+
+                    {bundleTestResult && (
+                      <pre className="rounded-xl bg-slate-950 text-slate-100 p-4 text-xs overflow-auto whitespace-pre-wrap">
+                        {bundleTestResult}
+                      </pre>
+                    )}
+                  </>
+                ) : (
+                  <div className="text-sm text-slate-500">Select a tool to start testing.</div>
+                )}
+              </div>
             </div>
           </div>
         </div>

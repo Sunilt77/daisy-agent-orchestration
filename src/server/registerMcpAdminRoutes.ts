@@ -8,6 +8,8 @@ type RegisterMcpAdminRoutesDeps = {
   setSetting: (key: string, value: string | null) => Promise<void>;
   refreshPersistentMirror: () => Promise<void>;
   settingsKeyMcpAuthToken: string;
+  getToolInputSchemaForRecord: (tool: any) => Promise<any>;
+  executeTool: (toolName: string, args: any, mcpClients?: Map<string, any>, toolRecord?: any) => Promise<string>;
 };
 
 function getMcpBundleDependencies(db: any, bundleId: number) {
@@ -32,6 +34,8 @@ export function registerMcpAdminRoutes({
   setSetting,
   refreshPersistentMirror,
   settingsKeyMcpAuthToken,
+  getToolInputSchemaForRecord,
+  executeTool,
 }: RegisterMcpAdminRoutesDeps) {
   app.get('/api/mcp/config', (_req, res) => {
     const token = getSetting(settingsKeyMcpAuthToken);
@@ -344,6 +348,91 @@ export function registerMcpAdminRoutes({
     `).all(bundleId);
     const dependencies = getMcpBundleDependencies(db, bundleId);
     res.json({ bundle, versions, dependencies });
+  });
+
+  app.get('/api/mcp/bundles/:id/test-tools', async (req, res) => {
+    const bundleId = Number(req.params.id);
+    if (!Number.isFinite(bundleId)) return res.status(400).json({ error: 'Invalid bundle id' });
+    try {
+      const bundle = db.prepare('SELECT id, name, slug, description FROM mcp_bundles WHERE id = ?').get(bundleId) as any;
+      if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
+
+      const tools = db.prepare(`
+        SELECT
+          t.*,
+          COALESCE(e.exposed_name, t.name) AS effective_name,
+          COALESCE(e.description, t.description) AS effective_description
+        FROM mcp_bundle_tools bt
+        JOIN tools t ON t.id = bt.tool_id
+        LEFT JOIN mcp_exposed_tools e ON e.tool_id = t.id
+        WHERE bt.bundle_id = ?
+        ORDER BY t.name COLLATE NOCASE ASC
+      `).all(bundleId) as any[];
+
+      const enriched = await Promise.all(tools.map(async (tool) => ({
+        tool_id: tool.id,
+        tool_name: tool.name,
+        exposed_name: tool.effective_name,
+        description: tool.effective_description || '',
+        tool_type: tool.type,
+        inputSchema: await getToolInputSchemaForRecord(tool),
+      })));
+
+      res.json({
+        bundle: {
+          id: bundle.id,
+          name: bundle.name,
+          slug: bundle.slug,
+          description: bundle.description || '',
+        },
+        tools: enriched,
+      });
+    } catch (e: any) {
+      res.status(400).json({ error: e?.message || 'Failed to load bundle test tools' });
+    }
+  });
+
+  app.post('/api/mcp/bundles/:id/test-run', async (req, res) => {
+    const bundleId = Number(req.params.id);
+    if (!Number.isFinite(bundleId)) return res.status(400).json({ error: 'Invalid bundle id' });
+    try {
+      const toolId = Number(req.body?.tool_id);
+      if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'tool_id is required' });
+      const bundle = db.prepare('SELECT id, name, slug, description FROM mcp_bundles WHERE id = ?').get(bundleId) as any;
+      if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
+      const tool = db.prepare(`
+        SELECT
+          t.*,
+          COALESCE(e.exposed_name, t.name) AS effective_name,
+          COALESCE(e.description, t.description) AS effective_description
+        FROM mcp_bundle_tools bt
+        JOIN tools t ON t.id = bt.tool_id
+        LEFT JOIN mcp_exposed_tools e ON e.tool_id = t.id
+        WHERE bt.bundle_id = ? AND t.id = ?
+        LIMIT 1
+      `).get(bundleId, toolId) as any;
+      if (!tool) return res.status(404).json({ error: 'Bundled tool not found' });
+
+      const args = req.body?.args && typeof req.body.args === 'object' ? req.body.args : {};
+      const result = await executeTool(tool.name, args, undefined, tool);
+      res.json({
+        success: true,
+        bundle: {
+          id: bundle.id,
+          name: bundle.name,
+          slug: bundle.slug,
+        },
+        tool: {
+          id: tool.id,
+          name: tool.name,
+          exposed_name: tool.effective_name,
+          type: tool.type,
+        },
+        result,
+      });
+    } catch (e: any) {
+      res.status(400).json({ error: e?.message || 'Failed to execute bundled tool test' });
+    }
   });
 
   app.put('/api/mcp/bundles/:id/exposure', async (req, res) => {
