@@ -52,6 +52,7 @@ export default function VoicePage() {
   const [voiceProgress, setVoiceProgress] = useState<Array<{ id: string; text: string; ts: string }>>([]);
   const [lastAudioSrc, setLastAudioSrc] = useState('');
   const [error, setError] = useState('');
+  const [statusNote, setStatusNote] = useState('');
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -175,6 +176,7 @@ export default function VoicePage() {
   const connect = () => {
     if (!targetId) return;
     setError('');
+    setStatusNote('');
     const url = new URL(`${window.location.origin.replace(/^http/, 'ws')}/ws/voice`);
     url.searchParams.set('targetType', targetType);
     url.searchParams.set('targetId', String(targetId));
@@ -187,6 +189,9 @@ export default function VoicePage() {
     url.searchParams.set('autoTts', autoTts ? 'true' : 'false');
     const ws = new WebSocket(url);
     wsRef.current = ws;
+    if (targetType === 'agent') {
+      void saveProfile();
+    }
     ws.onopen = () => {
       setIsConnected(true);
       pushEvent('socket.open', { targetType, targetId: Number(targetId) });
@@ -196,8 +201,11 @@ export default function VoicePage() {
         const message = JSON.parse(String(event.data || '{}'));
         pushEvent(message.type || 'message', message);
         if (message.type === 'session.started') setSessionId(String(message.sessionId || ''));
+        if (message.type === 'session.started') setStatusNote('Connected. Start speaking and committed speech will invoke the selected runtime automatically.');
+        if (message.type === 'stt.partial') setLiveTranscript(String(message.text || ''));
         if (message.type === 'stt.final') setLiveTranscript(String(message.text || ''));
         if (message.type === 'agent.reply') setAgentReply(String(message.text || ''));
+        if (message.type === 'voice.busy') setStatusNote(String(message.message || 'The runtime is still processing the previous utterance.'));
         if (message.type === 'voice.progress' && message.text) {
           setVoiceProgress((prev) => [
             { id: `${Date.now()}_${prev.length}`, text: String(message.text || ''), ts: new Date().toISOString() },
@@ -227,6 +235,7 @@ export default function VoicePage() {
       sourceRef.current?.disconnect();
       audioContextRef.current?.close().catch(() => undefined);
       audioContextRef.current = null;
+      setStatusNote('');
       pushEvent('socket.closed', {});
     };
   };
@@ -244,6 +253,7 @@ export default function VoicePage() {
     if (!text || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     setLiveTranscript(text);
     wsRef.current.send(JSON.stringify({ type: 'transcript.commit', text }));
+    setStatusNote('Manual text submitted to the selected runtime.');
     setTextInput('');
   };
 
@@ -306,6 +316,7 @@ export default function VoicePage() {
     source.connect(processor);
     processor.connect(audioContext.destination);
     setIsRecording(true);
+    setStatusNote('Listening live. ElevenLabs committed speech segments will invoke the selected runtime automatically.');
   };
 
   const stopRecording = () => {
@@ -317,8 +328,8 @@ export default function VoicePage() {
     processorRef.current = null;
     sourceRef.current = null;
     streamRef.current = null;
-    wsRef.current?.send(JSON.stringify({ type: 'transcript.commit' }));
     setIsRecording(false);
+    setStatusNote('Microphone stopped. Waiting for any final committed speech segment.');
   };
 
   useEffect(() => {
@@ -440,12 +451,12 @@ export default function VoicePage() {
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-4">
-            <div className="text-sm font-semibold text-slate-900">Transcript Input</div>
+            <div className="text-sm font-semibold text-slate-900">Realtime Voice Preview</div>
             <textarea
               className="min-h-[120px] w-full rounded-xl border border-slate-300 px-3 py-3 text-sm"
               value={textInput}
               onChange={(e) => setTextInput(e.target.value)}
-              placeholder="Type a transcript manually, or record your voice below and let ElevenLabs transcribe on stop."
+              placeholder="Optional fallback: type text manually if you want to trigger the selected runtime without using the microphone."
             />
             <div className="flex flex-wrap items-center gap-2">
               <button
@@ -454,7 +465,7 @@ export default function VoicePage() {
                 className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40 inline-flex items-center gap-2"
               >
                 <Send size={14} />
-                Send Transcript
+                Send Manual Text
               </button>
               <button
                 onClick={isRecording ? stopRecording : startRecording}
@@ -468,8 +479,9 @@ export default function VoicePage() {
               </button>
             </div>
             <div className="rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-xs text-cyan-900">
-              Mic audio now streams as PCM chunks over the platform WebSocket. ElevenLabs realtime STT can emit transcript events during capture, and stopping the mic commits the utterance for the agent response.
+              Mic audio streams live to ElevenLabs STT. Committed speech segments automatically invoke the selected agent or crew, and the current voice settings are reused for future sessions.
             </div>
+            {statusNote ? <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">{statusNote}</div> : null}
             {error ? <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div> : null}
           </div>
         </section>

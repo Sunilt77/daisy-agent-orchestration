@@ -795,6 +795,8 @@ type VoiceSocketContext = {
   sttSocket?: WebSocket | null;
   lastVoiceProgressAt?: number;
   lastVoiceProgressText?: string;
+  isExecuting?: boolean;
+  lastCommittedTranscript?: string;
 };
 
 const DEFAULT_VOICE_ID = process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'JBFqnCBsd6RMkjVDRZzb';
@@ -1096,12 +1098,150 @@ async function emitVoiceProgress(ws: WebSocket, ctx: VoiceSocketContext, summary
     });
 }
 
+async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSocketContext, transcriptText: string) {
+  const transcript = String(transcriptText || '').trim();
+  if (!transcript) return;
+  if (current.isExecuting) {
+    sendVoiceSocketEvent(ws, 'voice.busy', { sessionId: current.sessionId, message: 'Voice target is still processing the previous utterance.' });
+    return;
+  }
+  if (current.lastCommittedTranscript === transcript) return;
+
+  current.isExecuting = true;
+  current.lastCommittedTranscript = transcript;
+  try {
+    updateVoiceSession(current.sessionId, { status: 'processing', transcript });
+    appendVoiceSessionEvent(current.sessionId, 'stt.final', { text: transcript });
+    sendVoiceSocketEvent(ws, 'stt.final', { sessionId: current.sessionId, text: transcript });
+    await emitVoiceProgress(ws, current, `Understood. Starting ${current.targetName}.`, {
+      targetType: current.targetType,
+      targetId: current.targetId,
+    });
+
+    let reply = '';
+    let executionId: number | null = null;
+    let usage: any = null;
+
+    if (current.targetType === 'crew') {
+      const crewId = current.targetId;
+      const info = db.prepare('INSERT INTO crew_executions (crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?)')
+        .run(crewId, 'pending', JSON.stringify([]), transcript || '', null);
+      executionId = Number(info.lastInsertRowid);
+      db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
+        .run(executionId, 'thought', JSON.stringify({ agent: 'system', message: 'Voice-triggered crew run queued.' }));
+      sendVoiceSocketEvent(ws, 'runtime.event', { event: { type: 'status', message: 'Crew execution queued' }, executionId });
+      await emitVoiceProgress(ws, current, `${current.targetName} has been queued and will start shortly.`, { executionId });
+      await enqueueJob('run_crew', {
+        crewId,
+        executionId,
+        initialInput: transcript || '',
+        initiatedBy: 'voice_console',
+      });
+
+      let lastLogCount = 0;
+      while (true) {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        const logs = readCrewExecutionLogs(executionId);
+        const newLogs = logs.slice(lastLogCount);
+        lastLogCount = logs.length;
+        for (const log of newLogs) {
+          appendVoiceSessionEvent(current.sessionId, 'runtime.event', log);
+          sendVoiceSocketEvent(ws, 'runtime.event', { event: log, executionId });
+          await emitVoiceProgress(ws, current, buildVoiceProgressUpdate(log, current.targetType, current.targetName), {
+            executionId,
+            logType: log?.type || null,
+          });
+        }
+        const execution = db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any;
+        const status = String(execution?.status || 'pending');
+        if (status === 'completed' || status === 'failed' || status === 'canceled') {
+          reply = extractCrewFinalResult(logs).trim();
+          if (!reply) {
+            const lastError = [...logs].reverse().find((log: any) => log?.type === 'error');
+            reply = String(lastError?.message || `Crew run ${status}.`).trim();
+          }
+          break;
+        }
+      }
+    } else {
+      const agentRow = db.prepare('SELECT * FROM agents WHERE id = ?').get(current.agentId) as any;
+      if (!agentRow) throw new Error('Agent not found');
+      const agentSession = await ensureAgentSession(current.agentId, current.sessionId, `voice_${current.sessionId}`);
+      sendVoiceSocketEvent(ws, 'runtime.event', { event: { type: 'status', message: 'Agent execution started' } });
+
+      const result = await runAgent(
+        agentRow,
+        { description: transcript, expected_output: 'A helpful spoken response.' },
+        '',
+        (log) => {
+          appendVoiceSessionEvent(current.sessionId, 'runtime.event', log);
+          sendVoiceSocketEvent(ws, 'runtime.event', { event: log });
+          void emitVoiceProgress(ws, current, buildVoiceProgressUpdate(log, current.targetType, current.targetName), {
+            logType: log?.type || null,
+          });
+        },
+        {
+          initiatedBy: 'voice_console',
+          sessionId: agentSession.id,
+          userId: agentSession.user_id ?? `voice_${current.sessionId}`,
+        }
+      );
+      reply = String(result?.text || '').trim();
+      executionId = Number(result?.exec_id || 0) || null;
+      usage = result?.usage ?? null;
+    }
+
+    updateVoiceSession(current.sessionId, { status: 'speaking', reply_text: reply });
+    appendVoiceSessionEvent(current.sessionId, 'agent.reply', {
+      text: reply,
+      execution_id: executionId,
+      usage,
+    });
+    sendVoiceSocketEvent(ws, 'agent.reply', {
+      sessionId: current.sessionId,
+      text: reply,
+      executionId,
+      usage,
+    });
+
+    if (reply && current.autoTts) {
+      sendVoiceSocketEvent(ws, 'tts.processing', { sessionId: current.sessionId });
+      const audio = await synthesizeVoiceAudio(reply, current.voiceId, current.ttsModelId, current.outputFormat);
+      appendVoiceSessionEvent(current.sessionId, 'tts.audio', {
+        bytes: audio.length,
+        output_format: current.outputFormat,
+      });
+      sendVoiceSocketEvent(ws, 'tts.audio', {
+        sessionId: current.sessionId,
+        audio: audio.toString('base64'),
+        mimeType: current.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
+        outputFormat: current.outputFormat,
+      });
+    }
+
+    updateVoiceSession(current.sessionId, { status: 'completed' });
+    appendVoiceSessionEvent(current.sessionId, 'session.completed', {});
+    sendVoiceSocketEvent(ws, 'session.completed', { sessionId: current.sessionId });
+  } finally {
+    current.isExecuting = false;
+  }
+}
+
 function openRealtimeSttSocket(ctx: VoiceSocketContext, browserSocket: WebSocket) {
   const apiKey = getVoiceCredentialApiKey();
   if (!apiKey) throw new Error('ElevenLabs voice credential is not configured.');
   if (ctx.sttSocket && ctx.sttSocket.readyState === WebSocket.OPEN) return ctx.sttSocket;
 
-  const url = `wss://api.elevenlabs.io/v1/speech-to-text/realtime?model_id=${encodeURIComponent(ctx.sttModelId || DEFAULT_STT_MODEL)}&sample_rate=${encodeURIComponent(String(ctx.sampleRate || DEFAULT_STT_SAMPLE_RATE))}`;
+  const params = new URLSearchParams({
+    model_id: String(ctx.sttModelId || DEFAULT_STT_MODEL),
+    sample_rate: String(ctx.sampleRate || DEFAULT_STT_SAMPLE_RATE),
+    audio_format: `pcm_${ctx.sampleRate || DEFAULT_STT_SAMPLE_RATE}`,
+    commit_strategy: 'vad',
+  });
+  if (ctx.languageCode) {
+    params.set('language_code', ctx.languageCode);
+  }
+  const url = `wss://api.elevenlabs.io/v1/speech-to-text/realtime?${params.toString()}`;
   const sttSocket = new WebSocket(url, {
     headers: {
       'xi-api-key': apiKey,
@@ -1117,12 +1257,20 @@ function openRealtimeSttSocket(ctx: VoiceSocketContext, browserSocket: WebSocket
       const payload = JSON.parse(String(raw || '{}'));
       appendVoiceSessionEvent(ctx.sessionId, 'stt.realtime', payload);
       const partial = String(payload?.text || payload?.transcript || '').trim();
-      const normalizedType = payload?.is_final || payload?.final ? 'stt.final' : 'stt.partial';
-      if (partial) {
+      const messageType = String(payload?.message_type || '');
+      const normalizedType =
+        messageType === 'committed_transcript' || messageType === 'committed_transcript_with_timestamps' || payload?.is_final || payload?.final
+          ? 'stt.final'
+          : messageType === 'partial_transcript'
+            ? 'stt.partial'
+            : 'stt.event';
+      if (partial && normalizedType !== 'stt.event') {
         if (normalizedType === 'stt.final') {
           updateVoiceSession(ctx.sessionId, { transcript: partial });
+          void executeVoiceTargetFromTranscript(browserSocket, ctx, partial);
+        } else {
+          sendVoiceSocketEvent(browserSocket, normalizedType, { sessionId: ctx.sessionId, text: partial, raw: payload });
         }
-        sendVoiceSocketEvent(browserSocket, normalizedType, { sessionId: ctx.sessionId, text: partial, raw: payload });
       } else {
         sendVoiceSocketEvent(browserSocket, 'stt.event', { sessionId: ctx.sessionId, raw: payload });
       }
@@ -8331,6 +8479,17 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
             languageCode: current.languageCode,
             autoTts: current.autoTts,
           });
+          if (current.targetType === 'agent') {
+            saveAgentVoiceProfile(current.agentId, {
+              voice_id: current.voiceId,
+              tts_model_id: current.ttsModelId,
+              stt_model_id: current.sttModelId,
+              output_format: current.outputFormat,
+              sample_rate: current.sampleRate,
+              language_code: current.languageCode,
+              auto_tts: current.autoTts,
+            });
+          }
           sendVoiceSocketEvent(ws, 'session.updated', { sessionId: current.sessionId });
           return;
         }
@@ -8341,8 +8500,8 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
           const sttSocket = openRealtimeSttSocket(current, ws);
           if (sttSocket.readyState === WebSocket.OPEN) {
             sttSocket.send(JSON.stringify({
-              audio: chunk,
-              language_code: current.languageCode,
+              message_type: 'input_audio_chunk',
+              audio_base_64: chunk,
             }));
           }
           return;
@@ -8374,132 +8533,10 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
         if (type === 'transcript.commit') {
           let transcript = String(message.text || '').trim();
           if (!transcript) {
-            const existingTranscript = String(getVoiceSession(current.sessionId)?.transcript || '').trim();
-            if (existingTranscript) {
-              transcript = existingTranscript;
-            } else {
-              const audioBuffer = Buffer.concat(current.audioChunks);
-              if (!audioBuffer.length) throw new Error('Provide text or recorded audio before commit.');
-              sendVoiceSocketEvent(ws, 'stt.processing', { sessionId: current.sessionId });
-              transcript = await transcribeVoiceAudio(audioBuffer, current.audioMimeType, current.sttModelId);
-              current.audioChunks = [];
-            }
+            transcript = String(getVoiceSession(current.sessionId)?.transcript || '').trim();
           }
-
-          if (!transcript) throw new Error('No transcript was produced.');
-
-          updateVoiceSession(current.sessionId, { status: 'processing', transcript });
-          appendVoiceSessionEvent(current.sessionId, 'stt.final', { text: transcript });
-          sendVoiceSocketEvent(ws, 'stt.final', { sessionId: current.sessionId, text: transcript });
-          await emitVoiceProgress(ws, current, `Understood. Starting ${current.targetName}.`, {
-            targetType: current.targetType,
-            targetId: current.targetId,
-          });
-
-          let reply = '';
-          let executionId: number | null = null;
-          let usage: any = null;
-
-          if (current.targetType === 'crew') {
-            const crewId = current.targetId;
-            const info = db.prepare('INSERT INTO crew_executions (crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?)')
-              .run(crewId, 'pending', JSON.stringify([]), transcript || '', null);
-            executionId = Number(info.lastInsertRowid);
-            db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
-              .run(executionId, 'thought', JSON.stringify({ agent: 'system', message: 'Voice-triggered crew run queued.' }));
-            sendVoiceSocketEvent(ws, 'runtime.event', { event: { type: 'status', message: 'Crew execution queued' }, executionId });
-            await emitVoiceProgress(ws, current, `${current.targetName} has been queued and will start shortly.`, { executionId });
-            await enqueueJob('run_crew', {
-              crewId,
-              executionId,
-              initialInput: transcript || '',
-              initiatedBy: 'voice_console',
-            });
-
-            let lastLogCount = 0;
-            while (true) {
-              await new Promise((resolve) => setTimeout(resolve, 700));
-              const logs = readCrewExecutionLogs(executionId);
-              const newLogs = logs.slice(lastLogCount);
-              lastLogCount = logs.length;
-              for (const log of newLogs) {
-                appendVoiceSessionEvent(current.sessionId, 'runtime.event', log);
-                sendVoiceSocketEvent(ws, 'runtime.event', { event: log, executionId });
-                await emitVoiceProgress(ws, current, buildVoiceProgressUpdate(log, current.targetType, current.targetName), {
-                  executionId,
-                  logType: log?.type || null,
-                });
-              }
-              const execution = db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any;
-              const status = String(execution?.status || 'pending');
-              if (status === 'completed' || status === 'failed' || status === 'canceled') {
-                reply = extractCrewFinalResult(logs).trim();
-                if (!reply) {
-                  const lastError = [...logs].reverse().find((log: any) => log?.type === 'error');
-                  reply = String(lastError?.message || `Crew run ${status}.`).trim();
-                }
-                break;
-              }
-            }
-          } else {
-            const agentRow = db.prepare('SELECT * FROM agents WHERE id = ?').get(current.agentId) as any;
-            if (!agentRow) throw new Error('Agent not found');
-            const agentSession = await ensureAgentSession(current.agentId, current.sessionId, `voice_${current.sessionId}`);
-            sendVoiceSocketEvent(ws, 'runtime.event', { event: { type: 'status', message: 'Agent execution started' } });
-
-            const result = await runAgent(
-              agentRow,
-              { description: transcript, expected_output: 'A helpful spoken response.' },
-              '',
-              (log) => {
-                appendVoiceSessionEvent(current.sessionId, 'runtime.event', log);
-                sendVoiceSocketEvent(ws, 'runtime.event', { event: log });
-                void emitVoiceProgress(ws, current, buildVoiceProgressUpdate(log, current.targetType, current.targetName), {
-                  logType: log?.type || null,
-                });
-              },
-              {
-                initiatedBy: 'voice_console',
-                sessionId: agentSession.id,
-                userId: agentSession.user_id ?? `voice_${current.sessionId}`,
-              }
-            );
-            reply = String(result?.text || '').trim();
-            executionId = Number(result?.exec_id || 0) || null;
-            usage = result?.usage ?? null;
-          }
-
-          updateVoiceSession(current.sessionId, { status: 'speaking', reply_text: reply });
-          appendVoiceSessionEvent(current.sessionId, 'agent.reply', {
-            text: reply,
-            execution_id: executionId,
-            usage,
-          });
-          sendVoiceSocketEvent(ws, 'agent.reply', {
-            sessionId: current.sessionId,
-            text: reply,
-            executionId,
-            usage,
-          });
-
-          if (reply && current.autoTts) {
-            sendVoiceSocketEvent(ws, 'tts.processing', { sessionId: current.sessionId });
-            const audio = await synthesizeVoiceAudio(reply, current.voiceId, current.ttsModelId, current.outputFormat);
-            appendVoiceSessionEvent(current.sessionId, 'tts.audio', {
-              bytes: audio.length,
-              output_format: current.outputFormat,
-            });
-            sendVoiceSocketEvent(ws, 'tts.audio', {
-              sessionId: current.sessionId,
-              audio: audio.toString('base64'),
-              mimeType: current.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
-              outputFormat: current.outputFormat,
-            });
-          }
-
-          updateVoiceSession(current.sessionId, { status: 'completed' });
-          appendVoiceSessionEvent(current.sessionId, 'session.completed', {});
-          sendVoiceSocketEvent(ws, 'session.completed', { sessionId: current.sessionId });
+          if (!transcript) throw new Error('No committed transcript is available yet.');
+          await executeVoiceTargetFromTranscript(ws, current, transcript);
           return;
         }
 
