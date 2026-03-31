@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Users, Settings, Wrench, Key, Folder, Building2, Server, Activity, Sparkles, LogOut, DollarSign, Plug, ListChecks, MessageSquare, PanelLeftClose, PanelLeftOpen, ChevronsRight, Workflow, Database, AudioLines } from 'lucide-react';
+import { LayoutDashboard, Users, Settings, Wrench, Key, Folder, Building2, Server, Activity, Sparkles, LogOut, DollarSign, Plug, ListChecks, MessageSquare, PanelLeftClose, PanelLeftOpen, ChevronsRight, Workflow, Database, AudioLines, Radio } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuth } from '../utils/auth';
 
@@ -47,6 +47,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     { icon: Users, label: 'Agents', path: '/agents' },
     { icon: MessageSquare, label: 'Agent Chat', path: '/agent-chat' },
     { icon: AudioLines, label: 'Voice Console', path: '/voice' },
+    { icon: Radio, label: 'Voice Agents', path: '/voice-agents' },
     { icon: Workflow, label: 'Workflows', path: '/workflows' },
     { icon: Sparkles, label: 'Crews', path: '/crews' },
     { icon: Wrench, label: 'Tools', path: '/tools' },

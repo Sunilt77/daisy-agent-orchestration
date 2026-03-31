@@ -31,6 +31,7 @@ const AgentExecutionPage = lazy(() => import('./pages/AgentExecutionPage'));
 const WorkflowsPage = lazy(() => import('./pages/WorkflowsPage'));
 const KnowledgebasePage = lazy(() => import('./pages/KnowledgebasePage'));
 const VoicePage = lazy(() => import('./pages/VoicePage'));
+const VoiceAgentsPage = lazy(() => import('./pages/VoiceAgentsPage'));
 
 const PageLoader = () => (
   <div className="flex h-64 w-full items-center justify-center">
@@ -72,6 +73,7 @@ export default function App() {
                         <Route path="/agent-executions/:id" element={<AgentExecutionPage />} />
                         <Route path="/agent-chat" element={<AgentChatPage />} />
                         <Route path="/voice" element={<VoicePage />} />
+                        <Route path="/voice-agents" element={<VoiceAgentsPage />} />
                         <Route path="/workflows" element={<WorkflowsPage />} />
                         <Route path="/crews" element={<CrewsPage />} />
                         <Route path="/tools" element={<ToolsPage />} />
