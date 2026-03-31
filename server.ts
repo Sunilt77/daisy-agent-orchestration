@@ -5001,10 +5001,18 @@ app.delete('/api/crews/:id', async (req, res) => {
     try {
         const crewId = Number(req.params.id);
         const prisma = getPrisma();
-        await prisma.orchestratorCrewExecution.deleteMany({ where: { crewId } });
+        await prisma.orchestratorCrew.delete({ where: { id: crewId } });
         await refreshPersistentMirror();
-        // Mirror to SQLite
+        try {
+          const executionIds = (db.prepare('SELECT id FROM crew_executions WHERE crew_id = ?').all(crewId) as any[]).map((row) => Number(row.id));
+          if (executionIds.length) {
+            db.prepare(`DELETE FROM crew_execution_logs WHERE execution_id IN (${executionIds.map(() => '?').join(',')})`).run(...executionIds);
+          }
+        } catch {}
         try { db.prepare('DELETE FROM crew_executions WHERE crew_id = ?').run(crewId); } catch {}
+        try { db.prepare('DELETE FROM tasks WHERE crew_id = ?').run(crewId); } catch {}
+        try { db.prepare('DELETE FROM crew_agents WHERE crew_id = ?').run(crewId); } catch {}
+        try { db.prepare('DELETE FROM crews WHERE id = ?').run(crewId); } catch {}
         console.log(`Crew ${crewId} deleted successfully`);
         res.json({ success: true });
     } catch (e: any) {

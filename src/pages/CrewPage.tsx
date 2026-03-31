@@ -4,6 +4,7 @@ import { Plus, Play, Trash2, CheckCircle2, Clock, Terminal, ArrowLeft, Globe, Co
 
 import CrewWorkflow from '../components/CrewWorkflow';
 import TaskAgentEditor from '../components/TaskAgentEditor';
+import { loadPersisted, savePersisted } from '../utils/persistence';
 
 interface Tool {
   id: number;
@@ -43,7 +44,7 @@ interface Crew {
 }
 
 interface Log {
-  timestamp: string;
+  timestamp?: string;
   type: 'start' | 'finish' | 'error' | 'thinking' | 'thought' | 'tool_call' | 'tool_result' | 'planner_handoff' | 'crew_summary' | 'crew_result' | 'canceled';
   agent?: string;
   task?: string;
@@ -51,10 +52,34 @@ interface Log {
   message?: string;
   tool?: string;
   args?: any;
+  title?: string;
+  status?: string;
+  child_execution_id?: number | null;
+  plan?: string[];
+}
+
+type CrewThreadMessage = {
+  role: 'user' | 'assistant';
+  content: string;
+  ts: string;
+  executionId?: number | null;
+};
+
+function buildCrewThreadContext(messages: CrewThreadMessage[], latestInput: string, recentCount = 6) {
+  const recent = messages.slice(-recentCount).map((message) => {
+    const label = message.role === 'user' ? 'User' : 'Crew';
+    return `${label}: ${message.content}`;
+  });
+  const current = String(latestInput || '').trim();
+  return [
+    recent.length ? `Conversation so far:\n${recent.join('\n\n')}` : '',
+    current ? `Latest user message:\n${current}` : '',
+  ].filter(Boolean).join('\n\n');
 }
 
 export default function CrewPage() {
   const { id } = useParams();
+  const threadStorageKey = `crew_thread_${id || 'unknown'}`;
   const [crew, setCrew] = useState<Crew | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -77,6 +102,8 @@ export default function CrewPage() {
   const [copied, setCopied] = useState(false);
   const runSectionRef = React.useRef<HTMLDivElement | null>(null);
   const streamRef = useRef<EventSource | null>(null);
+  const [threadMessages, setThreadMessages] = useState<CrewThreadMessage[]>([]);
+  const [threadLinkedExecutionIds, setThreadLinkedExecutionIds] = useState<number[]>([]);
 
   const [initialInput, setInitialInput] = useState('');
   const [newTask, setNewTask] = useState({
@@ -92,6 +119,19 @@ export default function CrewPage() {
   }, [id]);
 
   useEffect(() => {
+    const persisted = loadPersisted<{ messages?: CrewThreadMessage[]; linkedExecutionIds?: number[] }>(threadStorageKey, {});
+    setThreadMessages(Array.isArray(persisted?.messages) ? persisted.messages : []);
+    setThreadLinkedExecutionIds(Array.isArray(persisted?.linkedExecutionIds) ? persisted.linkedExecutionIds : []);
+  }, [threadStorageKey]);
+
+  useEffect(() => {
+    savePersisted(threadStorageKey, {
+      messages: threadMessages,
+      linkedExecutionIds: threadLinkedExecutionIds,
+    });
+  }, [threadMessages, threadLinkedExecutionIds, threadStorageKey]);
+
+  useEffect(() => {
     if (!isRunning || !executionId) return;
     if (streamRef.current) {
       streamRef.current.close();
@@ -103,7 +143,13 @@ export default function CrewPage() {
       try {
         const data = JSON.parse(event.data || '{}');
         const nextLogs = Array.isArray(data.logs) ? data.logs : [];
-        setLogs(prev => [...prev, ...nextLogs]);
+        setLogs(prev => {
+          if (!nextLogs.length) return prev;
+          return [...prev, ...nextLogs];
+        });
+        if (!nextLogs.length && Number(data.fullLogCount || 0) > 0) {
+          void fetchLogs(Number(executionId));
+        }
         if (data.status && data.status !== 'running') {
           setIsRunning(false);
         }
@@ -113,10 +159,12 @@ export default function CrewPage() {
     });
     es.addEventListener('done', () => {
       setIsRunning(false);
+      void fetchLogs(Number(executionId));
       es.close();
       streamRef.current = null;
     });
     es.onerror = () => {
+      void fetchLogs(Number(executionId));
       es.close();
       streamRef.current = null;
     };
@@ -124,6 +172,14 @@ export default function CrewPage() {
       es.close();
       if (streamRef.current === es) streamRef.current = null;
     };
+  }, [isRunning, executionId]);
+
+  useEffect(() => {
+    if (!isRunning || !executionId) return;
+    const timer = window.setInterval(() => {
+      void fetchLogs(Number(executionId));
+    }, 2000);
+    return () => window.clearInterval(timer);
   }, [isRunning, executionId]);
 
   const fetchCrewData = async () => {
@@ -154,11 +210,31 @@ export default function CrewPage() {
     setAgents(data);
   };
 
-  const fetchLogs = async () => {
-    if (!executionId) return;
-    const res = await fetch(`/api/executions/${executionId}`);
+  const fetchLogs = async (targetExecutionId?: number) => {
+    const resolvedExecutionId = Number(targetExecutionId || executionId || 0);
+    if (!resolvedExecutionId) return;
+    const res = await fetch(`/api/executions/${resolvedExecutionId}`);
     const data = await res.json();
     setLogs(data.logs || []);
+    const finalResult = Array.isArray(data.logs)
+      ? ([...data.logs].reverse().find((entry: any) => entry.type === 'crew_result' || entry.type === 'crew_summary')?.result || '')
+      : '';
+    if (
+      resolvedExecutionId &&
+      finalResult &&
+      !threadLinkedExecutionIds.includes(resolvedExecutionId)
+    ) {
+      setThreadMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: String(finalResult),
+          ts: new Date().toISOString(),
+          executionId: resolvedExecutionId,
+        },
+      ]);
+      setThreadLinkedExecutionIds((prev) => [...prev, resolvedExecutionId]);
+    }
     if (data.status === 'completed' || data.status === 'failed' || data.status === 'canceled') {
       setIsRunning(false);
     }
@@ -181,13 +257,25 @@ export default function CrewPage() {
   };
 
   const runCrew = async () => {
+    const trimmedInput = initialInput.trim();
+    const requestInitialInput = buildCrewThreadContext(threadMessages, trimmedInput);
     setIsRunning(true);
     setLogs([]);
     try {
+      if (trimmedInput) {
+        setThreadMessages((prev) => [
+          ...prev,
+          {
+            role: 'user',
+            content: trimmedInput,
+            ts: new Date().toISOString(),
+          },
+        ]);
+      }
       const res = await fetch(`/api/crews/${id}/kickoff`, { 
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initialInput })
+        body: JSON.stringify({ initialInput: requestInitialInput || trimmedInput })
       });
       const data = await res.json();
       if (!res.ok) {
@@ -197,6 +285,7 @@ export default function CrewPage() {
         throw new Error('Crew started but no execution id was returned');
       }
       setExecutionId(data.executionId);
+      setInitialInput('');
     } catch (e: any) {
       setIsRunning(false);
       setLogs([{
@@ -542,9 +631,56 @@ export default function CrewPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* Left Column: Tasks */}
         <div className="lg:col-span-2 space-y-6">
+          <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-800">Crew Conversation Thread</h2>
+                <p className="text-sm text-slate-500">Follow-up runs reuse recent thread context so the crew behaves more like a continuing conversation.</p>
+              </div>
+              {threadMessages.length > 0 && (
+                <button
+                  onClick={() => {
+                    setThreadMessages([]);
+                    setThreadLinkedExecutionIds([]);
+                  }}
+                  className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-red-600"
+                >
+                  <Trash2 size={14} /> Clear Thread
+                </button>
+              )}
+            </div>
+            <div className="max-h-[280px] overflow-y-auto space-y-3 rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+              {threadMessages.length === 0 ? (
+                <div className="text-sm text-slate-500">No conversation yet. Start with an objective or follow-up request below.</div>
+              ) : (
+                threadMessages.map((message, index) => (
+                  <div
+                    key={`${message.ts}-${index}`}
+                    className={`rounded-xl border px-4 py-3 text-sm whitespace-pre-wrap ${
+                      message.role === 'user'
+                        ? 'border-indigo-200 bg-indigo-50/80 text-slate-800'
+                        : 'border-emerald-200 bg-emerald-50/80 text-slate-800'
+                    }`}
+                  >
+                    <div className="mb-1 flex items-center justify-between gap-3 text-[11px] uppercase tracking-[0.18em]">
+                      <span className={message.role === 'user' ? 'text-indigo-600' : 'text-emerald-600'}>
+                        {message.role === 'user' ? 'User' : 'Crew'}
+                      </span>
+                      <span className="text-slate-400">
+                        {new Date(message.ts).toLocaleString()}
+                        {message.executionId ? ` • exec #${message.executionId}` : ''}
+                      </span>
+                    </div>
+                    <div>{message.content}</div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
           <div ref={runSectionRef} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
             <h2 className="text-lg font-semibold text-slate-800 mb-2">Initial Input (Optional)</h2>
-            <p className="text-sm text-slate-500 mb-4">Provide any initial context or data that the first agent should use.</p>
+            <p className="text-sm text-slate-500 mb-4">Provide the next user message or context. Recent thread history will be included automatically for continuity.</p>
             <textarea
               className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none min-h-[100px] font-mono text-sm"
               placeholder="Enter initial input context here..."
@@ -718,7 +854,7 @@ export default function CrewPage() {
                   <div key={i} className="animate-in fade-in slide-in-from-bottom-2">
                     <div className="flex items-center gap-2 text-slate-500 mb-1">
                       <Clock size={10} />
-                      <span>{new Date(log.timestamp).toLocaleTimeString()}</span>
+                      <span>{log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : 'now'}</span>
                     </div>
                     
                     {log.type === 'start' && (
@@ -736,6 +872,48 @@ export default function CrewPage() {
                     {log.type === 'thought' && (
                       <div className="text-cyan-400 pl-4">
                         <span className="font-bold text-cyan-600">Thought:</span> {log.message}
+                      </div>
+                    )}
+
+                    {log.type === 'planner_handoff' && (
+                      <div className="text-sky-300 pl-4">
+                        <span className="font-bold">Planner Handoff:</span>
+                        <pre className="text-xs text-slate-400 mt-1 bg-slate-900/50 p-2 rounded overflow-x-auto whitespace-pre-wrap">
+                          {JSON.stringify(log.plan || [], null, 2)}
+                        </pre>
+                      </div>
+                    )}
+
+                    {log.type === 'delegated_parent' && (
+                      <div className="text-violet-300 pl-4">
+                        <span className="font-bold">Supervisor Tree:</span> {log.message}
+                      </div>
+                    )}
+
+                    {(log.type === 'crew_delegate' || log.type === 'crew_synthesis_step') && (
+                      <div className="text-violet-200 pl-4 space-y-2">
+                        <div>
+                          <span className="font-bold">{log.type === 'crew_synthesis_step' ? 'Synthesis Step:' : 'Delegated Step:'}</span>{' '}
+                          {log.title || log.agent || 'Delegation'}
+                        </div>
+                        <div className="text-slate-400">
+                          {log.status || 'unknown'}{log.child_execution_id ? ` • child #${log.child_execution_id}` : ''}
+                        </div>
+                        {log.task ? (
+                          <div className="text-slate-300 whitespace-pre-wrap bg-slate-900/40 p-2 rounded">
+                            {log.task}
+                          </div>
+                        ) : null}
+                        {log.result ? (
+                          <div className="text-slate-300 whitespace-pre-wrap bg-slate-900/40 p-2 rounded">
+                            {log.result}
+                          </div>
+                        ) : null}
+                        {!log.result && log.message ? (
+                          <div className="text-slate-300 whitespace-pre-wrap bg-slate-900/40 p-2 rounded">
+                            {log.message}
+                          </div>
+                        ) : null}
                       </div>
                     )}
 
