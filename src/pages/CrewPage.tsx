@@ -369,7 +369,13 @@ export default function CrewPage() {
   const timeline = useMemo(() => {
     const starts = new Map<string, string>();
     const rows: Array<{ label: string; status: string; started_at?: string; ended_at?: string; duration_ms?: number }> = [];
-    rows.push({ label: 'queued', status: 'completed', started_at: logs[0]?.timestamp, ended_at: logs[0]?.timestamp, duration_ms: 0 });
+    rows.push({
+      label: 'queued',
+      status: isRunning && !logs.some((log) => log.type === 'start' || log.type === 'tool_call' || log.type === 'finish') ? 'running' : 'completed',
+      started_at: logs[0]?.timestamp,
+      ended_at: logs[0]?.timestamp,
+      duration_ms: 0,
+    });
     for (const log of logs) {
       if (log.type === 'start' && log.agent) {
         starts.set(log.agent, log.timestamp);
@@ -863,7 +869,7 @@ export default function CrewPage() {
             <div className="flex-1 overflow-y-auto p-4 space-y-4 font-mono text-xs">
               {logs.length === 0 ? (
                 <div className="text-slate-600 text-center mt-10">
-                  Ready to start...
+                  {isRunning ? 'Waiting for worker claim...' : 'Ready to start...'}
                 </div>
               ) : (
                 logs.map((log, i) => (

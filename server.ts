@@ -5843,6 +5843,16 @@ async function processJob(job: { id: number; type: string; payload: any }) {
 
   if (job.type === 'run_crew') {
     const { crewId, executionId, initialInput, initiatedBy, retryOfExecutionId } = job.payload || {};
+    db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run('running', executionId);
+    db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
+      .run(
+        executionId,
+        'thought',
+        JSON.stringify({
+          agent: 'system',
+          message: 'Crew worker claimed the run and is starting execution.',
+        }),
+      );
     await runCrewExecution(
       crewId,
       executionId,
@@ -7352,11 +7362,21 @@ app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
   
   // Create execution record
   const stmt = db.prepare('INSERT INTO crew_executions (crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?)');
-  const info = stmt.run(crewId, 'running', JSON.stringify([]), initialInput || '', null);
+  const info = stmt.run(crewId, 'pending', JSON.stringify([]), initialInput || '', null);
   const executionId = info.lastInsertRowid;
 
+  db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
+    .run(
+      executionId,
+      'thought',
+      JSON.stringify({
+        agent: 'system',
+        message: 'Crew run queued. Waiting for a worker to claim execution.',
+      }),
+    );
+
   // Start processing in background
-  await enqueueJob('run_crew', {
+  const jobId = await enqueueJob('run_crew', {
     crewId: parseInt(crewId),
     executionId,
     initialInput: initialInput || "",
@@ -7364,7 +7384,7 @@ app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
   });
 
   const shouldWait = req.query.wait === 'true' || wait === true;
-  if (!shouldWait) return res.json({ executionId });
+  if (!shouldWait) return res.json({ executionId, jobId, status: 'pending' });
 
   const timeoutMs = typeof waitMs === 'number' && waitMs > 0 ? waitMs : 120000;
   const intervalMs = typeof pollMs === 'number' && pollMs > 0 ? Math.min(pollMs, 5000) : 1500;
