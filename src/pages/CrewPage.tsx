@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { Plus, Play, Trash2, CheckCircle2, Clock, Terminal, ArrowLeft, Globe, Copy, Check, X } from 'lucide-react';
+import { Plus, Play, Trash2, CheckCircle2, Clock, Terminal, ArrowLeft, Globe, Copy, Check, X, MessagesSquare, Focus, PanelRightOpen, ChevronDown, ChevronUp, Link2 } from 'lucide-react';
 
 import CrewWorkflow from '../components/CrewWorkflow';
 import TaskAgentEditor from '../components/TaskAgentEditor';
@@ -99,12 +99,14 @@ export default function CrewPage() {
   const [logs, setLogs] = useState<Log[]>([]);
   const [executionId, setExecutionId] = useState<number | null>(null);
   const [showConnection, setShowConnection] = useState(false);
+  const [showExposureDetails, setShowExposureDetails] = useState(false);
   const [copied, setCopied] = useState(false);
   const runSectionRef = React.useRef<HTMLDivElement | null>(null);
   const streamRef = useRef<EventSource | null>(null);
   const executionIdRef = useRef<number | null>(null);
   const [threadMessages, setThreadMessages] = useState<CrewThreadMessage[]>([]);
   const [threadLinkedExecutionIds, setThreadLinkedExecutionIds] = useState<number[]>([]);
+  const [selectedThreadExecutionId, setSelectedThreadExecutionId] = useState<number | null>(null);
 
   const [initialInput, setInitialInput] = useState('');
   const [newTask, setNewTask] = useState({
@@ -134,6 +136,12 @@ export default function CrewPage() {
 
   useEffect(() => {
     executionIdRef.current = executionId;
+  }, [executionId]);
+
+  useEffect(() => {
+    if (executionId != null) {
+      setSelectedThreadExecutionId(Number(executionId));
+    }
   }, [executionId]);
 
   useEffect(() => {
@@ -218,12 +226,12 @@ export default function CrewPage() {
     setAgents(data);
   };
 
-  const fetchLogs = async (targetExecutionId?: number) => {
+  const fetchLogs = async (targetExecutionId?: number, options?: { allowHistorical?: boolean }) => {
     const resolvedExecutionId = Number(targetExecutionId || executionId || 0);
     if (!resolvedExecutionId) return;
     const res = await fetch(`/api/executions/${resolvedExecutionId}`);
     const data = await res.json();
-    if (executionIdRef.current != null && resolvedExecutionId !== Number(executionIdRef.current)) {
+    if (!options?.allowHistorical && executionIdRef.current != null && resolvedExecutionId !== Number(executionIdRef.current)) {
       return;
     }
     setLogs(data.logs || []);
@@ -251,6 +259,15 @@ export default function CrewPage() {
     }
   };
 
+  const focusExecution = async (nextExecutionId: number, nextIsRunning = false) => {
+    const numericExecutionId = Number(nextExecutionId);
+    if (!Number.isFinite(numericExecutionId) || numericExecutionId <= 0) return;
+    setSelectedThreadExecutionId(numericExecutionId);
+    setExecutionId(numericExecutionId);
+    setIsRunning(nextIsRunning);
+    await fetchLogs(numericExecutionId, { allowHistorical: true });
+  };
+
   const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault();
     await fetch('/api/tasks', {
@@ -270,6 +287,7 @@ export default function CrewPage() {
   const runCrew = async () => {
     const trimmedInput = initialInput.trim();
     const requestInitialInput = buildCrewThreadContext(threadMessages, trimmedInput);
+    const requestMessageTs = trimmedInput ? new Date().toISOString() : null;
     setIsRunning(true);
     setLogs([]);
     try {
@@ -279,7 +297,7 @@ export default function CrewPage() {
           {
             role: 'user',
             content: trimmedInput,
-            ts: new Date().toISOString(),
+            ts: requestMessageTs || new Date().toISOString(),
           },
         ]);
       }
@@ -295,7 +313,16 @@ export default function CrewPage() {
       if (!data?.executionId) {
         throw new Error('Crew started but no execution id was returned');
       }
-      setExecutionId(Number(data.executionId));
+      const nextExecutionId = Number(data.executionId);
+      if (requestMessageTs) {
+        setThreadMessages((prev) => prev.map((message) => (
+          message.ts === requestMessageTs && message.role === 'user'
+            ? { ...message, executionId: nextExecutionId }
+            : message
+        )));
+      }
+      setExecutionId(nextExecutionId);
+      setSelectedThreadExecutionId(nextExecutionId);
       setInitialInput('');
     } catch (e: any) {
       setIsRunning(false);
@@ -362,7 +389,8 @@ export default function CrewPage() {
       return;
     }
     setLogs([]);
-    setExecutionId(data.executionId);
+    setExecutionId(Number(data.executionId));
+    setSelectedThreadExecutionId(Number(data.executionId));
     setIsRunning(true);
   };
 
@@ -406,6 +434,10 @@ export default function CrewPage() {
     const lastFinish = [...logs].reverse().find((l) => l.type === 'finish' && l.result);
     return lastFinish?.result || '';
   }, [logs]);
+
+  const selectedThreadMessage = useMemo(() => (
+    threadMessages.find((message) => Number(message.executionId || 0) === Number(selectedThreadExecutionId || 0)) || null
+  ), [selectedThreadExecutionId, threadMessages]);
 
   const handleExposeToggle = async (nextValue: boolean) => {
     if (!crew) return;
@@ -598,61 +630,87 @@ export default function CrewPage() {
         )}
       </div>
 
-      <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-        <h2 className="text-lg font-semibold text-slate-800 mb-2">Crew Exposure</h2>
-        <p className="text-sm text-slate-500 mb-4">Expose this crew to MCP tool calls and the HTTP API.</p>
-        <div className="flex items-center gap-2 mb-4">
-          <input
-            type="checkbox"
-            id="crewExposeToggle"
-            className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
-            checked={Boolean(crew.is_exposed)}
-            onChange={(e) => handleExposeToggle(e.target.checked)}
-            disabled={isExposing}
-          />
-          <label htmlFor="crewExposeToggle" className="text-sm text-slate-700">
-            Expose crew via MCP/API
-          </label>
-          <button
-            onClick={() => setShowConnection(true)}
-            className="ml-auto text-xs text-indigo-600 hover:text-indigo-800"
-          >
-            View REST/MCP
-          </button>
-        </div>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
-            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">MCP Tool Name</div>
-            <div className="font-mono text-sm text-slate-800">{crewToolName(crew.name)}</div>
-            <button
-              onClick={() => copyToClipboard(crewToolName(crew.name))}
-              className="mt-2 inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700"
-            >
-              {copied ? <Check size={12} /> : <Copy size={12} />} Copy
-            </button>
+      <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-800">Crew Exposure</h2>
+            <p className="text-sm text-slate-500 mt-1">Expose this crew to MCP tool calls and the HTTP API without keeping the full connection block open all the time.</p>
           </div>
-          <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
-            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">HTTP API</div>
-            <div className="font-mono text-xs text-slate-800 break-all">{apiUrl}</div>
-            <div className="mt-2 text-xs text-slate-500">POST JSON: {"{ \"initialInput\": \"...\" }"}</div>
+          <div className="flex flex-wrap items-center gap-2">
+            <label htmlFor="crewExposeToggle" className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                id="crewExposeToggle"
+                className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                checked={Boolean(crew.is_exposed)}
+                onChange={(e) => handleExposeToggle(e.target.checked)}
+                disabled={isExposing}
+              />
+              Expose crew via MCP/API
+            </label>
             <button
-              onClick={() => copyToClipboard(apiUrl)}
-              className="mt-2 inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700"
+              onClick={() => setShowExposureDetails((prev) => !prev)}
+              className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
             >
-              {copied ? <Check size={12} /> : <Copy size={12} />} Copy
+              {showExposureDetails ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+              {showExposureDetails ? 'Hide Details' : 'Show Details'}
+            </button>
+            <button
+              onClick={() => setShowConnection(true)}
+              className="inline-flex items-center gap-2 rounded-full bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+            >
+              <Link2 size={15} />
+              View REST/MCP
             </button>
           </div>
         </div>
+
+        <div className="mt-4 grid grid-cols-1 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] gap-3">
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">MCP Tool</div>
+            <div className="mt-2 font-mono text-sm text-slate-800 break-all">{crewToolName(crew.name)}</div>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">HTTP Endpoint</div>
+            <div className="mt-2 font-mono text-xs text-slate-800 break-all">{apiUrl}</div>
+          </div>
+        </div>
+
+        {showExposureDetails && (
+          <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-1">
+            <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
+              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">MCP Tool Name</div>
+              <div className="font-mono text-sm text-slate-800">{crewToolName(crew.name)}</div>
+              <button
+                onClick={() => copyToClipboard(crewToolName(crew.name))}
+                className="mt-2 inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700"
+              >
+                {copied ? <Check size={12} /> : <Copy size={12} />} Copy
+              </button>
+            </div>
+            <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
+              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">HTTP API</div>
+              <div className="font-mono text-xs text-slate-800 break-all">{apiUrl}</div>
+              <div className="mt-2 text-xs text-slate-500">POST JSON: {"{ \"initialInput\": \"...\" }"}</div>
+              <button
+                onClick={() => copyToClipboard(apiUrl)}
+                className="mt-2 inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700"
+              >
+                {copied ? <Check size={12} /> : <Copy size={12} />} Copy
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.4fr)_minmax(340px,0.9fr)] gap-6 items-start">
         {/* Left Column: Tasks */}
-        <div className="lg:col-span-2 space-y-6">
+        <div className="space-y-6">
           <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
             <div className="flex items-center justify-between gap-3 mb-3">
               <div>
                 <h2 className="text-lg font-semibold text-slate-800">Crew Conversation Thread</h2>
-                <p className="text-sm text-slate-500">Follow-up runs reuse recent thread context so the crew behaves more like a continuing conversation.</p>
+                <p className="text-sm text-slate-500">Follow-up runs reuse recent thread context. Click any linked message to load the exact execution logs for that run.</p>
               </div>
               {threadMessages.length > 0 && (
                 <button
@@ -671,25 +729,46 @@ export default function CrewPage() {
                 <div className="text-sm text-slate-500">No conversation yet. Start with an objective or follow-up request below.</div>
               ) : (
                 threadMessages.map((message, index) => (
-                  <div
+                  <button
+                    type="button"
                     key={`${message.ts}-${index}`}
-                    className={`rounded-xl border px-4 py-3 text-sm whitespace-pre-wrap ${
+                    onClick={() => {
+                      if (message.executionId) {
+                        void focusExecution(Number(message.executionId), false);
+                      }
+                    }}
+                    disabled={!message.executionId}
+                    className={`w-full rounded-xl border px-4 py-3 text-left text-sm whitespace-pre-wrap transition-all ${
                       message.role === 'user'
                         ? 'border-indigo-200 bg-indigo-50/80 text-slate-800'
                         : 'border-emerald-200 bg-emerald-50/80 text-slate-800'
+                    } ${
+                      message.executionId && Number(selectedThreadExecutionId || 0) === Number(message.executionId)
+                        ? 'ring-2 ring-slate-900/10 shadow-sm scale-[1.01]'
+                        : ''
+                    } ${
+                      message.executionId ? 'hover:shadow-sm hover:-translate-y-0.5 cursor-pointer' : 'cursor-default'
                     }`}
                   >
                     <div className="mb-1 flex items-center justify-between gap-3 text-[11px] uppercase tracking-[0.18em]">
-                      <span className={message.role === 'user' ? 'text-indigo-600' : 'text-emerald-600'}>
-                        {message.role === 'user' ? 'User' : 'Crew'}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className={message.role === 'user' ? 'text-indigo-600' : 'text-emerald-600'}>
+                          {message.role === 'user' ? 'User' : 'Crew'}
+                        </span>
+                        {message.executionId ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-white/70 px-2 py-0.5 text-[10px] tracking-normal text-slate-500">
+                            <Focus size={10} />
+                            Inspect Run
+                          </span>
+                        ) : null}
+                      </div>
                       <span className="text-slate-400">
                         {new Date(message.ts).toLocaleString()}
                         {message.executionId ? ` • exec #${message.executionId}` : ''}
                       </span>
                     </div>
                     <div>{message.content}</div>
-                  </div>
+                  </button>
                 ))
               )}
             </div>
@@ -860,11 +939,48 @@ export default function CrewPage() {
         </div>
 
         {/* Right Column: Execution Logs */}
-        <div className="lg:col-span-1">
-          <div className="bg-slate-900 text-slate-200 rounded-xl overflow-hidden shadow-lg flex flex-col h-[600px]">
-            <div className="p-4 border-b border-slate-800 flex items-center gap-2 bg-slate-950">
-              <Terminal size={18} className="text-green-500" />
-              <span className="font-mono text-sm font-bold">Execution Logs</span>
+        <div className="space-y-4 xl:sticky xl:top-6">
+          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500">
+                  <MessagesSquare size={12} />
+                  Run Context
+                </div>
+                <h3 className="mt-2 text-base font-semibold text-slate-900">
+                  {selectedThreadMessage?.role === 'assistant' ? 'Crew Response' : selectedThreadMessage?.role === 'user' ? 'User Prompt' : 'Current Execution'}
+                </h3>
+                <p className="mt-1 text-sm text-slate-500">
+                  {selectedThreadMessage?.executionId
+                    ? `Showing logs for execution #${selectedThreadMessage.executionId}.`
+                    : executionId
+                      ? `Showing logs for execution #${executionId}.`
+                      : 'Run the crew or click a linked thread message to inspect that execution.'}
+                </p>
+              </div>
+              {selectedThreadExecutionId ? (
+                <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-mono text-slate-700">
+                  exec #{selectedThreadExecutionId}
+                </div>
+              ) : null}
+            </div>
+            {selectedThreadMessage ? (
+              <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 whitespace-pre-wrap">
+                {selectedThreadMessage.content}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="bg-slate-900 text-slate-200 rounded-xl overflow-hidden shadow-lg flex flex-col min-h-[520px] max-h-[680px]">
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between gap-2 bg-slate-950">
+              <div className="flex items-center gap-2">
+                <Terminal size={18} className="text-green-500" />
+                <span className="font-mono text-sm font-bold">Execution Logs</span>
+              </div>
+              <div className="inline-flex items-center gap-1 rounded-full bg-white/5 px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] text-slate-400">
+                <PanelRightOpen size={11} />
+                {isRunning ? 'Live' : 'Replay'}
+              </div>
             </div>
             <div className="flex-1 overflow-y-auto p-4 space-y-4 font-mono text-xs">
               {logs.length === 0 ? (
@@ -990,7 +1106,7 @@ export default function CrewPage() {
             </div>
           </div>
 
-          <div className="mt-6 bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
             <h3 className="text-sm font-semibold text-slate-800 mb-3">Execution Timeline</h3>
             <div className="space-y-2">
               {timeline.map((row, idx) => (
@@ -1012,7 +1128,7 @@ export default function CrewPage() {
           </div>
 
           {!isRunning && logs.length > 0 && finalCrewOutput && (
-            <div className="mt-8 bg-white p-6 rounded-xl border border-emerald-200 shadow-sm">
+            <div className="bg-white p-6 rounded-xl border border-emerald-200 shadow-sm">
               <h2 className="text-xl font-bold text-emerald-800 mb-4 flex items-center gap-2">
                 <CheckCircle2 className="text-emerald-500" />
                 Final Crew Output
