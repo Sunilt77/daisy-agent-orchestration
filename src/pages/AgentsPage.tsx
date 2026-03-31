@@ -11,6 +11,19 @@ interface Tool {
   name: string;
 }
 
+interface VoiceConfigPreset {
+  id: number;
+  name: string;
+  voice_id: string;
+  tts_model_id: string;
+  stt_model_id: string;
+  output_format: string;
+  sample_rate: number;
+  language_code: string;
+  auto_tts: boolean;
+  notes?: string;
+}
+
 interface Agent {
   id: number;
   name: string;
@@ -849,6 +862,7 @@ type AgentOptionalConfig =
   const AGENTS_UI_KEY = 'agents_ui_state_v1';
   const [agents, setAgents] = useState<Agent[]>([]);
   const [tools, setTools] = useState<Tool[]>([]);
+  const [voiceConfigs, setVoiceConfigs] = useState<VoiceConfigPreset[]>([]);
   const [mcpExposedTools, setMcpExposedTools] = useState<Array<{ tool_id: number; tool_name: string; exposed_name?: string; exposed_description?: string }>>([]);
   const [mcpBundles, setMcpBundles] = useState<Array<{ id: number; name: string; slug: string; description?: string }>>([]);
   const [isCreating, setIsCreating] = useState(false);
@@ -876,6 +890,7 @@ type AgentOptionalConfig =
     voice_sample_rate: '16000',
     voice_language_code: 'en',
     voice_auto_tts: true,
+    voice_preset_id: '',
     project_id: '' as string | number,
     toolIds: [] as number[],
     mcp_tool_ids: [] as number[],
@@ -1001,6 +1016,7 @@ type AgentOptionalConfig =
   useEffect(() => {
     fetchAgents();
     fetchTools();
+    fetchVoiceConfigs();
     fetchMcpExposedTools();
     fetchMcpBundles();
     fetchProjects();
@@ -1247,6 +1263,16 @@ type AgentOptionalConfig =
       .then(setTools);
   };
 
+  const fetchVoiceConfigs = async () => {
+    try {
+      const res = await fetch('/api/voice/configs');
+      const data = await safeJson(res);
+      setVoiceConfigs(Array.isArray(data) ? data : []);
+    } catch {
+      setVoiceConfigs([]);
+    }
+  };
+
   const fetchMcpExposedTools = () => {
     fetch('/api/mcp/exposed-tools')
       .then(res => safeJson(res))
@@ -1327,6 +1353,9 @@ type AgentOptionalConfig =
             sample_rate: Number(formData.voice_sample_rate || 16000),
             language_code: formData.voice_language_code,
             auto_tts: Boolean(formData.voice_auto_tts),
+            meta: {
+              preset_id: formData.voice_preset_id ? Number(formData.voice_preset_id) : null,
+            },
           }),
         });
         if (!voiceRes.ok) {
@@ -1372,6 +1401,7 @@ type AgentOptionalConfig =
       voice_sample_rate: '16000',
       voice_language_code: 'en',
       voice_auto_tts: true,
+      voice_preset_id: '',
       project_id: '',
       toolIds: [],
       mcp_tool_ids: [],
@@ -1433,6 +1463,7 @@ type AgentOptionalConfig =
           voice_sample_rate: String(voiceProfile?.sample_rate || 16000),
           voice_language_code: String(voiceProfile?.language_code || 'en'),
           voice_auto_tts: Boolean(voiceProfile?.auto_tts ?? true),
+          voice_preset_id: String(voiceProfile?.meta?.preset_id || ''),
           project_id: agent.project_id || '',
           toolIds: agent.tools ? agent.tools.map(t => t.id) : [],
           mcp_tool_ids: Array.isArray(agent.mcp_tool_ids) ? agent.mcp_tool_ids : [],
@@ -1489,6 +1520,85 @@ type AgentOptionalConfig =
         : [...prev.mcp_bundle_ids, bundleId];
       return { ...prev, mcp_bundle_ids: next };
     });
+  };
+
+  const applyVoicePreset = (presetId: string) => {
+    const preset = voiceConfigs.find((item) => String(item.id) === String(presetId));
+    if (!preset) {
+      setFormData((prev) => ({ ...prev, voice_preset_id: '' }));
+      return;
+    }
+    setFormData((prev) => ({
+      ...prev,
+      voice_preset_id: presetId,
+      voice_id: String(preset.voice_id || 'JBFqnCBsd6RMkjVDRZzb'),
+      tts_model_id: String(preset.tts_model_id || 'eleven_multilingual_v2'),
+      stt_model_id: String(preset.stt_model_id || 'scribe_v2_realtime'),
+      voice_output_format: String(preset.output_format || 'mp3_44100_128'),
+      voice_sample_rate: String(preset.sample_rate || 16000),
+      voice_language_code: String(preset.language_code || 'en'),
+      voice_auto_tts: Boolean(preset.auto_tts ?? true),
+    }));
+  };
+
+  const saveCurrentVoicePreset = async () => {
+    const name = window.prompt('Voice preset name');
+    if (!name?.trim()) return;
+    const res = await fetch('/api/voice/configs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: name.trim(),
+        voice_id: formData.voice_id,
+        tts_model_id: formData.tts_model_id,
+        stt_model_id: formData.stt_model_id,
+        output_format: formData.voice_output_format,
+        sample_rate: Number(formData.voice_sample_rate || 16000),
+        language_code: formData.voice_language_code,
+        auto_tts: Boolean(formData.voice_auto_tts),
+      }),
+    });
+    const data = await safeJson(res) as any;
+    if (!res.ok) {
+      setAgentSaveNotice({ type: 'error', message: data?.error || 'Failed to save voice preset' });
+      return;
+    }
+    await fetchVoiceConfigs();
+    setFormData((prev) => ({ ...prev, voice_preset_id: String(data?.id || '') }));
+  };
+
+  const updateSelectedVoicePreset = async () => {
+    if (!formData.voice_preset_id) return;
+    const preset = voiceConfigs.find((item) => String(item.id) === String(formData.voice_preset_id));
+    if (!preset) return;
+    const res = await fetch(`/api/voice/configs/${formData.voice_preset_id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: preset.name,
+        voice_id: formData.voice_id,
+        tts_model_id: formData.tts_model_id,
+        stt_model_id: formData.stt_model_id,
+        output_format: formData.voice_output_format,
+        sample_rate: Number(formData.voice_sample_rate || 16000),
+        language_code: formData.voice_language_code,
+        auto_tts: Boolean(formData.voice_auto_tts),
+        notes: preset.notes || '',
+      }),
+    });
+    const data = await safeJson(res) as any;
+    if (!res.ok) {
+      setAgentSaveNotice({ type: 'error', message: data?.error || 'Failed to update voice preset' });
+      return;
+    }
+    await fetchVoiceConfigs();
+  };
+
+  const deleteSelectedVoicePreset = async () => {
+    if (!formData.voice_preset_id || !window.confirm('Delete this voice preset?')) return;
+    await fetch(`/api/voice/configs/${formData.voice_preset_id}`, { method: 'DELETE' });
+    await fetchVoiceConfigs();
+    setFormData((prev) => ({ ...prev, voice_preset_id: '' }));
   };
 
   const supervisorCount = useMemo(() => agents.filter((agent) => agent.agent_role === 'supervisor').length, [agents]);
@@ -2303,6 +2413,30 @@ type AgentOptionalConfig =
               <p className="text-xs text-emerald-900/75">
                 Save ElevenLabs voice defaults on the agent so browser voice sessions, websocket consumers, and test consoles all inherit the same runtime profile.
               </p>
+              <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 items-end">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Voice Config Preset</label>
+                  <select
+                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white"
+                    value={formData.voice_preset_id}
+                    onChange={e => applyVoicePreset(e.target.value)}
+                  >
+                    <option value="">Custom runtime values</option>
+                    {voiceConfigs.map((preset) => (
+                      <option key={preset.id} value={preset.id}>{preset.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <button type="button" onClick={saveCurrentVoicePreset} className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm font-medium text-slate-700 hover:bg-slate-50">
+                  Save As Preset
+                </button>
+                <button type="button" onClick={updateSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                  Update Preset
+                </button>
+                <button type="button" onClick={deleteSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-2 rounded-lg border border-red-200 bg-red-50 text-sm font-medium text-red-700 hover:bg-red-100 disabled:opacity-40">
+                  Delete Preset
+                </button>
+              </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">Voice ID</label>

@@ -21,6 +21,20 @@ type VoiceEvent = {
   ts: string;
 };
 
+type VoiceConfigPreset = {
+  id: number;
+  name: string;
+  voice_provider?: string;
+  voice_id: string;
+  tts_model_id: string;
+  stt_model_id: string;
+  output_format: string;
+  sample_rate: number;
+  language_code: string;
+  auto_tts: boolean;
+  notes?: string;
+};
+
 function toBase64(buffer: ArrayBuffer) {
   let binary = '';
   const bytes = new Uint8Array(buffer);
@@ -33,6 +47,8 @@ function toBase64(buffer: ArrayBuffer) {
 
 export default function VoicePage() {
   const [targets, setTargets] = useState<VoiceTarget[]>([]);
+  const [voiceConfigs, setVoiceConfigs] = useState<VoiceConfigPreset[]>([]);
+  const [selectedVoiceConfigId, setSelectedVoiceConfigId] = useState<string>('');
   const [targetType, setTargetType] = useState<'agent' | 'crew'>('agent');
   const [targetId, setTargetId] = useState<string>('');
   const [voiceId, setVoiceId] = useState('JBFqnCBsd6RMkjVDRZzb');
@@ -110,6 +126,7 @@ export default function VoicePage() {
           subtitle: `${crew.process || 'sequential'} crew`,
           process: crew.process || 'sequential',
           status: crew.status || undefined,
+          voice_profile: crew.voice_profile,
         })) : []),
       ];
       setTargets(fallbackTargets);
@@ -130,8 +147,19 @@ export default function VoicePage() {
     }
   };
 
+  const loadVoiceConfigs = async () => {
+    try {
+      const res = await fetch('/api/voice/configs');
+      const data = res.ok ? await res.json().catch(() => []) : [];
+      setVoiceConfigs(Array.isArray(data) ? data : []);
+    } catch {
+      setVoiceConfigs([]);
+    }
+  };
+
   useEffect(() => {
     void loadTargets();
+    void loadVoiceConfigs();
   }, []);
 
   const availableTargets = useMemo(
@@ -159,7 +187,21 @@ export default function VoicePage() {
     setSampleRate(Number(selectedTarget.voice_profile.sample_rate || 16000));
     setLanguageCode(String(selectedTarget.voice_profile.language_code || 'en'));
     setAutoTts(Boolean(selectedTarget.voice_profile.auto_tts ?? true));
+    setSelectedVoiceConfigId(String(selectedTarget.voice_profile.meta?.preset_id || ''));
   }, [selectedTarget]);
+
+  const applyVoiceConfig = (presetId: string) => {
+    setSelectedVoiceConfigId(presetId);
+    const preset = voiceConfigs.find((item) => String(item.id) === String(presetId));
+    if (!preset) return;
+    setVoiceId(String(preset.voice_id || 'JBFqnCBsd6RMkjVDRZzb'));
+    setTtsModelId(String(preset.tts_model_id || 'eleven_multilingual_v2'));
+    setSttModelId(String(preset.stt_model_id || 'scribe_v2_realtime'));
+    setOutputFormat(String(preset.output_format || 'mp3_44100_128'));
+    setSampleRate(Number(preset.sample_rate || 16000));
+    setLanguageCode(String(preset.language_code || 'en'));
+    setAutoTts(Boolean(preset.auto_tts ?? true));
+  };
 
   const pushEvent = (type: string, payload: any) => {
     setEvents((prev) => [
@@ -189,9 +231,7 @@ export default function VoicePage() {
     url.searchParams.set('autoTts', autoTts ? 'true' : 'false');
     const ws = new WebSocket(url);
     wsRef.current = ws;
-    if (targetType === 'agent') {
-      void saveProfile();
-    }
+    void saveProfile();
     ws.onopen = () => {
       setIsConnected(true);
       pushEvent('socket.open', { targetType, targetId: Number(targetId) });
@@ -258,8 +298,9 @@ export default function VoicePage() {
   };
 
   const saveProfile = async () => {
-    if (targetType !== 'agent' || !targetId) return;
-    await fetch(`/api/voice/agents/${targetId}/profile`, {
+    if (!targetId) return;
+    const basePath = targetType === 'crew' ? '/api/voice/crews' : '/api/voice/agents';
+    await fetch(`${basePath}/${targetId}/profile`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -270,9 +311,73 @@ export default function VoicePage() {
         sample_rate: sampleRate,
         language_code: languageCode,
         auto_tts: autoTts,
+        meta: {
+          preset_id: selectedVoiceConfigId ? Number(selectedVoiceConfigId) : null,
+        },
       }),
     });
     pushEvent('profile.saved', { targetType, targetId: Number(targetId) });
+  };
+
+  const saveCurrentAsPreset = async () => {
+    const name = window.prompt('Voice preset name');
+    if (!name?.trim()) return;
+    const res = await fetch('/api/voice/configs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: name.trim(),
+        voice_id: voiceId,
+        tts_model_id: ttsModelId,
+        stt_model_id: sttModelId,
+        output_format: outputFormat,
+        sample_rate: sampleRate,
+        language_code: languageCode,
+        auto_tts: autoTts,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(String(data?.error || 'Failed to save voice preset'));
+      return;
+    }
+    await loadVoiceConfigs();
+    setSelectedVoiceConfigId(String(data.id || ''));
+  };
+
+  const updateSelectedPreset = async () => {
+    if (!selectedVoiceConfigId) return;
+    const preset = voiceConfigs.find((item) => String(item.id) === String(selectedVoiceConfigId));
+    if (!preset) return;
+    const res = await fetch(`/api/voice/configs/${selectedVoiceConfigId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: preset.name,
+        voice_id: voiceId,
+        tts_model_id: ttsModelId,
+        stt_model_id: sttModelId,
+        output_format: outputFormat,
+        sample_rate: sampleRate,
+        language_code: languageCode,
+        auto_tts: autoTts,
+        notes: preset.notes || '',
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(String(data?.error || 'Failed to update voice preset'));
+      return;
+    }
+    await loadVoiceConfigs();
+  };
+
+  const deleteSelectedPreset = async () => {
+    if (!selectedVoiceConfigId) return;
+    if (!window.confirm('Delete this voice preset?')) return;
+    await fetch(`/api/voice/configs/${selectedVoiceConfigId}`, { method: 'DELETE' });
+    setSelectedVoiceConfigId('');
+    await loadVoiceConfigs();
   };
 
   const startRecording = async () => {
@@ -398,6 +503,21 @@ export default function VoicePage() {
                 </select>
               </div>
               <div>
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Voice Config Preset</label>
+                <select
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm bg-white"
+                  value={selectedVoiceConfigId}
+                  onChange={(e) => applyVoiceConfig(e.target.value)}
+                >
+                  <option value="">Custom runtime values</option>
+                  {voiceConfigs.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
                 <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Voice ID</label>
                 <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={voiceId} onChange={(e) => setVoiceId(e.target.value)} />
               </div>
@@ -430,7 +550,16 @@ export default function VoicePage() {
               </label>
               <button onClick={saveProfile} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-700 inline-flex items-center gap-2">
                 <Save size={14} />
-                {targetType === 'agent' ? 'Save Agent Voice Profile' : 'Crew Uses Session Voice Settings'}
+                {targetType === 'agent' ? 'Save Agent Voice Profile' : 'Save Crew Voice Profile'}
+              </button>
+              <button onClick={saveCurrentAsPreset} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-700">
+                Save As Preset
+              </button>
+              <button onClick={updateSelectedPreset} disabled={!selectedVoiceConfigId} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-40">
+                Update Preset
+              </button>
+              <button onClick={deleteSelectedPreset} disabled={!selectedVoiceConfigId} className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700 disabled:opacity-40">
+                Delete Preset
               </button>
             </div>
 

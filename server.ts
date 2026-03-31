@@ -878,6 +878,79 @@ function getCrewVoiceProfile(crewId: number) {
   };
 }
 
+function listVoiceConfigPresets() {
+  ensureVoiceTables();
+  const rows = db.prepare('SELECT * FROM voice_config_presets ORDER BY updated_at DESC, id DESC').all() as any[];
+  return rows.map((row) => ({
+    id: Number(row.id),
+    name: row.name,
+    voice_provider: row.voice_provider || 'elevenlabs',
+    voice_id: row.voice_id || DEFAULT_VOICE_ID,
+    tts_model_id: row.tts_model_id || DEFAULT_TTS_MODEL,
+    stt_model_id: row.stt_model_id || DEFAULT_STT_MODEL,
+    output_format: row.output_format || DEFAULT_TTS_FORMAT,
+    sample_rate: Number(row.sample_rate || DEFAULT_STT_SAMPLE_RATE),
+    language_code: row.language_code || 'en',
+    auto_tts: Boolean(row.auto_tts ?? 1),
+    notes: row.notes || '',
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }));
+}
+
+function getVoiceConfigPreset(presetId: number) {
+  ensureVoiceTables();
+  const row = db.prepare('SELECT * FROM voice_config_presets WHERE id = ?').get(presetId) as any;
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    name: row.name,
+    voice_provider: row.voice_provider || 'elevenlabs',
+    voice_id: row.voice_id || DEFAULT_VOICE_ID,
+    tts_model_id: row.tts_model_id || DEFAULT_TTS_MODEL,
+    stt_model_id: row.stt_model_id || DEFAULT_STT_MODEL,
+    output_format: row.output_format || DEFAULT_TTS_FORMAT,
+    sample_rate: Number(row.sample_rate || DEFAULT_STT_SAMPLE_RATE),
+    language_code: row.language_code || 'en',
+    auto_tts: Boolean(row.auto_tts ?? 1),
+    notes: row.notes || '',
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function saveVoiceConfigPreset(presetId: number | null, payload: any) {
+  ensureVoiceTables();
+  const normalizedName = String(payload.name || '').trim();
+  if (!normalizedName) throw new Error('Voice preset name is required');
+  const params = [
+    normalizedName,
+    'elevenlabs',
+    String(payload.voice_id || DEFAULT_VOICE_ID),
+    String(payload.tts_model_id || DEFAULT_TTS_MODEL),
+    String(payload.stt_model_id || DEFAULT_STT_MODEL),
+    String(payload.output_format || DEFAULT_TTS_FORMAT),
+    Number(payload.sample_rate || DEFAULT_STT_SAMPLE_RATE),
+    String(payload.language_code || 'en'),
+    payload.auto_tts === false ? 0 : 1,
+    String(payload.notes || '').trim(),
+  ];
+  if (presetId && Number.isFinite(presetId)) {
+    db.prepare(`
+      UPDATE voice_config_presets
+      SET name = ?, voice_provider = ?, voice_id = ?, tts_model_id = ?, stt_model_id = ?, output_format = ?, sample_rate = ?, language_code = ?, auto_tts = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(...params, presetId);
+    return getVoiceConfigPreset(presetId);
+  }
+  const result = db.prepare(`
+    INSERT INTO voice_config_presets (
+      name, voice_provider, voice_id, tts_model_id, stt_model_id, output_format, sample_rate, language_code, auto_tts, notes, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `).run(...params);
+  return getVoiceConfigPreset(Number(result.lastInsertRowid));
+}
+
 function saveAgentVoiceProfile(agentId: number, payload: any) {
   ensureVoiceTables();
   db.prepare(`
@@ -4309,6 +4382,45 @@ app.get('/api/voice/agents', (_req, res) => {
     ...agent,
     voice_profile: getAgentVoiceProfile(Number(agent.id)),
   })));
+});
+
+app.get('/api/voice/configs', (_req, res) => {
+  res.json(listVoiceConfigPresets());
+});
+
+app.post('/api/voice/configs', (req, res) => {
+  try {
+    const preset = saveVoiceConfigPreset(null, req.body || {});
+    res.status(201).json(preset);
+  } catch (e: any) {
+    const message = String(e?.message || 'Failed to save voice preset');
+    if (message.toLowerCase().includes('unique')) {
+      return res.status(409).json({ error: 'A voice preset with that name already exists' });
+    }
+    res.status(400).json({ error: message });
+  }
+});
+
+app.put('/api/voice/configs/:id', (req, res) => {
+  const presetId = Number(req.params.id);
+  if (!Number.isFinite(presetId) || presetId <= 0) return res.status(400).json({ error: 'Invalid voice preset id' });
+  try {
+    const preset = saveVoiceConfigPreset(presetId, req.body || {});
+    res.json(preset);
+  } catch (e: any) {
+    const message = String(e?.message || 'Failed to update voice preset');
+    if (message.toLowerCase().includes('unique')) {
+      return res.status(409).json({ error: 'A voice preset with that name already exists' });
+    }
+    res.status(400).json({ error: message });
+  }
+});
+
+app.delete('/api/voice/configs/:id', (req, res) => {
+  const presetId = Number(req.params.id);
+  if (!Number.isFinite(presetId) || presetId <= 0) return res.status(400).json({ error: 'Invalid voice preset id' });
+  db.prepare('DELETE FROM voice_config_presets WHERE id = ?').run(presetId);
+  res.json({ ok: true });
 });
 
 app.get('/api/voice/targets', (_req, res) => {

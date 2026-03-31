@@ -15,6 +15,19 @@ interface Agent {
   agent_role?: string;
 }
 
+interface VoiceConfigPreset {
+  id: number;
+  name: string;
+  voice_id: string;
+  tts_model_id: string;
+  stt_model_id: string;
+  output_format: string;
+  sample_rate: number;
+  language_code: string;
+  auto_tts: boolean;
+  notes?: string;
+}
+
 interface Crew {
   id: number;
   name: string;
@@ -44,6 +57,7 @@ export default function CrewsPage() {
   const navigate = useNavigate();
   const [crews, setCrews] = useState<Crew[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [voiceConfigs, setVoiceConfigs] = useState<VoiceConfigPreset[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
   const [saveError, setSaveError] = useState('');
@@ -77,6 +91,7 @@ export default function CrewsPage() {
     voice_sample_rate: 16000,
     voice_language_code: 'en',
     voice_auto_tts: true,
+    voice_preset_id: '',
   });
 
   const [projects, setProjects] = useState<{id: number, name: string}[]>([]);
@@ -116,7 +131,7 @@ export default function CrewsPage() {
         fetch('/api/crews'),
         fetch('/api/agents'),
         fetch('/api/projects'),
-        fetch('/api/providers')
+        fetch('/api/providers'),
       ]);
       const crewsData = await crewsRes.json();
       const agentsData = await agentsRes.json();
@@ -134,6 +149,9 @@ export default function CrewsPage() {
               setAutoBuildProvider(dbProviders[0].id);
           }
       }
+      const voiceConfigsRes = await fetch('/api/voice/configs');
+      const voiceConfigData = await voiceConfigsRes.json().catch(() => []);
+      setVoiceConfigs(Array.isArray(voiceConfigData) ? voiceConfigData : []);
     } catch (e: any) {
       setError(e.message || 'Failed to load data');
     } finally {
@@ -285,6 +303,7 @@ export default function CrewsPage() {
         voice_sample_rate: Number(crew.voice_profile?.sample_rate || 16000),
         voice_language_code: String(crew.voice_profile?.language_code || 'en'),
         voice_auto_tts: Boolean(crew.voice_profile?.auto_tts ?? true),
+        voice_preset_id: String((crew.voice_profile as any)?.meta?.preset_id || ''),
       });
     } else {
       setEditingCrew(null);
@@ -306,6 +325,7 @@ export default function CrewsPage() {
         voice_sample_rate: 16000,
         voice_language_code: 'en',
         voice_auto_tts: true,
+        voice_preset_id: '',
       });
     }
     setIsModalOpen(true);
@@ -350,6 +370,9 @@ export default function CrewsPage() {
             sample_rate: Number(formData.voice_sample_rate || 16000),
             language_code: formData.voice_language_code,
             auto_tts: Boolean(formData.voice_auto_tts),
+            meta: {
+              preset_id: formData.voice_preset_id ? Number(formData.voice_preset_id) : null,
+            },
           }),
         });
         const voiceData = await voiceRes.json().catch(() => ({}));
@@ -449,6 +472,86 @@ export default function CrewsPage() {
     () => selectedCrewAgents.filter((agent) => agent.agent_role !== 'supervisor').length,
     [selectedCrewAgents]
   );
+
+  const applyVoicePreset = (presetId: string) => {
+    const preset = voiceConfigs.find((item) => String(item.id) === String(presetId));
+    if (!preset) {
+      setFormData((prev) => ({ ...prev, voice_preset_id: '' }));
+      return;
+    }
+    setFormData((prev) => ({
+      ...prev,
+      voice_preset_id: presetId,
+      voice_id: String(preset.voice_id || 'JBFqnCBsd6RMkjVDRZzb'),
+      tts_model_id: String(preset.tts_model_id || 'eleven_multilingual_v2'),
+      stt_model_id: String(preset.stt_model_id || 'scribe_v2_realtime'),
+      voice_output_format: String(preset.output_format || 'mp3_44100_128'),
+      voice_sample_rate: Number(preset.sample_rate || 16000),
+      voice_language_code: String(preset.language_code || 'en'),
+      voice_auto_tts: Boolean(preset.auto_tts ?? true),
+    }));
+  };
+
+  const saveCurrentVoicePreset = async () => {
+    const name = window.prompt('Voice preset name');
+    if (!name?.trim()) return;
+    const res = await fetch('/api/voice/configs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: name.trim(),
+        voice_id: formData.voice_id,
+        tts_model_id: formData.tts_model_id,
+        stt_model_id: formData.stt_model_id,
+        output_format: formData.voice_output_format,
+        sample_rate: Number(formData.voice_sample_rate || 16000),
+        language_code: formData.voice_language_code,
+        auto_tts: Boolean(formData.voice_auto_tts),
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setSaveError(String((data as any)?.error || 'Failed to save voice preset'));
+      return;
+    }
+    await loadData();
+    setFormData((prev) => ({ ...prev, voice_preset_id: String((data as any)?.id || '') }));
+  };
+
+  const updateSelectedVoicePreset = async () => {
+    if (!formData.voice_preset_id) return;
+    const preset = voiceConfigs.find((item) => String(item.id) === String(formData.voice_preset_id));
+    if (!preset) return;
+    const res = await fetch(`/api/voice/configs/${formData.voice_preset_id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: preset.name,
+        voice_id: formData.voice_id,
+        tts_model_id: formData.tts_model_id,
+        stt_model_id: formData.stt_model_id,
+        output_format: formData.voice_output_format,
+        sample_rate: Number(formData.voice_sample_rate || 16000),
+        language_code: formData.voice_language_code,
+        auto_tts: Boolean(formData.voice_auto_tts),
+        notes: preset.notes || '',
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setSaveError(String((data as any)?.error || 'Failed to update voice preset'));
+      return;
+    }
+    await loadData();
+  };
+
+  const deleteSelectedVoicePreset = async () => {
+    if (!formData.voice_preset_id || !window.confirm('Delete this voice preset?')) return;
+    await fetch(`/api/voice/configs/${formData.voice_preset_id}`, { method: 'DELETE' });
+    await loadData();
+    setFormData((prev) => ({ ...prev, voice_preset_id: '' }));
+  };
+
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
 
   return (
@@ -1194,6 +1297,30 @@ export default function CrewsPage() {
                     <p className="text-xs text-emerald-900/75">
                       Save voice defaults on this crew so live voice sessions can invoke the whole crew with its own STT/TTS profile.
                     </p>
+                    <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 items-end">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Voice Config Preset</label>
+                        <select
+                          className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 text-sm"
+                          value={formData.voice_preset_id}
+                          onChange={e => applyVoicePreset(e.target.value)}
+                        >
+                          <option value="">Custom runtime values</option>
+                          {voiceConfigs.map((preset) => (
+                            <option key={preset.id} value={preset.id}>{preset.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <button type="button" onClick={saveCurrentVoicePreset} className="px-3 py-3 rounded-2xl border border-slate-200 bg-white text-sm font-bold text-slate-700">
+                        Save As Preset
+                      </button>
+                      <button type="button" onClick={updateSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-3 rounded-2xl border border-slate-200 bg-white text-sm font-bold text-slate-700 disabled:opacity-40">
+                        Update Preset
+                      </button>
+                      <button type="button" onClick={deleteSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-3 rounded-2xl border border-red-200 bg-red-50 text-sm font-bold text-red-700 disabled:opacity-40">
+                        Delete Preset
+                      </button>
+                    </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div>
                         <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Voice ID</label>
