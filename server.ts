@@ -780,6 +780,9 @@ type VoiceSessionRow = {
 type VoiceSocketContext = {
   sessionId: string;
   agentId: number;
+  targetType: 'agent' | 'crew';
+  targetId: number;
+  targetName: string;
   voiceId: string;
   ttsModelId: string;
   sttModelId: string;
@@ -790,6 +793,8 @@ type VoiceSocketContext = {
   languageCode: string;
   autoTts: boolean;
   sttSocket?: WebSocket | null;
+  lastVoiceProgressAt?: number;
+  lastVoiceProgressText?: string;
 };
 
 const DEFAULT_VOICE_ID = process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'JBFqnCBsd6RMkjVDRZzb';
@@ -799,6 +804,41 @@ const DEFAULT_TTS_FORMAT = process.env.ELEVENLABS_DEFAULT_OUTPUT_FORMAT || 'mp3_
 const DEFAULT_STT_SAMPLE_RATE = Number(process.env.ELEVENLABS_DEFAULT_SAMPLE_RATE || 16000);
 const voiceSocketContexts = new Map<WebSocket, VoiceSocketContext>();
 let voiceWss: WebSocketServer | null = null;
+
+function resolveVoiceTarget(targetType: string, targetId: number) {
+  if (targetType === 'crew') {
+    const crew = db.prepare('SELECT id, name, process, coordinator_agent_id FROM crews WHERE id = ?').get(targetId) as any;
+    if (!crew) return null;
+    const fallbackAgent = crew.coordinator_agent_id
+      ? (db.prepare('SELECT id, name FROM agents WHERE id = ?').get(crew.coordinator_agent_id) as any)
+      : (db.prepare(`
+          SELECT a.id, a.name
+          FROM agents a
+          JOIN crew_agents ca ON ca.agent_id = a.id
+          WHERE ca.crew_id = ?
+          ORDER BY ca.id ASC
+          LIMIT 1
+        `).get(targetId) as any);
+    if (!fallbackAgent?.id) return null;
+    return {
+      targetType: 'crew' as const,
+      targetId: Number(crew.id),
+      targetName: String(crew.name || `Crew ${crew.id}`),
+      agentId: Number(fallbackAgent.id),
+      crew,
+    };
+  }
+
+  const agent = db.prepare('SELECT id, name, role FROM agents WHERE id = ?').get(targetId) as any;
+  if (!agent) return null;
+  return {
+    targetType: 'agent' as const,
+    targetId: Number(agent.id),
+    targetName: String(agent.name || `Agent ${agent.id}`),
+    agentId: Number(agent.id),
+    agent,
+  };
+}
 
 function getAgentVoiceProfile(agentId: number) {
   const row = db.prepare('SELECT * FROM agent_voice_profiles WHERE agent_id = ?').get(agentId) as any;
@@ -900,9 +940,19 @@ function createVoiceSession(agentId: number, options?: Partial<VoiceSocketContex
     options?.voiceId || DEFAULT_VOICE_ID,
     options?.ttsModelId || DEFAULT_TTS_MODEL,
     options?.sttModelId || DEFAULT_STT_MODEL,
-    JSON.stringify({ output_format: options?.outputFormat || DEFAULT_TTS_FORMAT }),
+    JSON.stringify({
+      output_format: options?.outputFormat || DEFAULT_TTS_FORMAT,
+      target_type: options?.targetType || 'agent',
+      target_id: options?.targetId || agentId,
+      target_name: options?.targetName || null,
+    }),
   );
-  appendVoiceSessionEvent(sessionId, 'session.started', { agent_id: agentId });
+  appendVoiceSessionEvent(sessionId, 'session.started', {
+    agent_id: agentId,
+    target_type: options?.targetType || 'agent',
+    target_id: options?.targetId || agentId,
+    target_name: options?.targetName || null,
+  });
   return sessionId;
 }
 
@@ -957,6 +1007,87 @@ async function synthesizeVoiceAudio(text: string, voiceId: string, ttsModelId: s
 function sendVoiceSocketEvent(ws: WebSocket, type: string, payload: any = {}) {
   if (ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify({ type, ...payload }));
+}
+
+function buildVoiceProgressUpdate(log: any, targetType: 'agent' | 'crew', targetName: string) {
+  if (!log || typeof log !== 'object') return null;
+  const agentName = String(log.agent || '').trim();
+  const toolName = String(log.tool || '').trim();
+  const title = String(log.title || '').trim();
+  const result = String(log.result || '').trim();
+  const message = String(log.message || '').trim();
+
+  switch (String(log.type || '')) {
+    case 'tool_call':
+      if (!toolName) return null;
+      return agentName
+        ? `${agentName} is using ${toolName}.`
+        : `${targetType === 'crew' ? targetName : 'The agent'} is using ${toolName}.`;
+    case 'tool_result':
+      if (!toolName) return null;
+      return agentName
+        ? `${agentName} finished ${toolName}.`
+        : `${toolName} finished successfully.`;
+    case 'delegation_start':
+      return title ? `Delegating work: ${title}.` : 'Delegating work to a specialist.';
+    case 'crew_delegate':
+      if (log.status === 'completed') return `${agentName || 'A specialist'} finished a delegated step.`;
+      if (log.status === 'failed') return `${agentName || 'A specialist'} hit an issue during a delegated step.`;
+      return title ? `Delegated step in progress: ${title}.` : null;
+    case 'crew_synthesis_step':
+      return 'The coordinator is synthesizing specialist results.';
+    case 'crew_summary':
+      return result ? `Interim summary: ${result.slice(0, 220)}` : null;
+    case 'crew_result':
+      return 'The crew has finished and the final answer is ready.';
+    case 'thought':
+      if (!message) return null;
+      if (/queued|waiting for a worker/i.test(message)) return `${targetName} is queued and waiting to start.`;
+      if (/claimed the run|starting execution/i.test(message)) return `${targetName} is now running.`;
+      if (/launching delegation/i.test(message)) return 'The coordinator is launching specialist delegates.';
+      if (/generated .* runtime task/i.test(message)) return `${targetName} generated runtime tasks and is moving ahead.`;
+      return null;
+    case 'finish':
+      return agentName ? `${agentName} completed its step.` : `${targetName} completed a step.`;
+    case 'error':
+      return message ? `There is an issue: ${message}` : 'An error occurred during execution.';
+    default:
+      return null;
+  }
+}
+
+async function emitVoiceProgress(ws: WebSocket, ctx: VoiceSocketContext, summary: string | null, extra?: any) {
+  const text = String(summary || '').trim();
+  if (!text) return;
+  const now = Date.now();
+  if (ctx.lastVoiceProgressText === text) return;
+  if (ctx.lastVoiceProgressAt && now - ctx.lastVoiceProgressAt < 3000) return;
+
+  ctx.lastVoiceProgressAt = now;
+  ctx.lastVoiceProgressText = text;
+  appendVoiceSessionEvent(ctx.sessionId, 'voice.progress', { text, ...(extra || {}) });
+  sendVoiceSocketEvent(ws, 'voice.progress', { sessionId: ctx.sessionId, text, ...(extra || {}) });
+
+  if (!ctx.autoTts) return;
+  synthesizeVoiceAudio(text, ctx.voiceId, ctx.ttsModelId, ctx.outputFormat)
+    .then((audio) => {
+      appendVoiceSessionEvent(ctx.sessionId, 'voice.progress.audio', {
+        text,
+        bytes: audio.length,
+        output_format: ctx.outputFormat,
+      });
+      sendVoiceSocketEvent(ws, 'voice.progress.audio', {
+        sessionId: ctx.sessionId,
+        text,
+        audio: audio.toString('base64'),
+        mimeType: ctx.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
+        outputFormat: ctx.outputFormat,
+      });
+    })
+    .catch((error) => {
+      appendVoiceSessionEvent(ctx.sessionId, 'voice.progress.error', { message: error?.message || 'Failed to synthesize voice progress' });
+      sendVoiceSocketEvent(ws, 'voice.progress.error', { sessionId: ctx.sessionId, message: error?.message || 'Failed to synthesize voice progress' });
+    });
 }
 
 function openRealtimeSttSocket(ctx: VoiceSocketContext, browserSocket: WebSocket) {
@@ -3975,6 +4106,32 @@ app.get('/api/voice/agents', (_req, res) => {
     ...agent,
     voice_profile: getAgentVoiceProfile(Number(agent.id)),
   })));
+});
+
+app.get('/api/voice/targets', (_req, res) => {
+  const agents = db.prepare('SELECT id, name, role, provider, model, status FROM agents ORDER BY id ASC').all() as any[];
+  const crews = db.prepare('SELECT id, name, process, coordinator_agent_id, is_exposed FROM crews ORDER BY id ASC').all() as any[];
+  res.json({
+    agents: agents.map((agent) => ({
+      id: Number(agent.id),
+      type: 'agent',
+      name: agent.name,
+      subtitle: agent.role || 'Agent',
+      provider: agent.provider || null,
+      model: agent.model || null,
+      status: agent.status || null,
+      voice_profile: getAgentVoiceProfile(Number(agent.id)),
+    })),
+    crews: crews.map((crew) => ({
+      id: Number(crew.id),
+      type: 'crew',
+      name: crew.name,
+      subtitle: `${crew.process || 'sequential'} crew`,
+      process: crew.process || 'sequential',
+      is_exposed: Boolean(crew.is_exposed),
+      coordinator_agent_id: crew.coordinator_agent_id ? Number(crew.coordinator_agent_id) : null,
+    })),
+  });
 });
 
 app.get('/api/voice/agents/:id/profile', (req, res) => {
@@ -8050,8 +8207,10 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
 
   wss.on('connection', (ws, request) => {
     const url = new URL(request.url || '/ws/voice', `http://${request.headers.host || 'localhost'}`);
-    const agentId = Number(url.searchParams.get('agentId') || 0);
-    const storedProfile = Number.isFinite(agentId) && agentId > 0 ? getAgentVoiceProfile(agentId) : null;
+    const targetType = url.searchParams.get('targetType') === 'crew' ? 'crew' : 'agent';
+    const targetId = Number(url.searchParams.get('targetId') || url.searchParams.get('agentId') || 0);
+    const resolvedTarget = Number.isFinite(targetId) && targetId > 0 ? resolveVoiceTarget(targetType, targetId) : null;
+    const storedProfile = resolvedTarget?.targetType === 'agent' ? getAgentVoiceProfile(resolvedTarget.agentId) : null;
     const initialVoiceId = url.searchParams.get('voiceId') || storedProfile?.voice_id || DEFAULT_VOICE_ID;
     const initialTtsModelId = url.searchParams.get('ttsModelId') || storedProfile?.tts_model_id || DEFAULT_TTS_MODEL;
     const initialSttModelId = url.searchParams.get('sttModelId') || storedProfile?.stt_model_id || DEFAULT_STT_MODEL;
@@ -8061,20 +8220,23 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
     const initialLanguageCode = url.searchParams.get('languageCode') || storedProfile?.language_code || 'en';
     const initialAutoTts = String(url.searchParams.get('autoTts') || String(storedProfile?.auto_tts ?? true)) !== 'false';
 
-    if (!Number.isFinite(agentId) || agentId <= 0) {
-      sendVoiceSocketEvent(ws, 'error', { message: 'agentId query param is required' });
+    if (!resolvedTarget) {
+      sendVoiceSocketEvent(ws, 'error', { message: `${targetType} target is required` });
       ws.close();
       return;
     }
 
-    const agent = db.prepare('SELECT id, name, role, provider, model FROM agents WHERE id = ?').get(agentId) as any;
+    const agent = db.prepare('SELECT id, name, role, provider, model FROM agents WHERE id = ?').get(resolvedTarget.agentId) as any;
     if (!agent) {
-      sendVoiceSocketEvent(ws, 'error', { message: 'Agent not found' });
+      sendVoiceSocketEvent(ws, 'error', { message: 'Runtime agent not found for voice target' });
       ws.close();
       return;
     }
 
-    const sessionId = createVoiceSession(agentId, {
+    const sessionId = createVoiceSession(resolvedTarget.agentId, {
+      targetType: resolvedTarget.targetType,
+      targetId: resolvedTarget.targetId,
+      targetName: resolvedTarget.targetName,
       voiceId: initialVoiceId,
       ttsModelId: initialTtsModelId,
       sttModelId: initialSttModelId,
@@ -8082,12 +8244,15 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
       audioMimeType: initialMimeType,
       audioChunks: [],
       sessionId: '',
-      agentId,
+      agentId: resolvedTarget.agentId,
     } as any);
 
     const context: VoiceSocketContext = {
       sessionId,
-      agentId,
+      agentId: resolvedTarget.agentId,
+      targetType: resolvedTarget.targetType,
+      targetId: resolvedTarget.targetId,
+      targetName: resolvedTarget.targetName,
       voiceId: initialVoiceId,
       ttsModelId: initialTtsModelId,
       sttModelId: initialSttModelId,
@@ -8098,11 +8263,18 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
       languageCode: initialLanguageCode,
       autoTts: initialAutoTts,
       sttSocket: null,
+      lastVoiceProgressAt: 0,
+      lastVoiceProgressText: '',
     };
     voiceSocketContexts.set(ws, context);
 
     sendVoiceSocketEvent(ws, 'session.started', {
       sessionId,
+      target: {
+        type: resolvedTarget.targetType,
+        id: resolvedTarget.targetId,
+        name: resolvedTarget.targetName,
+      },
       agent: { id: agent.id, name: agent.name, role: agent.role, provider: agent.provider, model: agent.model },
       voice: {
         voiceId: context.voiceId,
@@ -8194,9 +8366,6 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
         }
 
         if (type === 'transcript.commit') {
-          const agentRow = db.prepare('SELECT * FROM agents WHERE id = ?').get(current.agentId) as any;
-          if (!agentRow) throw new Error('Agent not found');
-
           let transcript = String(message.text || '').trim();
           if (!transcript) {
             const existingTranscript = String(getVoiceSession(current.sessionId)?.transcript || '').trim();
@@ -8216,37 +8385,95 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
           updateVoiceSession(current.sessionId, { status: 'processing', transcript });
           appendVoiceSessionEvent(current.sessionId, 'stt.final', { text: transcript });
           sendVoiceSocketEvent(ws, 'stt.final', { sessionId: current.sessionId, text: transcript });
+          await emitVoiceProgress(ws, current, `Understood. Starting ${current.targetName}.`, {
+            targetType: current.targetType,
+            targetId: current.targetId,
+          });
 
-          const agentSession = await ensureAgentSession(current.agentId, current.sessionId, `voice_${current.sessionId}`);
-          sendVoiceSocketEvent(ws, 'runtime.event', { event: { type: 'status', message: 'Agent execution started' } });
+          let reply = '';
+          let executionId: number | null = null;
+          let usage: any = null;
 
-          const result = await runAgent(
-            agentRow,
-            { description: transcript, expected_output: 'A helpful spoken response.' },
-            '',
-            (log) => {
-              appendVoiceSessionEvent(current.sessionId, 'runtime.event', log);
-              sendVoiceSocketEvent(ws, 'runtime.event', { event: log });
-            },
-            {
+          if (current.targetType === 'crew') {
+            const crewId = current.targetId;
+            const info = db.prepare('INSERT INTO crew_executions (crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?)')
+              .run(crewId, 'pending', JSON.stringify([]), transcript || '', null);
+            executionId = Number(info.lastInsertRowid);
+            db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
+              .run(executionId, 'thought', JSON.stringify({ agent: 'system', message: 'Voice-triggered crew run queued.' }));
+            sendVoiceSocketEvent(ws, 'runtime.event', { event: { type: 'status', message: 'Crew execution queued' }, executionId });
+            await emitVoiceProgress(ws, current, `${current.targetName} has been queued and will start shortly.`, { executionId });
+            await enqueueJob('run_crew', {
+              crewId,
+              executionId,
+              initialInput: transcript || '',
               initiatedBy: 'voice_console',
-              sessionId: agentSession.id,
-              userId: agentSession.user_id ?? `voice_${current.sessionId}`,
-            }
-          );
+            });
 
-          const reply = String(result?.text || '').trim();
+            let lastLogCount = 0;
+            while (true) {
+              await new Promise((resolve) => setTimeout(resolve, 700));
+              const logs = readCrewExecutionLogs(executionId);
+              const newLogs = logs.slice(lastLogCount);
+              lastLogCount = logs.length;
+              for (const log of newLogs) {
+                appendVoiceSessionEvent(current.sessionId, 'runtime.event', log);
+                sendVoiceSocketEvent(ws, 'runtime.event', { event: log, executionId });
+                await emitVoiceProgress(ws, current, buildVoiceProgressUpdate(log, current.targetType, current.targetName), {
+                  executionId,
+                  logType: log?.type || null,
+                });
+              }
+              const execution = db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any;
+              const status = String(execution?.status || 'pending');
+              if (status === 'completed' || status === 'failed' || status === 'canceled') {
+                reply = extractCrewFinalResult(logs).trim();
+                if (!reply) {
+                  const lastError = [...logs].reverse().find((log: any) => log?.type === 'error');
+                  reply = String(lastError?.message || `Crew run ${status}.`).trim();
+                }
+                break;
+              }
+            }
+          } else {
+            const agentRow = db.prepare('SELECT * FROM agents WHERE id = ?').get(current.agentId) as any;
+            if (!agentRow) throw new Error('Agent not found');
+            const agentSession = await ensureAgentSession(current.agentId, current.sessionId, `voice_${current.sessionId}`);
+            sendVoiceSocketEvent(ws, 'runtime.event', { event: { type: 'status', message: 'Agent execution started' } });
+
+            const result = await runAgent(
+              agentRow,
+              { description: transcript, expected_output: 'A helpful spoken response.' },
+              '',
+              (log) => {
+                appendVoiceSessionEvent(current.sessionId, 'runtime.event', log);
+                sendVoiceSocketEvent(ws, 'runtime.event', { event: log });
+                void emitVoiceProgress(ws, current, buildVoiceProgressUpdate(log, current.targetType, current.targetName), {
+                  logType: log?.type || null,
+                });
+              },
+              {
+                initiatedBy: 'voice_console',
+                sessionId: agentSession.id,
+                userId: agentSession.user_id ?? `voice_${current.sessionId}`,
+              }
+            );
+            reply = String(result?.text || '').trim();
+            executionId = Number(result?.exec_id || 0) || null;
+            usage = result?.usage ?? null;
+          }
+
           updateVoiceSession(current.sessionId, { status: 'speaking', reply_text: reply });
           appendVoiceSessionEvent(current.sessionId, 'agent.reply', {
             text: reply,
-            execution_id: result?.exec_id ?? null,
-            usage: result?.usage ?? null,
+            execution_id: executionId,
+            usage,
           });
           sendVoiceSocketEvent(ws, 'agent.reply', {
             sessionId: current.sessionId,
             text: reply,
-            executionId: result?.exec_id ?? null,
-            usage: result?.usage ?? null,
+            executionId,
+            usage,
           });
 
           if (reply && current.autoTts) {

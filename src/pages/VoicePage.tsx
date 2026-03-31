@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Mic, MicOff, PhoneCall, PhoneOff, Radio, Send, Volume2, Waves, Bot, Activity, Save } from 'lucide-react';
 
-type Agent = {
+type VoiceTarget = {
   id: number;
+  type: 'agent' | 'crew';
   name: string;
-  role: string;
+  subtitle?: string;
+  role?: string;
+  process?: string;
   provider?: string;
   model?: string;
   status?: string;
@@ -29,8 +32,9 @@ function toBase64(buffer: ArrayBuffer) {
 }
 
 export default function VoicePage() {
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [agentId, setAgentId] = useState<string>('');
+  const [targets, setTargets] = useState<VoiceTarget[]>([]);
+  const [targetType, setTargetType] = useState<'agent' | 'crew'>('agent');
+  const [targetId, setTargetId] = useState<string>('');
   const [voiceId, setVoiceId] = useState('JBFqnCBsd6RMkjVDRZzb');
   const [ttsModelId, setTtsModelId] = useState('eleven_multilingual_v2');
   const [sttModelId, setSttModelId] = useState('scribe_v1');
@@ -45,41 +49,64 @@ export default function VoicePage() {
   const [liveTranscript, setLiveTranscript] = useState('');
   const [agentReply, setAgentReply] = useState('');
   const [events, setEvents] = useState<VoiceEvent[]>([]);
+  const [voiceProgress, setVoiceProgress] = useState<Array<{ id: string; text: string; ts: string }>>([]);
   const [lastAudioSrc, setLastAudioSrc] = useState('');
   const [error, setError] = useState('');
 
   const wsRef = useRef<WebSocket | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
 
   useEffect(() => {
-    fetch('/api/voice/agents')
+    fetch('/api/voice/targets')
       .then((res) => res.json())
       .then((data) => {
-        const nextAgents = Array.isArray(data) ? data : [];
-        setAgents(nextAgents);
-        if (!agentId && nextAgents[0]?.id) setAgentId(String(nextAgents[0].id));
+        const nextTargets = [
+          ...(Array.isArray(data?.agents) ? data.agents : []),
+          ...(Array.isArray(data?.crews) ? data.crews : []),
+        ] as VoiceTarget[];
+        setTargets(nextTargets);
+        const firstAgent = nextTargets.find((target) => target.type === 'agent');
+        if (firstAgent) {
+          setTargetType('agent');
+          setTargetId(String(firstAgent.id));
+        } else if (nextTargets[0]?.id) {
+          setTargetType(nextTargets[0].type);
+          setTargetId(String(nextTargets[0].id));
+        }
       })
-      .catch(() => setAgents([]));
+      .catch(() => setTargets([]));
   }, []);
 
-  const selectedAgent = useMemo(
-    () => agents.find((agent) => Number(agent.id) === Number(agentId)) || null,
-    [agentId, agents],
+  const availableTargets = useMemo(
+    () => targets.filter((target) => target.type === targetType),
+    [targetType, targets],
+  );
+
+  const selectedTarget = useMemo(
+    () => availableTargets.find((target) => Number(target.id) === Number(targetId)) || null,
+    [targetId, availableTargets],
   );
 
   useEffect(() => {
-    if (!selectedAgent?.voice_profile) return;
-    setVoiceId(String(selectedAgent.voice_profile.voice_id || 'JBFqnCBsd6RMkjVDRZzb'));
-    setTtsModelId(String(selectedAgent.voice_profile.tts_model_id || 'eleven_multilingual_v2'));
-    setSttModelId(String(selectedAgent.voice_profile.stt_model_id || 'scribe_v1'));
-    setOutputFormat(String(selectedAgent.voice_profile.output_format || 'mp3_44100_128'));
-    setSampleRate(Number(selectedAgent.voice_profile.sample_rate || 16000));
-    setLanguageCode(String(selectedAgent.voice_profile.language_code || 'en'));
-    setAutoTts(Boolean(selectedAgent.voice_profile.auto_tts ?? true));
-  }, [selectedAgent]);
+    if (!availableTargets.some((target) => String(target.id) === String(targetId))) {
+      setTargetId(availableTargets[0]?.id ? String(availableTargets[0].id) : '');
+    }
+  }, [availableTargets, targetId]);
+
+  useEffect(() => {
+    if (!selectedTarget?.voice_profile) return;
+    setVoiceId(String(selectedTarget.voice_profile.voice_id || 'JBFqnCBsd6RMkjVDRZzb'));
+    setTtsModelId(String(selectedTarget.voice_profile.tts_model_id || 'eleven_multilingual_v2'));
+    setSttModelId(String(selectedTarget.voice_profile.stt_model_id || 'scribe_v1'));
+    setOutputFormat(String(selectedTarget.voice_profile.output_format || 'mp3_44100_128'));
+    setSampleRate(Number(selectedTarget.voice_profile.sample_rate || 16000));
+    setLanguageCode(String(selectedTarget.voice_profile.language_code || 'en'));
+    setAutoTts(Boolean(selectedTarget.voice_profile.auto_tts ?? true));
+  }, [selectedTarget]);
 
   const pushEvent = (type: string, payload: any) => {
     setEvents((prev) => [
@@ -94,10 +121,11 @@ export default function VoicePage() {
   };
 
   const connect = () => {
-    if (!agentId) return;
+    if (!targetId) return;
     setError('');
     const url = new URL(`${window.location.origin.replace(/^http/, 'ws')}/ws/voice`);
-    url.searchParams.set('agentId', String(agentId));
+    url.searchParams.set('targetType', targetType);
+    url.searchParams.set('targetId', String(targetId));
     url.searchParams.set('voiceId', voiceId);
     url.searchParams.set('ttsModelId', ttsModelId);
     url.searchParams.set('sttModelId', sttModelId);
@@ -109,7 +137,7 @@ export default function VoicePage() {
     wsRef.current = ws;
     ws.onopen = () => {
       setIsConnected(true);
-      pushEvent('socket.open', { agentId: Number(agentId) });
+      pushEvent('socket.open', { targetType, targetId: Number(targetId) });
     };
     ws.onmessage = (event) => {
       try {
@@ -118,7 +146,17 @@ export default function VoicePage() {
         if (message.type === 'session.started') setSessionId(String(message.sessionId || ''));
         if (message.type === 'stt.final') setLiveTranscript(String(message.text || ''));
         if (message.type === 'agent.reply') setAgentReply(String(message.text || ''));
+        if (message.type === 'voice.progress' && message.text) {
+          setVoiceProgress((prev) => [
+            { id: `${Date.now()}_${prev.length}`, text: String(message.text || ''), ts: new Date().toISOString() },
+            ...prev,
+          ].slice(0, 20));
+        }
         if (message.type === 'tts.audio' && message.audio) {
+          const mimeType = String(message.mimeType || 'audio/mpeg');
+          setLastAudioSrc(`data:${mimeType};base64,${message.audio}`);
+        }
+        if (message.type === 'voice.progress.audio' && message.audio) {
           const mimeType = String(message.mimeType || 'audio/mpeg');
           setLastAudioSrc(`data:${mimeType};base64,${message.audio}`);
         }
@@ -158,8 +196,8 @@ export default function VoicePage() {
   };
 
   const saveProfile = async () => {
-    if (!agentId) return;
-    await fetch(`/api/voice/agents/${agentId}/profile`, {
+    if (targetType !== 'agent' || !targetId) return;
+    await fetch(`/api/voice/agents/${targetId}/profile`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -172,7 +210,7 @@ export default function VoicePage() {
         auto_tts: autoTts,
       }),
     });
-    pushEvent('profile.saved', { agentId: Number(agentId) });
+    pushEvent('profile.saved', { targetType, targetId: Number(targetId) });
   };
 
   const startRecording = async () => {
@@ -231,6 +269,11 @@ export default function VoicePage() {
     setIsRecording(false);
   };
 
+  useEffect(() => {
+    if (!lastAudioSrc || !audioRef.current) return;
+    audioRef.current.play().catch(() => undefined);
+  }, [lastAudioSrc]);
+
   return (
     <div className="space-y-6">
       <div className="swarm-hero p-6">
@@ -263,11 +306,30 @@ export default function VoicePage() {
             <div className="text-sm font-semibold text-slate-900 mb-4">Session Setup</div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Agent</label>
-                <select className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm bg-white" value={agentId} onChange={(e) => setAgentId(e.target.value)}>
-                  {agents.map((agent) => (
-                    <option key={agent.id} value={agent.id}>
-                      {agent.name} ({agent.role})
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Runtime Type</label>
+                <select
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm bg-white"
+                  value={targetType}
+                  onChange={(e) => setTargetType(e.target.value === 'crew' ? 'crew' : 'agent')}
+                >
+                  <option value="agent">Agent</option>
+                  <option value="crew">Crew</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">
+                  {targetType === 'crew' ? 'Crew' : 'Agent'}
+                </label>
+                <select
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm bg-white"
+                  value={targetId}
+                  onChange={(e) => setTargetId(e.target.value)}
+                >
+                  {!availableTargets.length ? (
+                    <option value="">{targetType === 'crew' ? 'No crews available' : 'No agents available'}</option>
+                  ) : availableTargets.map((target) => (
+                    <option key={`${target.type}-${target.id}`} value={target.id}>
+                      {target.name} ({target.subtitle || target.role || target.type})
                     </option>
                   ))}
                 </select>
@@ -305,14 +367,16 @@ export default function VoicePage() {
               </label>
               <button onClick={saveProfile} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-700 inline-flex items-center gap-2">
                 <Save size={14} />
-                Save Agent Voice Profile
+                {targetType === 'agent' ? 'Save Agent Voice Profile' : 'Crew Uses Session Voice Settings'}
               </button>
             </div>
 
             <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-              <div className="font-semibold text-slate-900">{selectedAgent?.name || 'No agent selected'}</div>
+              <div className="font-semibold text-slate-900">{selectedTarget?.name || `No ${targetType} selected`}</div>
               <div className="mt-1 text-xs text-slate-500">
-                {selectedAgent?.role || 'No role'} {selectedAgent?.provider ? `• ${selectedAgent.provider}` : ''} {selectedAgent?.model ? `• ${selectedAgent.model}` : ''}
+                {selectedTarget?.subtitle || selectedTarget?.role || 'No runtime details'}
+                {selectedTarget?.provider ? ` • ${selectedTarget.provider}` : ''}
+                {selectedTarget?.model ? ` • ${selectedTarget.model}` : ''}
               </div>
               <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
                 <span className={`rounded-full px-2.5 py-1 ${isConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>
@@ -365,6 +429,19 @@ export default function VoicePage() {
               Live Transcript and Reply
             </div>
             <div className="grid grid-cols-1 gap-4">
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-700">Voice Progress</div>
+                <div className="mt-2 space-y-2">
+                  {voiceProgress.length ? voiceProgress.map((item) => (
+                    <div key={item.id} className="rounded-xl bg-white/70 px-3 py-2 text-sm text-slate-800 border border-amber-100">
+                      <div>{item.text}</div>
+                      <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-400">{new Date(item.ts).toLocaleTimeString()}</div>
+                    </div>
+                  )) : (
+                    <div className="text-sm text-slate-500">Short spoken progress updates will appear here during long runs.</div>
+                  )}
+                </div>
+              </div>
               <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
                 <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Transcript</div>
                 <div className="mt-2 text-sm text-slate-800 whitespace-pre-wrap min-h-[64px]">{liveTranscript || 'Waiting for transcript...'}</div>
@@ -382,7 +459,7 @@ export default function VoicePage() {
                     <Volume2 size={12} />
                     Synthesized Audio
                   </div>
-                  <audio className="mt-3 w-full" controls src={lastAudioSrc} />
+                  <audio ref={audioRef} className="mt-3 w-full" controls src={lastAudioSrc} />
                 </div>
               ) : null}
             </div>
