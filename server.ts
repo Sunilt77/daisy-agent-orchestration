@@ -819,6 +819,10 @@ type VoiceSocketContext = {
   lastVoiceProgressText?: string;
   isExecuting?: boolean;
   lastCommittedTranscript?: string;
+  isUserSpeaking?: boolean;
+  turnState?: 'idle' | 'listening' | 'thinking' | 'speaking';
+  activeTtsAbort?: AbortController | null;
+  activeProgressTtsAbort?: AbortController | null;
 };
 
 const DEFAULT_VOICE_ID = process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'JBFqnCBsd6RMkjVDRZzb';
@@ -1138,6 +1142,7 @@ async function streamSynthesizeVoiceAudio(
   ttsModelId: string,
   outputFormat: string,
   onChunk: (chunk: Buffer) => void | Promise<void>,
+  signal?: AbortSignal,
 ) {
   const apiKey = getVoiceCredentialApiKey();
   if (!apiKey) throw new Error('ElevenLabs voice credential is not configured.');
@@ -1153,6 +1158,7 @@ async function streamSynthesizeVoiceAudio(
       model_id: ttsModelId || DEFAULT_TTS_MODEL,
       output_format: outputFormat || DEFAULT_TTS_FORMAT,
     }),
+    signal,
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
@@ -1161,6 +1167,7 @@ async function streamSynthesizeVoiceAudio(
   if (!res.body) throw new Error('ElevenLabs TTS returned no response body');
   const reader = res.body.getReader();
   while (true) {
+    if (signal?.aborted) throw new Error('TTS aborted');
     const { done, value } = await reader.read();
     if (done) break;
     if (!value?.length) continue;
@@ -1174,6 +1181,31 @@ async function synthesizeVoiceAudio(text: string, voiceId: string, ttsModelId: s
     chunks.push(chunk);
   });
   return Buffer.concat(chunks);
+}
+
+function setVoiceTurnState(ws: WebSocket, ctx: VoiceSocketContext, state: 'idle' | 'listening' | 'thinking' | 'speaking', extra?: any) {
+  if (ctx.turnState === state) return;
+  ctx.turnState = state;
+  appendVoiceSessionEvent(ctx.sessionId, 'turn.state', { state, ...(extra || {}) });
+  sendVoiceSocketEvent(ws, 'turn.state', { sessionId: ctx.sessionId, state, ...(extra || {}) });
+}
+
+function interruptVoicePlayback(ws: WebSocket, ctx: VoiceSocketContext, reason: string) {
+  let interrupted = false;
+  if (ctx.activeTtsAbort) {
+    ctx.activeTtsAbort.abort();
+    ctx.activeTtsAbort = null;
+    interrupted = true;
+  }
+  if (ctx.activeProgressTtsAbort) {
+    ctx.activeProgressTtsAbort.abort();
+    ctx.activeProgressTtsAbort = null;
+    interrupted = true;
+  }
+  if (interrupted) {
+    appendVoiceSessionEvent(ctx.sessionId, 'tts.interrupted', { reason });
+    sendVoiceSocketEvent(ws, 'tts.interrupted', { sessionId: ctx.sessionId, reason });
+  }
 }
 
 function sendVoiceSocketEvent(ws: WebSocket, type: string, payload: any = {}) {
@@ -1241,6 +1273,8 @@ async function emitVoiceProgress(ws: WebSocket, ctx: VoiceSocketContext, summary
   sendVoiceSocketEvent(ws, 'voice.progress', { sessionId: ctx.sessionId, text, ...(extra || {}) });
 
   if (!ctx.autoTts) return;
+  const abortController = new AbortController();
+  ctx.activeProgressTtsAbort = abortController;
   sendVoiceSocketEvent(ws, 'voice.progress.audio.start', {
     sessionId: ctx.sessionId,
     text,
@@ -1257,8 +1291,9 @@ async function emitVoiceProgress(ws: WebSocket, ctx: VoiceSocketContext, summary
       mimeType: ctx.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
       outputFormat: ctx.outputFormat,
     });
-  })
+  }, abortController.signal)
     .then(() => {
+      if (ctx.activeProgressTtsAbort === abortController) ctx.activeProgressTtsAbort = null;
       appendVoiceSessionEvent(ctx.sessionId, 'voice.progress.audio', {
         text,
         bytes: totalBytes,
@@ -1273,6 +1308,8 @@ async function emitVoiceProgress(ws: WebSocket, ctx: VoiceSocketContext, summary
       });
     })
     .catch((error) => {
+      if (ctx.activeProgressTtsAbort === abortController) ctx.activeProgressTtsAbort = null;
+      if (abortController.signal.aborted) return;
       appendVoiceSessionEvent(ctx.sessionId, 'voice.progress.error', { message: error?.message || 'Failed to synthesize voice progress' });
       sendVoiceSocketEvent(ws, 'voice.progress.error', { sessionId: ctx.sessionId, message: error?.message || 'Failed to synthesize voice progress' });
     });
@@ -1290,6 +1327,7 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
   current.isExecuting = true;
   current.lastCommittedTranscript = transcript;
   try {
+    setVoiceTurnState(ws, current, 'thinking', { transcript });
     updateVoiceSession(current.sessionId, { status: 'processing', transcript });
     appendVoiceSessionEvent(current.sessionId, 'stt.final', { text: transcript });
     sendVoiceSocketEvent(ws, 'stt.final', { sessionId: current.sessionId, text: transcript });
@@ -1385,6 +1423,9 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
     });
 
     if (reply && current.autoTts) {
+      const abortController = new AbortController();
+      current.activeTtsAbort = abortController;
+      setVoiceTurnState(ws, current, 'speaking');
       sendVoiceSocketEvent(ws, 'tts.processing', { sessionId: current.sessionId });
       sendVoiceSocketEvent(ws, 'tts.start', {
         sessionId: current.sessionId,
@@ -1400,7 +1441,8 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
           mimeType: current.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
           outputFormat: current.outputFormat,
         });
-      });
+      }, abortController.signal);
+      if (current.activeTtsAbort === abortController) current.activeTtsAbort = null;
       appendVoiceSessionEvent(current.sessionId, 'tts.audio', {
         bytes: totalBytes,
         output_format: current.outputFormat,
@@ -1416,7 +1458,9 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
     updateVoiceSession(current.sessionId, { status: 'completed' });
     appendVoiceSessionEvent(current.sessionId, 'session.completed', {});
     sendVoiceSocketEvent(ws, 'session.completed', { sessionId: current.sessionId });
+    setVoiceTurnState(ws, current, 'idle');
   } finally {
+    current.activeTtsAbort = null;
     current.isExecuting = false;
   }
 }
@@ -1444,6 +1488,7 @@ function openRealtimeSttSocket(ctx: VoiceSocketContext, browserSocket: WebSocket
 
   sttSocket.on('open', () => {
     sendVoiceSocketEvent(browserSocket, 'stt.socket.open', { sessionId: ctx.sessionId });
+    setVoiceTurnState(browserSocket, ctx, 'listening');
   });
 
   sttSocket.on('message', (raw) => {
@@ -1452,6 +1497,20 @@ function openRealtimeSttSocket(ctx: VoiceSocketContext, browserSocket: WebSocket
       appendVoiceSessionEvent(ctx.sessionId, 'stt.realtime', payload);
       const partial = String(payload?.text || payload?.transcript || '').trim();
       const messageType = String(payload?.message_type || '');
+      const speechStarted = messageType === 'speech_started' || messageType === 'speech_start';
+      const speechStopped = messageType === 'speech_stopped' || messageType === 'speech_end';
+      if (speechStarted || (partial && !ctx.isUserSpeaking)) {
+        ctx.isUserSpeaking = true;
+        interruptVoicePlayback(browserSocket, ctx, 'user_speaking');
+        appendVoiceSessionEvent(ctx.sessionId, 'speech.started', { raw: payload });
+        sendVoiceSocketEvent(browserSocket, 'speech.started', { sessionId: ctx.sessionId, raw: payload });
+        setVoiceTurnState(browserSocket, ctx, 'listening');
+      }
+      if (speechStopped) {
+        ctx.isUserSpeaking = false;
+        appendVoiceSessionEvent(ctx.sessionId, 'speech.stopped', { raw: payload });
+        sendVoiceSocketEvent(browserSocket, 'speech.stopped', { sessionId: ctx.sessionId, raw: payload });
+      }
       const normalizedType =
         messageType === 'committed_transcript' || messageType === 'committed_transcript_with_timestamps' || payload?.is_final || payload?.final
           ? 'stt.final'
@@ -1460,6 +1519,9 @@ function openRealtimeSttSocket(ctx: VoiceSocketContext, browserSocket: WebSocket
             : 'stt.event';
       if (partial && normalizedType !== 'stt.event') {
         if (normalizedType === 'stt.final') {
+          ctx.isUserSpeaking = false;
+          appendVoiceSessionEvent(ctx.sessionId, 'speech.stopped', { raw: payload, transcript: partial });
+          sendVoiceSocketEvent(browserSocket, 'speech.stopped', { sessionId: ctx.sessionId, raw: payload, transcript: partial });
           updateVoiceSession(ctx.sessionId, { transcript: partial });
           void executeVoiceTargetFromTranscript(browserSocket, ctx, partial);
         } else {
@@ -9024,6 +9086,10 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
       sttSocket: null,
       lastVoiceProgressAt: 0,
       lastVoiceProgressText: '',
+      isUserSpeaking: false,
+      turnState: 'idle',
+      activeTtsAbort: null,
+      activeProgressTtsAbort: null,
     };
     voiceSocketContexts.set(ws, context);
 
@@ -9125,6 +9191,7 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
         }
 
         if (type === 'session.stop') {
+          interruptVoicePlayback(ws, current, 'session_stopped');
           if (current.sttSocket && current.sttSocket.readyState === WebSocket.OPEN) {
             current.sttSocket.close();
           }
@@ -9159,6 +9226,7 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
     ws.on('close', () => {
       const current = voiceSocketContexts.get(ws);
       if (current) {
+        interruptVoicePlayback(ws, current, 'socket_closed');
         if (current.sttSocket && current.sttSocket.readyState === WebSocket.OPEN) {
           current.sttSocket.close();
         }

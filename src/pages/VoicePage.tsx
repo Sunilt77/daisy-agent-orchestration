@@ -83,6 +83,7 @@ export default function VoicePage() {
   const [lastAudioSrc, setLastAudioSrc] = useState('');
   const [error, setError] = useState('');
   const [statusNote, setStatusNote] = useState('');
+  const [turnState, setTurnState] = useState<'idle' | 'listening' | 'thinking' | 'speaking'>('idle');
   const [presetAccess, setPresetAccess] = useState<ResourceAccessPayload | null>(null);
   const [presetAccessLoading, setPresetAccessLoading] = useState(false);
   const [presetAccessSaving, setPresetAccessSaving] = useState(false);
@@ -392,6 +393,18 @@ export default function VoicePage() {
         pushEvent(message.type || 'message', message);
         if (message.type === 'session.started') setSessionId(String(message.sessionId || ''));
         if (message.type === 'session.started') setStatusNote('Connected. Start speaking and committed speech will invoke the selected runtime automatically.');
+        if (message.type === 'turn.state') {
+          const next = String(message.state || 'idle');
+          if (next === 'listening' || next === 'thinking' || next === 'speaking' || next === 'idle') {
+            setTurnState(next);
+          }
+        }
+        if (message.type === 'speech.started') {
+          setStatusNote('Listening…');
+        }
+        if (message.type === 'speech.stopped') {
+          setStatusNote('Speech committed. Sending to the runtime…');
+        }
         if (message.type === 'stt.partial') setLiveTranscript(String(message.text || ''));
         if (message.type === 'stt.final') setLiveTranscript(String(message.text || ''));
         if (message.type === 'agent.reply') setAgentReply(String(message.text || ''));
@@ -419,6 +432,10 @@ export default function VoicePage() {
         }
         if (message.type === 'voice.progress.audio.complete') {
           finishIncomingAudioStream();
+        }
+        if (message.type === 'tts.interrupted') {
+          resetAudioStream();
+          setStatusNote('Interrupted current playback because new speech started.');
         }
         if (message.type === 'tts.audio' && message.audio) {
           const mimeType = String(message.mimeType || 'audio/mpeg');
@@ -836,6 +853,17 @@ export default function VoicePage() {
               <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
                 <span className={`rounded-full px-2.5 py-1 ${isConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>
                   {isConnected ? 'Socket Connected' : 'Disconnected'}
+                </span>
+                <span className={`rounded-full px-2.5 py-1 ${
+                  turnState === 'speaking'
+                    ? 'bg-violet-100 text-violet-700'
+                    : turnState === 'thinking'
+                      ? 'bg-amber-100 text-amber-700'
+                      : turnState === 'listening'
+                        ? 'bg-cyan-100 text-cyan-700'
+                        : 'bg-slate-200 text-slate-600'
+                }`}>
+                  {turnState.charAt(0).toUpperCase() + turnState.slice(1)}
                 </span>
                 {sessionId ? <span className="rounded-full bg-slate-200 px-2.5 py-1 font-mono text-slate-700">session {sessionId}</span> : null}
               </div>
