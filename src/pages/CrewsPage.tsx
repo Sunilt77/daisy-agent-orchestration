@@ -1117,6 +1117,9 @@ export default function CrewsPage() {
                       {editingCrew ? 'Synthesize Modification' : 'Initialize Syndicate'}
                     </h2>
                     <p className="text-xs text-slate-500 font-bold uppercase tracking-widest mt-1">Crew Configuration Interface</p>
+                    <p className="mt-2 text-xs text-slate-400 uppercase tracking-[0.18em]">
+                      Keep the collaboration design visible first. Open voice serving and exposure only when this crew actually needs them.
+                    </p>
                   </div>
                   <button
                     type="button"
@@ -1369,123 +1372,132 @@ export default function CrewsPage() {
                   )}
 
                   {showCrewConfig('voice') && (
-                  <div className="border border-emerald-100 rounded-2xl p-4 bg-emerald-50/40 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <label className="flex items-center gap-2 text-sm font-medium text-emerald-950">
-                        <AudioLines size={16} className="text-emerald-600" />
-                        Voice Runtime
+                  <details className="border border-emerald-100 rounded-2xl p-4 bg-emerald-50/40 space-y-3 group">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                      <div>
+                        <label className="flex items-center gap-2 text-sm font-medium text-emerald-950">
+                          <AudioLines size={16} className="text-emerald-600" />
+                          Voice Runtime
+                        </label>
+                        <p className="text-xs text-emerald-900/75 mt-1">
+                          Save voice defaults on this crew so live voice sessions can invoke the whole crew with its own STT/TTS profile.
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <Link to="/voice" className="text-xs text-emerald-700 hover:text-emerald-900 font-medium">
+                          Open Voice Console
+                        </Link>
+                        <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700 group-open:bg-emerald-700 group-open:text-white">
+                          Expand
+                        </span>
+                      </div>
+                    </summary>
+                    <div className="pt-3 space-y-3">
+                      <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 items-end">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Voice Config Preset</label>
+                          <select
+                            className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 text-sm"
+                            value={formData.voice_preset_id}
+                            onChange={e => applyVoicePreset(e.target.value)}
+                          >
+                            <option value="">Custom runtime values</option>
+                            {voiceConfigs.map((preset) => (
+                              <option key={preset.id} value={preset.id}>{preset.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <button type="button" onClick={saveCurrentVoicePreset} className="px-3 py-3 rounded-2xl border border-slate-200 bg-white text-sm font-bold text-slate-700">
+                          Save As Preset
+                        </button>
+                        <button type="button" onClick={updateSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-3 rounded-2xl border border-slate-200 bg-white text-sm font-bold text-slate-700 disabled:opacity-40">
+                          Update Preset
+                        </button>
+                        <button type="button" onClick={deleteSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-3 rounded-2xl border border-red-200 bg-red-50 text-sm font-bold text-red-700 disabled:opacity-40">
+                          Delete Preset
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Voice ID</label>
+                          <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_id} onChange={e => setFormData({ ...formData, voice_id: e.target.value })} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">TTS Model</label>
+                          <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.tts_model_id} onChange={e => setFormData({ ...formData, tts_model_id: e.target.value })} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">STT Model</label>
+                          <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.stt_model_id} onChange={e => setFormData({ ...formData, stt_model_id: e.target.value })} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Output Format</label>
+                          <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_output_format} onChange={e => setFormData({ ...formData, voice_output_format: e.target.value })} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Sample Rate</label>
+                          <input type="number" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-bold text-slate-900" value={formData.voice_sample_rate} onChange={e => setFormData({ ...formData, voice_sample_rate: Number(e.target.value) || 16000 })} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Language</label>
+                          <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_language_code} onChange={e => setFormData({ ...formData, voice_language_code: e.target.value })} />
+                        </div>
+                      </div>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" checked={formData.voice_auto_tts} onChange={e => setFormData({ ...formData, voice_auto_tts: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                        <span className="text-sm text-slate-700">Auto-play TTS replies for this crew</span>
                       </label>
-                      <Link to="/voice" className="text-xs text-emerald-700 hover:text-emerald-900 font-medium">
-                        Open Voice Console
-                      </Link>
-                    </div>
-                    <p className="text-xs text-emerald-900/75">
-                      Save voice defaults on this crew so live voice sessions can invoke the whole crew with its own STT/TTS profile.
-                    </p>
-                    <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 items-end">
-                      <div>
-                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Voice Config Preset</label>
-                        <select
-                          className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 text-sm"
-                          value={formData.voice_preset_id}
-                          onChange={e => applyVoicePreset(e.target.value)}
-                        >
-                          <option value="">Custom runtime values</option>
-                          {voiceConfigs.map((preset) => (
-                            <option key={preset.id} value={preset.id}>{preset.name}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <button type="button" onClick={saveCurrentVoicePreset} className="px-3 py-3 rounded-2xl border border-slate-200 bg-white text-sm font-bold text-slate-700">
-                        Save As Preset
-                      </button>
-                      <button type="button" onClick={updateSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-3 rounded-2xl border border-slate-200 bg-white text-sm font-bold text-slate-700 disabled:opacity-40">
-                        Update Preset
-                      </button>
-                      <button type="button" onClick={deleteSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-3 rounded-2xl border border-red-200 bg-red-50 text-sm font-bold text-red-700 disabled:opacity-40">
-                        Delete Preset
-                      </button>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Voice ID</label>
-                        <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_id} onChange={e => setFormData({ ...formData, voice_id: e.target.value })} />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">TTS Model</label>
-                        <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.tts_model_id} onChange={e => setFormData({ ...formData, tts_model_id: e.target.value })} />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">STT Model</label>
-                        <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.stt_model_id} onChange={e => setFormData({ ...formData, stt_model_id: e.target.value })} />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Output Format</label>
-                        <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_output_format} onChange={e => setFormData({ ...formData, voice_output_format: e.target.value })} />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Sample Rate</label>
-                        <input type="number" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-bold text-slate-900" value={formData.voice_sample_rate} onChange={e => setFormData({ ...formData, voice_sample_rate: Number(e.target.value) || 16000 })} />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Language</label>
-                        <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_language_code} onChange={e => setFormData({ ...formData, voice_language_code: e.target.value })} />
-                      </div>
-                    </div>
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input type="checkbox" checked={formData.voice_auto_tts} onChange={e => setFormData({ ...formData, voice_auto_tts: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
-                      <span className="text-sm text-slate-700">Auto-play TTS replies for this crew</span>
-                    </label>
-                    <div className="rounded-2xl border border-emerald-100 bg-white/80 p-4 space-y-3">
-                      <div>
-                        <div className="text-sm font-medium text-slate-900">Turn Detection And Disturbance Control</div>
-                        <div className="text-xs text-slate-500 mt-1">These defaults are reused by crew voice sessions so short disturbances can be ignored without making real pauses feel slow.</div>
-                      </div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                        <label className="flex items-center gap-2 text-sm text-slate-700">
-                          <input type="checkbox" checked={formData.voice_vad_enabled} onChange={e => setFormData({ ...formData, voice_vad_enabled: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
-                          VAD auto-commit
-                        </label>
-                        <label className="flex items-center gap-2 text-sm text-slate-700">
-                          <input type="checkbox" checked={formData.voice_browser_noise_suppression} onChange={e => setFormData({ ...formData, voice_browser_noise_suppression: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
-                          Browser noise suppression
-                        </label>
-                        <label className="flex items-center gap-2 text-sm text-slate-700">
-                          <input type="checkbox" checked={formData.voice_browser_echo_cancellation} onChange={e => setFormData({ ...formData, voice_browser_echo_cancellation: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
-                          Echo cancellation
-                        </label>
-                        <label className="flex items-center gap-2 text-sm text-slate-700">
-                          <input type="checkbox" checked={formData.voice_browser_auto_gain_control} onChange={e => setFormData({ ...formData, voice_browser_auto_gain_control: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
-                          Auto gain control
-                        </label>
+                      <div className="rounded-2xl border border-emerald-100 bg-white/80 p-4 space-y-3">
                         <div>
-                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Silence Threshold (sec)</label>
-                          <input type="number" min="0.2" max="3" step="0.1" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_vad_silence_threshold_secs} onChange={e => setFormData({ ...formData, voice_vad_silence_threshold_secs: Number(e.target.value) || DEFAULT_VAD_SILENCE_THRESHOLD_SECS })} />
+                          <div className="text-sm font-medium text-slate-900">Turn Detection And Disturbance Control</div>
+                          <div className="text-xs text-slate-500 mt-1">These defaults are reused by crew voice sessions so short disturbances can be ignored without making real pauses feel slow.</div>
                         </div>
-                        <div>
-                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">VAD Threshold</label>
-                          <input type="number" min="0.1" max="0.95" step="0.05" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_vad_threshold} onChange={e => setFormData({ ...formData, voice_vad_threshold: Number(e.target.value) || DEFAULT_VAD_THRESHOLD })} />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Min Speech (ms)</label>
-                          <input type="number" min="50" max="2000" step="10" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_min_speech_duration_ms} onChange={e => setFormData({ ...formData, voice_min_speech_duration_ms: Number(e.target.value) || DEFAULT_MIN_SPEECH_DURATION_MS })} />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Min Silence (ms)</label>
-                          <input type="number" min="50" max="3000" step="10" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_min_silence_duration_ms} onChange={e => setFormData({ ...formData, voice_min_silence_duration_ms: Number(e.target.value) || DEFAULT_MIN_SILENCE_DURATION_MS })} />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Recompute Window</label>
-                          <input type="number" min="0" max="50" step="1" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_max_tokens_to_recompute} onChange={e => setFormData({ ...formData, voice_max_tokens_to_recompute: Number(e.target.value) || DEFAULT_MAX_TOKENS_TO_RECOMPUTE })} />
+                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                          <label className="flex items-center gap-2 text-sm text-slate-700">
+                            <input type="checkbox" checked={formData.voice_vad_enabled} onChange={e => setFormData({ ...formData, voice_vad_enabled: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                            VAD auto-commit
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-slate-700">
+                            <input type="checkbox" checked={formData.voice_browser_noise_suppression} onChange={e => setFormData({ ...formData, voice_browser_noise_suppression: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                            Browser noise suppression
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-slate-700">
+                            <input type="checkbox" checked={formData.voice_browser_echo_cancellation} onChange={e => setFormData({ ...formData, voice_browser_echo_cancellation: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                            Echo cancellation
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-slate-700">
+                            <input type="checkbox" checked={formData.voice_browser_auto_gain_control} onChange={e => setFormData({ ...formData, voice_browser_auto_gain_control: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                            Auto gain control
+                          </label>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Silence Threshold (sec)</label>
+                            <input type="number" min="0.2" max="3" step="0.1" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_vad_silence_threshold_secs} onChange={e => setFormData({ ...formData, voice_vad_silence_threshold_secs: Number(e.target.value) || DEFAULT_VAD_SILENCE_THRESHOLD_SECS })} />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">VAD Threshold</label>
+                            <input type="number" min="0.1" max="0.95" step="0.05" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_vad_threshold} onChange={e => setFormData({ ...formData, voice_vad_threshold: Number(e.target.value) || DEFAULT_VAD_THRESHOLD })} />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Min Speech (ms)</label>
+                            <input type="number" min="50" max="2000" step="10" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_min_speech_duration_ms} onChange={e => setFormData({ ...formData, voice_min_speech_duration_ms: Number(e.target.value) || DEFAULT_MIN_SPEECH_DURATION_MS })} />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Min Silence (ms)</label>
+                            <input type="number" min="50" max="3000" step="10" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_min_silence_duration_ms} onChange={e => setFormData({ ...formData, voice_min_silence_duration_ms: Number(e.target.value) || DEFAULT_MIN_SILENCE_DURATION_MS })} />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Recompute Window</label>
+                            <input type="number" min="0" max="50" step="1" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_max_tokens_to_recompute} onChange={e => setFormData({ ...formData, voice_max_tokens_to_recompute: Number(e.target.value) || DEFAULT_MAX_TOKENS_TO_RECOMPUTE })} />
+                          </div>
                         </div>
                       </div>
                     </div>
-                  </div>
+                  </details>
                   )}
 
                   {showCrewConfig('exposure') && (
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
+                  <details className="space-y-4 group">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-2xl border border-indigo-100 bg-indigo-50 px-4 py-4">
                       <div className="flex items-center gap-3">
                          <Globe size={20} className="text-indigo-600" />
                          <div>
@@ -1493,29 +1505,39 @@ export default function CrewsPage() {
                            <p className="text-[10px] text-indigo-600 font-bold uppercase tracking-wider">Make this crew invokable as MCP, API, and voice runtime</p>
                          </div>
                       </div>
-                      <label className="relative inline-flex items-center cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={formData.is_exposed}
-                          onChange={e => setFormData({ ...formData, is_exposed: e.target.checked })}
-                          className="sr-only peer"
-                        />
-                        <div className="w-11 h-6 bg-indigo-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
-                      </label>
-                    </div>
-                    {formData.is_exposed && editingCrew && (
-                      <div className="rounded-2xl border border-cyan-200 bg-cyan-50 p-4 space-y-3">
-                        <div className="flex items-center gap-2 text-sm font-semibold text-cyan-900">
-                          <Radio size={16} />
-                          Voice Connection
+                      <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-700 group-open:bg-indigo-700 group-open:text-white">
+                        Expand
+                      </span>
+                    </summary>
+                    <div className="pt-2 space-y-4">
+                      <div className="flex items-center justify-between p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
+                        <div className="text-xs text-slate-600">
+                          When enabled, this crew can be served to API callers, MCP clients, and external voice consumers.
                         </div>
-                        <div className="text-xs text-cyan-900/80">Use this websocket endpoint to connect external realtime voice clients to the crew.</div>
-                        <div className="rounded-xl bg-white border border-cyan-100 px-3 py-2 font-mono text-xs break-all">
-                          {origin.replace(/^http/, 'ws')}/ws/voice?targetType=crew&targetId={editingCrew.id}
-                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={formData.is_exposed}
+                            onChange={e => setFormData({ ...formData, is_exposed: e.target.checked })}
+                            className="sr-only peer"
+                          />
+                          <div className="w-11 h-6 bg-indigo-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                        </label>
                       </div>
-                    )}
-                  </div>
+                      {formData.is_exposed && editingCrew && (
+                        <div className="rounded-2xl border border-cyan-200 bg-cyan-50 p-4 space-y-3">
+                          <div className="flex items-center gap-2 text-sm font-semibold text-cyan-900">
+                            <Radio size={16} />
+                            Voice Connection
+                          </div>
+                          <div className="text-xs text-cyan-900/80">Use this websocket endpoint to connect external realtime voice clients to the crew.</div>
+                          <div className="rounded-xl bg-white border border-cyan-100 px-3 py-2 font-mono text-xs break-all">
+                            {origin.replace(/^http/, 'ws')}/ws/voice?targetType=crew&targetId={editingCrew.id}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </details>
                   )}
                 </div>
 
