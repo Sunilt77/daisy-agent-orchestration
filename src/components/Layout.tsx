@@ -198,15 +198,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       {/* Main Content */}
       <main className="command-canvas flex-1 relative overflow-hidden">
         <div className="scanline" />
-        <div className="absolute top-0 left-0 right-0 z-10 px-4 sm:px-6 lg:px-8 xl:px-10 pt-4 pointer-events-none">
-          <div className="panel-chrome rounded-2xl px-4 py-2 flex items-center justify-between text-[10px] uppercase tracking-[0.22em] text-slate-500">
-            <span>Runtime: Emergent Mesh</span>
-            <span className="hidden md:inline">Flow: Adaptive</span>
-            <span>Status: Operational</span>
-            <span className="hidden xl:inline">Path: {location.pathname}</span>
-          </div>
-        </div>
-        
         <AnimatePresence mode='wait'>
           <motion.div
             key={location.pathname}
