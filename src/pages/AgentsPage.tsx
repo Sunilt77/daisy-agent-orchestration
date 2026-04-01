@@ -22,7 +22,24 @@ interface VoiceConfigPreset {
   language_code: string;
   auto_tts: boolean;
   notes?: string;
+  meta?: {
+    vad_enabled?: boolean;
+    vad_silence_threshold_secs?: number;
+    vad_threshold?: number;
+    min_speech_duration_ms?: number;
+    min_silence_duration_ms?: number;
+    max_tokens_to_recompute?: number;
+    browser_noise_suppression?: boolean;
+    browser_echo_cancellation?: boolean;
+    browser_auto_gain_control?: boolean;
+  };
 }
+
+const DEFAULT_VAD_SILENCE_THRESHOLD_SECS = 0.8;
+const DEFAULT_VAD_THRESHOLD = 0.6;
+const DEFAULT_MIN_SPEECH_DURATION_MS = 220;
+const DEFAULT_MIN_SILENCE_DURATION_MS = 420;
+const DEFAULT_MAX_TOKENS_TO_RECOMPUTE = 5;
 
 interface Agent {
   id: number;
@@ -890,6 +907,15 @@ type AgentOptionalConfig =
     voice_sample_rate: '16000',
     voice_language_code: 'en',
     voice_auto_tts: true,
+    voice_vad_enabled: true,
+    voice_vad_silence_threshold_secs: '0.8',
+    voice_vad_threshold: '0.6',
+    voice_min_speech_duration_ms: '220',
+    voice_min_silence_duration_ms: '420',
+    voice_max_tokens_to_recompute: '5',
+    voice_browser_noise_suppression: true,
+    voice_browser_echo_cancellation: true,
+    voice_browser_auto_gain_control: false,
     voice_preset_id: '',
     project_id: '' as string | number,
     toolIds: [] as number[],
@@ -1355,6 +1381,15 @@ type AgentOptionalConfig =
             auto_tts: Boolean(formData.voice_auto_tts),
             meta: {
               preset_id: formData.voice_preset_id ? Number(formData.voice_preset_id) : null,
+              vad_enabled: Boolean(formData.voice_vad_enabled),
+              vad_silence_threshold_secs: Number(formData.voice_vad_silence_threshold_secs || DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+              vad_threshold: Number(formData.voice_vad_threshold || DEFAULT_VAD_THRESHOLD),
+              min_speech_duration_ms: Number(formData.voice_min_speech_duration_ms || DEFAULT_MIN_SPEECH_DURATION_MS),
+              min_silence_duration_ms: Number(formData.voice_min_silence_duration_ms || DEFAULT_MIN_SILENCE_DURATION_MS),
+              max_tokens_to_recompute: Number(formData.voice_max_tokens_to_recompute || DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+              browser_noise_suppression: Boolean(formData.voice_browser_noise_suppression),
+              browser_echo_cancellation: Boolean(formData.voice_browser_echo_cancellation),
+              browser_auto_gain_control: Boolean(formData.voice_browser_auto_gain_control),
             },
           }),
         });
@@ -1401,6 +1436,15 @@ type AgentOptionalConfig =
       voice_sample_rate: '16000',
       voice_language_code: 'en',
       voice_auto_tts: true,
+      voice_vad_enabled: true,
+      voice_vad_silence_threshold_secs: '0.8',
+      voice_vad_threshold: '0.6',
+      voice_min_speech_duration_ms: '220',
+      voice_min_silence_duration_ms: '420',
+      voice_max_tokens_to_recompute: '5',
+      voice_browser_noise_suppression: true,
+      voice_browser_echo_cancellation: true,
+      voice_browser_auto_gain_control: false,
       voice_preset_id: '',
       project_id: '',
       toolIds: [],
@@ -1463,6 +1507,15 @@ type AgentOptionalConfig =
           voice_sample_rate: String(voiceProfile?.sample_rate || 16000),
           voice_language_code: String(voiceProfile?.language_code || 'en'),
           voice_auto_tts: Boolean(voiceProfile?.auto_tts ?? true),
+          voice_vad_enabled: Boolean(voiceProfile?.meta?.vad_enabled ?? true),
+          voice_vad_silence_threshold_secs: String(voiceProfile?.meta?.vad_silence_threshold_secs ?? DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+          voice_vad_threshold: String(voiceProfile?.meta?.vad_threshold ?? DEFAULT_VAD_THRESHOLD),
+          voice_min_speech_duration_ms: String(voiceProfile?.meta?.min_speech_duration_ms ?? DEFAULT_MIN_SPEECH_DURATION_MS),
+          voice_min_silence_duration_ms: String(voiceProfile?.meta?.min_silence_duration_ms ?? DEFAULT_MIN_SILENCE_DURATION_MS),
+          voice_max_tokens_to_recompute: String(voiceProfile?.meta?.max_tokens_to_recompute ?? DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+          voice_browser_noise_suppression: Boolean(voiceProfile?.meta?.browser_noise_suppression ?? true),
+          voice_browser_echo_cancellation: Boolean(voiceProfile?.meta?.browser_echo_cancellation ?? true),
+          voice_browser_auto_gain_control: Boolean(voiceProfile?.meta?.browser_auto_gain_control ?? false),
           voice_preset_id: String(voiceProfile?.meta?.preset_id || ''),
           project_id: agent.project_id || '',
           toolIds: agent.tools ? agent.tools.map(t => t.id) : [],
@@ -1538,6 +1591,15 @@ type AgentOptionalConfig =
       voice_sample_rate: String(preset.sample_rate || 16000),
       voice_language_code: String(preset.language_code || 'en'),
       voice_auto_tts: Boolean(preset.auto_tts ?? true),
+      voice_vad_enabled: Boolean(preset.meta?.vad_enabled ?? true),
+      voice_vad_silence_threshold_secs: String(preset.meta?.vad_silence_threshold_secs ?? DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+      voice_vad_threshold: String(preset.meta?.vad_threshold ?? DEFAULT_VAD_THRESHOLD),
+      voice_min_speech_duration_ms: String(preset.meta?.min_speech_duration_ms ?? DEFAULT_MIN_SPEECH_DURATION_MS),
+      voice_min_silence_duration_ms: String(preset.meta?.min_silence_duration_ms ?? DEFAULT_MIN_SILENCE_DURATION_MS),
+      voice_max_tokens_to_recompute: String(preset.meta?.max_tokens_to_recompute ?? DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+      voice_browser_noise_suppression: Boolean(preset.meta?.browser_noise_suppression ?? true),
+      voice_browser_echo_cancellation: Boolean(preset.meta?.browser_echo_cancellation ?? true),
+      voice_browser_auto_gain_control: Boolean(preset.meta?.browser_auto_gain_control ?? false),
     }));
   };
 
@@ -1556,6 +1618,17 @@ type AgentOptionalConfig =
         sample_rate: Number(formData.voice_sample_rate || 16000),
         language_code: formData.voice_language_code,
         auto_tts: Boolean(formData.voice_auto_tts),
+        meta: {
+          vad_enabled: Boolean(formData.voice_vad_enabled),
+          vad_silence_threshold_secs: Number(formData.voice_vad_silence_threshold_secs || DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+          vad_threshold: Number(formData.voice_vad_threshold || DEFAULT_VAD_THRESHOLD),
+          min_speech_duration_ms: Number(formData.voice_min_speech_duration_ms || DEFAULT_MIN_SPEECH_DURATION_MS),
+          min_silence_duration_ms: Number(formData.voice_min_silence_duration_ms || DEFAULT_MIN_SILENCE_DURATION_MS),
+          max_tokens_to_recompute: Number(formData.voice_max_tokens_to_recompute || DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+          browser_noise_suppression: Boolean(formData.voice_browser_noise_suppression),
+          browser_echo_cancellation: Boolean(formData.voice_browser_echo_cancellation),
+          browser_auto_gain_control: Boolean(formData.voice_browser_auto_gain_control),
+        },
       }),
     });
     const data = await safeJson(res) as any;
@@ -1583,6 +1656,17 @@ type AgentOptionalConfig =
         sample_rate: Number(formData.voice_sample_rate || 16000),
         language_code: formData.voice_language_code,
         auto_tts: Boolean(formData.voice_auto_tts),
+        meta: {
+          vad_enabled: Boolean(formData.voice_vad_enabled),
+          vad_silence_threshold_secs: Number(formData.voice_vad_silence_threshold_secs || DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+          vad_threshold: Number(formData.voice_vad_threshold || DEFAULT_VAD_THRESHOLD),
+          min_speech_duration_ms: Number(formData.voice_min_speech_duration_ms || DEFAULT_MIN_SPEECH_DURATION_MS),
+          min_silence_duration_ms: Number(formData.voice_min_silence_duration_ms || DEFAULT_MIN_SILENCE_DURATION_MS),
+          max_tokens_to_recompute: Number(formData.voice_max_tokens_to_recompute || DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+          browser_noise_suppression: Boolean(formData.voice_browser_noise_suppression),
+          browser_echo_cancellation: Boolean(formData.voice_browser_echo_cancellation),
+          browser_auto_gain_control: Boolean(formData.voice_browser_auto_gain_control),
+        },
         notes: preset.notes || '',
       }),
     });
@@ -2505,6 +2589,50 @@ type AgentOptionalConfig =
                 />
                 <span className="text-sm text-slate-700">Auto-play TTS replies for this agent</span>
               </label>
+              <div className="rounded-xl border border-emerald-100 bg-white/80 p-4 space-y-3">
+                <div>
+                  <div className="text-sm font-medium text-slate-900">Turn Detection And Disturbance Control</div>
+                  <div className="text-xs text-slate-500 mt-1">These defaults are reused by the Voice Console and websocket consumers to ignore short disturbances and commit speech turns faster.</div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_vad_enabled} onChange={e => setFormData({ ...formData, voice_vad_enabled: e.target.checked })} />
+                    VAD auto-commit
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_browser_noise_suppression} onChange={e => setFormData({ ...formData, voice_browser_noise_suppression: e.target.checked })} />
+                    Browser noise suppression
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_browser_echo_cancellation} onChange={e => setFormData({ ...formData, voice_browser_echo_cancellation: e.target.checked })} />
+                    Echo cancellation
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_browser_auto_gain_control} onChange={e => setFormData({ ...formData, voice_browser_auto_gain_control: e.target.checked })} />
+                    Auto gain control
+                  </label>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Silence Threshold (sec)</label>
+                    <input type="number" min="0.2" max="3" step="0.1" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_vad_silence_threshold_secs} onChange={e => setFormData({ ...formData, voice_vad_silence_threshold_secs: e.target.value })} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">VAD Threshold</label>
+                    <input type="number" min="0.1" max="0.95" step="0.05" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_vad_threshold} onChange={e => setFormData({ ...formData, voice_vad_threshold: e.target.value })} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Min Speech (ms)</label>
+                    <input type="number" min="50" max="2000" step="10" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_min_speech_duration_ms} onChange={e => setFormData({ ...formData, voice_min_speech_duration_ms: e.target.value })} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Min Silence (ms)</label>
+                    <input type="number" min="50" max="3000" step="10" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_min_silence_duration_ms} onChange={e => setFormData({ ...formData, voice_min_silence_duration_ms: e.target.value })} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Recompute Window</label>
+                    <input type="number" min="0" max="50" step="1" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_max_tokens_to_recompute} onChange={e => setFormData({ ...formData, voice_max_tokens_to_recompute: e.target.value })} />
+                  </div>
+                </div>
+              </div>
             </div>
             )}
 

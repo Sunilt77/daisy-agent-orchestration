@@ -814,6 +814,16 @@ type VoiceSocketContext = {
   sampleRate: number;
   languageCode: string;
   autoTts: boolean;
+  vadEnabled?: boolean;
+  vadSilenceThresholdSecs?: number;
+  vadThreshold?: number;
+  minSpeechDurationMs?: number;
+  minSilenceDurationMs?: number;
+  maxTokensToRecompute?: number;
+  browserNoiseSuppression?: boolean;
+  browserEchoCancellation?: boolean;
+  browserAutoGainControl?: boolean;
+  pushToTalk?: boolean;
   sttSocket?: WebSocket | null;
   lastVoiceProgressAt?: number;
   lastVoiceProgressText?: string;
@@ -830,8 +840,39 @@ const DEFAULT_TTS_MODEL = process.env.ELEVENLABS_DEFAULT_TTS_MODEL || 'eleven_mu
 const DEFAULT_STT_MODEL = process.env.ELEVENLABS_DEFAULT_STT_MODEL || 'scribe_v2_realtime';
 const DEFAULT_TTS_FORMAT = process.env.ELEVENLABS_DEFAULT_OUTPUT_FORMAT || 'mp3_44100_128';
 const DEFAULT_STT_SAMPLE_RATE = Number(process.env.ELEVENLABS_DEFAULT_SAMPLE_RATE || 16000);
+const DEFAULT_VAD_ENABLED = true;
+const DEFAULT_VAD_SILENCE_THRESHOLD_SECS = Number(process.env.ELEVENLABS_DEFAULT_VAD_SILENCE_THRESHOLD_SECS || 0.8);
+const DEFAULT_VAD_THRESHOLD = Number(process.env.ELEVENLABS_DEFAULT_VAD_THRESHOLD || 0.6);
+const DEFAULT_MIN_SPEECH_DURATION_MS = Number(process.env.ELEVENLABS_DEFAULT_MIN_SPEECH_DURATION_MS || 220);
+const DEFAULT_MIN_SILENCE_DURATION_MS = Number(process.env.ELEVENLABS_DEFAULT_MIN_SILENCE_DURATION_MS || 420);
+const DEFAULT_MAX_TOKENS_TO_RECOMPUTE = Number(process.env.ELEVENLABS_DEFAULT_MAX_TOKENS_TO_RECOMPUTE || 5);
+const DEFAULT_BROWSER_NOISE_SUPPRESSION = true;
+const DEFAULT_BROWSER_ECHO_CANCELLATION = true;
+const DEFAULT_BROWSER_AUTO_GAIN_CONTROL = false;
 const voiceSocketContexts = new Map<WebSocket, VoiceSocketContext>();
 let voiceWss: WebSocketServer | null = null;
+
+function clampNumber(value: any, fallback: number, min: number, max: number) {
+  const next = Number(value);
+  if (!Number.isFinite(next)) return fallback;
+  return Math.min(max, Math.max(min, next));
+}
+
+function normalizeVoiceRuntimeMeta(meta: any = {}) {
+  return {
+    preset_id: Number.isFinite(Number(meta?.preset_id)) && Number(meta?.preset_id) > 0 ? Number(meta.preset_id) : null,
+    vad_enabled: meta?.vad_enabled !== false,
+    vad_silence_threshold_secs: clampNumber(meta?.vad_silence_threshold_secs, DEFAULT_VAD_SILENCE_THRESHOLD_SECS, 0.2, 3),
+    vad_threshold: clampNumber(meta?.vad_threshold, DEFAULT_VAD_THRESHOLD, 0.1, 0.95),
+    min_speech_duration_ms: Math.round(clampNumber(meta?.min_speech_duration_ms, DEFAULT_MIN_SPEECH_DURATION_MS, 50, 2000)),
+    min_silence_duration_ms: Math.round(clampNumber(meta?.min_silence_duration_ms, DEFAULT_MIN_SILENCE_DURATION_MS, 50, 3000)),
+    max_tokens_to_recompute: Math.round(clampNumber(meta?.max_tokens_to_recompute, DEFAULT_MAX_TOKENS_TO_RECOMPUTE, 0, 50)),
+    browser_noise_suppression: meta?.browser_noise_suppression !== false,
+    browser_echo_cancellation: meta?.browser_echo_cancellation !== false,
+    browser_auto_gain_control: meta?.browser_auto_gain_control === true,
+    push_to_talk: meta?.push_to_talk === true,
+  };
+}
 
 function resolveVoiceTarget(targetType: string, targetId: number) {
   if (targetType === 'crew') {
@@ -872,6 +913,7 @@ function getAgentVoiceProfile(agentId: number) {
   ensureVoiceTables();
   const row = db.prepare('SELECT * FROM agent_voice_profiles WHERE agent_id = ?').get(agentId) as any;
   if (!row) return null;
+  const meta = normalizeVoiceRuntimeMeta(safeJsonParse(row.meta, {}));
   return {
     agent_id: row.agent_id,
     voice_provider: row.voice_provider || 'elevenlabs',
@@ -882,7 +924,7 @@ function getAgentVoiceProfile(agentId: number) {
     sample_rate: Number(row.sample_rate || DEFAULT_STT_SAMPLE_RATE),
     language_code: row.language_code || 'en',
     auto_tts: Boolean(row.auto_tts ?? 1),
-    meta: safeJsonParse(row.meta, {}),
+    meta,
   };
 }
 
@@ -890,6 +932,7 @@ function getCrewVoiceProfile(crewId: number) {
   ensureVoiceTables();
   const row = db.prepare('SELECT * FROM crew_voice_profiles WHERE crew_id = ?').get(crewId) as any;
   if (!row) return null;
+  const meta = normalizeVoiceRuntimeMeta(safeJsonParse(row.meta, {}));
   return {
     crew_id: row.crew_id,
     voice_provider: row.voice_provider || 'elevenlabs',
@@ -900,7 +943,7 @@ function getCrewVoiceProfile(crewId: number) {
     sample_rate: Number(row.sample_rate || DEFAULT_STT_SAMPLE_RATE),
     language_code: row.language_code || 'en',
     auto_tts: Boolean(row.auto_tts ?? 1),
-    meta: safeJsonParse(row.meta, {}),
+    meta,
   };
 }
 
@@ -919,6 +962,7 @@ function listVoiceConfigPresets() {
     language_code: row.language_code || 'en',
     auto_tts: Boolean(row.auto_tts ?? 1),
     notes: row.notes || '',
+    meta: normalizeVoiceRuntimeMeta(safeJsonParse(row.meta, {})),
     created_at: row.created_at,
     updated_at: row.updated_at,
   }));
@@ -940,6 +984,7 @@ function getVoiceConfigPreset(presetId: number) {
     language_code: row.language_code || 'en',
     auto_tts: Boolean(row.auto_tts ?? 1),
     notes: row.notes || '',
+    meta: normalizeVoiceRuntimeMeta(safeJsonParse(row.meta, {})),
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -949,6 +994,7 @@ function saveVoiceConfigPreset(presetId: number | null, payload: any) {
   ensureVoiceTables();
   const normalizedName = String(payload.name || '').trim();
   if (!normalizedName) throw new Error('Voice preset name is required');
+  const runtimeMeta = normalizeVoiceRuntimeMeta(payload.meta || {});
   const params = [
     normalizedName,
     'elevenlabs',
@@ -960,25 +1006,27 @@ function saveVoiceConfigPreset(presetId: number | null, payload: any) {
     String(payload.language_code || 'en'),
     payload.auto_tts === false ? 0 : 1,
     String(payload.notes || '').trim(),
+    JSON.stringify(runtimeMeta),
   ];
   if (presetId && Number.isFinite(presetId)) {
     db.prepare(`
       UPDATE voice_config_presets
-      SET name = ?, voice_provider = ?, voice_id = ?, tts_model_id = ?, stt_model_id = ?, output_format = ?, sample_rate = ?, language_code = ?, auto_tts = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+      SET name = ?, voice_provider = ?, voice_id = ?, tts_model_id = ?, stt_model_id = ?, output_format = ?, sample_rate = ?, language_code = ?, auto_tts = ?, notes = ?, meta = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(...params, presetId);
     return getVoiceConfigPreset(presetId);
   }
   const result = db.prepare(`
     INSERT INTO voice_config_presets (
-      name, voice_provider, voice_id, tts_model_id, stt_model_id, output_format, sample_rate, language_code, auto_tts, notes, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      name, voice_provider, voice_id, tts_model_id, stt_model_id, output_format, sample_rate, language_code, auto_tts, notes, meta, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `).run(...params);
   return getVoiceConfigPreset(Number(result.lastInsertRowid));
 }
 
 function saveAgentVoiceProfile(agentId: number, payload: any) {
   ensureVoiceTables();
+  const runtimeMeta = normalizeVoiceRuntimeMeta(payload.meta || {});
   db.prepare(`
     INSERT INTO agent_voice_profiles (
       agent_id, voice_provider, voice_id, tts_model_id, stt_model_id, output_format, sample_rate, language_code, auto_tts, meta, updated_at
@@ -1004,12 +1052,13 @@ function saveAgentVoiceProfile(agentId: number, payload: any) {
     Number(payload.sample_rate || DEFAULT_STT_SAMPLE_RATE),
     String(payload.language_code || 'en'),
     payload.auto_tts === false ? 0 : 1,
-    JSON.stringify(payload.meta || {}),
+    JSON.stringify(runtimeMeta),
   );
 }
 
 function saveCrewVoiceProfile(crewId: number, payload: any) {
   ensureVoiceTables();
+  const runtimeMeta = normalizeVoiceRuntimeMeta(payload.meta || {});
   db.prepare(`
     INSERT INTO crew_voice_profiles (
       crew_id, voice_provider, voice_id, tts_model_id, stt_model_id, output_format, sample_rate, language_code, auto_tts, meta, updated_at
@@ -1035,7 +1084,7 @@ function saveCrewVoiceProfile(crewId: number, payload: any) {
     Number(payload.sample_rate || DEFAULT_STT_SAMPLE_RATE),
     String(payload.language_code || 'en'),
     payload.auto_tts === false ? 0 : 1,
-    JSON.stringify(payload.meta || {}),
+    JSON.stringify(runtimeMeta),
   );
 }
 
@@ -1754,8 +1803,17 @@ function openRealtimeSttSocket(ctx: VoiceSocketContext, browserSocket: WebSocket
     model_id: String(ctx.sttModelId || DEFAULT_STT_MODEL),
     sample_rate: String(ctx.sampleRate || DEFAULT_STT_SAMPLE_RATE),
     audio_format: `pcm_${ctx.sampleRate || DEFAULT_STT_SAMPLE_RATE}`,
-    commit_strategy: 'vad',
   });
+  if (ctx.vadEnabled === false) {
+    params.set('commit_strategy', 'manual');
+  } else {
+    params.set('commit_strategy', 'vad');
+    params.set('vad_silence_threshold_secs', String(ctx.vadSilenceThresholdSecs ?? DEFAULT_VAD_SILENCE_THRESHOLD_SECS));
+    params.set('vad_threshold', String(ctx.vadThreshold ?? DEFAULT_VAD_THRESHOLD));
+    params.set('min_speech_duration_ms', String(ctx.minSpeechDurationMs ?? DEFAULT_MIN_SPEECH_DURATION_MS));
+    params.set('min_silence_duration_ms', String(ctx.minSilenceDurationMs ?? DEFAULT_MIN_SILENCE_DURATION_MS));
+    params.set('max_tokens_to_recompute', String(ctx.maxTokensToRecompute ?? DEFAULT_MAX_TOKENS_TO_RECOMPUTE));
+  }
   if (ctx.languageCode) {
     params.set('language_code', ctx.languageCode);
   }
@@ -5098,7 +5156,7 @@ app.get('/api/voice/exposed', (req, res) => {
         sample_rate: DEFAULT_STT_SAMPLE_RATE,
         language_code: 'en',
         auto_tts: true,
-        meta: {},
+        meta: normalizeVoiceRuntimeMeta({}),
       },
       voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=agent&targetId=${Number(agent.id)}`,
       voice_http_hint: `${origin}/api/voice/exposed/agent/${Number(agent.id)}`,
@@ -5121,7 +5179,7 @@ app.get('/api/voice/exposed', (req, res) => {
         sample_rate: DEFAULT_STT_SAMPLE_RATE,
         language_code: 'en',
         auto_tts: true,
-        meta: {},
+        meta: normalizeVoiceRuntimeMeta({}),
       },
       voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=crew&targetId=${Number(crew.id)}`,
       voice_http_hint: `${origin}/api/voice/exposed/crew/${Number(crew.id)}`,
@@ -5155,7 +5213,7 @@ app.get('/api/voice/exposed/:type/:id', (req, res) => {
         sample_rate: DEFAULT_STT_SAMPLE_RATE,
         language_code: 'en',
         auto_tts: true,
-        meta: {},
+        meta: normalizeVoiceRuntimeMeta({}),
       },
       voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=crew&targetId=${Number(crew.id)}`,
     });
@@ -5182,7 +5240,7 @@ app.get('/api/voice/exposed/:type/:id', (req, res) => {
       sample_rate: DEFAULT_STT_SAMPLE_RATE,
       language_code: 'en',
       auto_tts: true,
-      meta: {},
+      meta: normalizeVoiceRuntimeMeta({}),
     },
     voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=agent&targetId=${Number(agent.id)}`,
   });
@@ -5203,7 +5261,7 @@ app.get('/api/voice/crews/:id/profile', requireUser, async (req, res) => {
     sample_rate: DEFAULT_STT_SAMPLE_RATE,
     language_code: 'en',
     auto_tts: true,
-    meta: {},
+    meta: normalizeVoiceRuntimeMeta({}),
   });
 });
 
@@ -5231,7 +5289,7 @@ app.get('/api/voice/agents/:id/profile', requireUser, async (req, res) => {
     sample_rate: DEFAULT_STT_SAMPLE_RATE,
     language_code: 'en',
     auto_tts: true,
-    meta: {},
+    meta: normalizeVoiceRuntimeMeta({}),
   });
 });
 
@@ -9311,7 +9369,12 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
     const targetType = url.searchParams.get('targetType') === 'crew' ? 'crew' : 'agent';
     const targetId = Number(url.searchParams.get('targetId') || url.searchParams.get('agentId') || 0);
     const resolvedTarget = Number.isFinite(targetId) && targetId > 0 ? resolveVoiceTarget(targetType, targetId) : null;
-    const storedProfile = resolvedTarget?.targetType === 'agent' ? getAgentVoiceProfile(resolvedTarget.agentId) : null;
+    const storedProfile = resolvedTarget?.targetType === 'crew'
+      ? getCrewVoiceProfile(resolvedTarget.targetId)
+      : resolvedTarget?.targetType === 'agent'
+        ? getAgentVoiceProfile(resolvedTarget.agentId)
+        : null;
+    const storedMeta = normalizeVoiceRuntimeMeta(storedProfile?.meta || {});
     const initialVoiceId = url.searchParams.get('voiceId') || storedProfile?.voice_id || DEFAULT_VOICE_ID;
     const initialTtsModelId = url.searchParams.get('ttsModelId') || storedProfile?.tts_model_id || DEFAULT_TTS_MODEL;
     const initialSttModelId = url.searchParams.get('sttModelId') || storedProfile?.stt_model_id || DEFAULT_STT_MODEL;
@@ -9320,6 +9383,16 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
     const initialSampleRate = Number(url.searchParams.get('sampleRate') || storedProfile?.sample_rate || DEFAULT_STT_SAMPLE_RATE);
     const initialLanguageCode = url.searchParams.get('languageCode') || storedProfile?.language_code || 'en';
     const initialAutoTts = String(url.searchParams.get('autoTts') || String(storedProfile?.auto_tts ?? true)) !== 'false';
+    const initialVadEnabled = String(url.searchParams.get('vadEnabled') || String(storedMeta.vad_enabled)) !== 'false';
+    const initialVadSilenceThresholdSecs = clampNumber(url.searchParams.get('vadSilenceThresholdSecs') || storedMeta.vad_silence_threshold_secs, DEFAULT_VAD_SILENCE_THRESHOLD_SECS, 0.2, 3);
+    const initialVadThreshold = clampNumber(url.searchParams.get('vadThreshold') || storedMeta.vad_threshold, DEFAULT_VAD_THRESHOLD, 0.1, 0.95);
+    const initialMinSpeechDurationMs = Math.round(clampNumber(url.searchParams.get('minSpeechDurationMs') || storedMeta.min_speech_duration_ms, DEFAULT_MIN_SPEECH_DURATION_MS, 50, 2000));
+    const initialMinSilenceDurationMs = Math.round(clampNumber(url.searchParams.get('minSilenceDurationMs') || storedMeta.min_silence_duration_ms, DEFAULT_MIN_SILENCE_DURATION_MS, 50, 3000));
+    const initialMaxTokensToRecompute = Math.round(clampNumber(url.searchParams.get('maxTokensToRecompute') || storedMeta.max_tokens_to_recompute, DEFAULT_MAX_TOKENS_TO_RECOMPUTE, 0, 50));
+    const initialBrowserNoiseSuppression = String(url.searchParams.get('browserNoiseSuppression') || String(storedMeta.browser_noise_suppression)) !== 'false';
+    const initialBrowserEchoCancellation = String(url.searchParams.get('browserEchoCancellation') || String(storedMeta.browser_echo_cancellation)) !== 'false';
+    const initialBrowserAutoGainControl = String(url.searchParams.get('browserAutoGainControl') || String(storedMeta.browser_auto_gain_control)) === 'true';
+    const initialPushToTalk = String(url.searchParams.get('pushToTalk') || String(storedMeta.push_to_talk)) === 'true';
 
     if (!resolvedTarget) {
       sendVoiceSocketEvent(ws, 'error', { message: `${targetType} target is required` });
@@ -9363,6 +9436,16 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
       sampleRate: initialSampleRate,
       languageCode: initialLanguageCode,
       autoTts: initialAutoTts,
+      vadEnabled: initialVadEnabled,
+      vadSilenceThresholdSecs: initialVadSilenceThresholdSecs,
+      vadThreshold: initialVadThreshold,
+      minSpeechDurationMs: initialMinSpeechDurationMs,
+      minSilenceDurationMs: initialMinSilenceDurationMs,
+      maxTokensToRecompute: initialMaxTokensToRecompute,
+      browserNoiseSuppression: initialBrowserNoiseSuppression,
+      browserEchoCancellation: initialBrowserEchoCancellation,
+      browserAutoGainControl: initialBrowserAutoGainControl,
+      pushToTalk: initialPushToTalk,
       sttSocket: null,
       lastVoiceProgressAt: 0,
       lastVoiceProgressText: '',
@@ -9389,6 +9472,16 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
         sampleRate: context.sampleRate,
         languageCode: context.languageCode,
         autoTts: context.autoTts,
+        vadEnabled: context.vadEnabled,
+        vadSilenceThresholdSecs: context.vadSilenceThresholdSecs,
+        vadThreshold: context.vadThreshold,
+        minSpeechDurationMs: context.minSpeechDurationMs,
+        minSilenceDurationMs: context.minSilenceDurationMs,
+        maxTokensToRecompute: context.maxTokensToRecompute,
+        browserNoiseSuppression: context.browserNoiseSuppression,
+        browserEchoCancellation: context.browserEchoCancellation,
+        browserAutoGainControl: context.browserAutoGainControl,
+        pushToTalk: context.pushToTalk,
       },
     });
 
@@ -9409,6 +9502,16 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
           current.sampleRate = Number(message.sampleRate || current.sampleRate || DEFAULT_STT_SAMPLE_RATE);
           current.languageCode = String(message.languageCode || current.languageCode || 'en');
           current.autoTts = typeof message.autoTts === 'boolean' ? message.autoTts : current.autoTts;
+          current.vadEnabled = typeof message.vadEnabled === 'boolean' ? message.vadEnabled : current.vadEnabled;
+          current.vadSilenceThresholdSecs = clampNumber(message.vadSilenceThresholdSecs, current.vadSilenceThresholdSecs ?? DEFAULT_VAD_SILENCE_THRESHOLD_SECS, 0.2, 3);
+          current.vadThreshold = clampNumber(message.vadThreshold, current.vadThreshold ?? DEFAULT_VAD_THRESHOLD, 0.1, 0.95);
+          current.minSpeechDurationMs = Math.round(clampNumber(message.minSpeechDurationMs, current.minSpeechDurationMs ?? DEFAULT_MIN_SPEECH_DURATION_MS, 50, 2000));
+          current.minSilenceDurationMs = Math.round(clampNumber(message.minSilenceDurationMs, current.minSilenceDurationMs ?? DEFAULT_MIN_SILENCE_DURATION_MS, 50, 3000));
+          current.maxTokensToRecompute = Math.round(clampNumber(message.maxTokensToRecompute, current.maxTokensToRecompute ?? DEFAULT_MAX_TOKENS_TO_RECOMPUTE, 0, 50));
+          current.browserNoiseSuppression = typeof message.browserNoiseSuppression === 'boolean' ? message.browserNoiseSuppression : current.browserNoiseSuppression;
+          current.browserEchoCancellation = typeof message.browserEchoCancellation === 'boolean' ? message.browserEchoCancellation : current.browserEchoCancellation;
+          current.browserAutoGainControl = typeof message.browserAutoGainControl === 'boolean' ? message.browserAutoGainControl : current.browserAutoGainControl;
+          current.pushToTalk = typeof message.pushToTalk === 'boolean' ? message.pushToTalk : current.pushToTalk;
           updateVoiceSession(current.sessionId, {
             voice_id: current.voiceId,
             tts_model_id: current.ttsModelId,
@@ -9419,6 +9522,16 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
               sample_rate: current.sampleRate,
               language_code: current.languageCode,
               auto_tts: current.autoTts,
+              vad_enabled: current.vadEnabled,
+              vad_silence_threshold_secs: current.vadSilenceThresholdSecs,
+              vad_threshold: current.vadThreshold,
+              min_speech_duration_ms: current.minSpeechDurationMs,
+              min_silence_duration_ms: current.minSilenceDurationMs,
+              max_tokens_to_recompute: current.maxTokensToRecompute,
+              browser_noise_suppression: current.browserNoiseSuppression,
+              browser_echo_cancellation: current.browserEchoCancellation,
+              browser_auto_gain_control: current.browserAutoGainControl,
+              push_to_talk: current.pushToTalk,
             },
           });
           appendVoiceSessionEvent(current.sessionId, 'session.updated', {
@@ -9429,7 +9542,21 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
             sampleRate: current.sampleRate,
             languageCode: current.languageCode,
             autoTts: current.autoTts,
+            vadEnabled: current.vadEnabled,
+            vadSilenceThresholdSecs: current.vadSilenceThresholdSecs,
+            vadThreshold: current.vadThreshold,
+            minSpeechDurationMs: current.minSpeechDurationMs,
+            minSilenceDurationMs: current.minSilenceDurationMs,
+            maxTokensToRecompute: current.maxTokensToRecompute,
+            browserNoiseSuppression: current.browserNoiseSuppression,
+            browserEchoCancellation: current.browserEchoCancellation,
+            browserAutoGainControl: current.browserAutoGainControl,
+            pushToTalk: current.pushToTalk,
           });
+          if (current.sttSocket) {
+            try { current.sttSocket.close(); } catch {}
+            current.sttSocket = null;
+          }
           if (current.targetType === 'agent') {
             saveAgentVoiceProfile(current.agentId, {
               voice_id: current.voiceId,
@@ -9439,6 +9566,40 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
               sample_rate: current.sampleRate,
               language_code: current.languageCode,
               auto_tts: current.autoTts,
+              meta: {
+                vad_enabled: current.vadEnabled,
+                vad_silence_threshold_secs: current.vadSilenceThresholdSecs,
+                vad_threshold: current.vadThreshold,
+                min_speech_duration_ms: current.minSpeechDurationMs,
+                min_silence_duration_ms: current.minSilenceDurationMs,
+                max_tokens_to_recompute: current.maxTokensToRecompute,
+                browser_noise_suppression: current.browserNoiseSuppression,
+                browser_echo_cancellation: current.browserEchoCancellation,
+                browser_auto_gain_control: current.browserAutoGainControl,
+                push_to_talk: current.pushToTalk,
+              },
+            });
+          } else if (current.targetType === 'crew') {
+            saveCrewVoiceProfile(current.targetId, {
+              voice_id: current.voiceId,
+              tts_model_id: current.ttsModelId,
+              stt_model_id: current.sttModelId,
+              output_format: current.outputFormat,
+              sample_rate: current.sampleRate,
+              language_code: current.languageCode,
+              auto_tts: current.autoTts,
+              meta: {
+                vad_enabled: current.vadEnabled,
+                vad_silence_threshold_secs: current.vadSilenceThresholdSecs,
+                vad_threshold: current.vadThreshold,
+                min_speech_duration_ms: current.minSpeechDurationMs,
+                min_silence_duration_ms: current.minSilenceDurationMs,
+                max_tokens_to_recompute: current.maxTokensToRecompute,
+                browser_noise_suppression: current.browserNoiseSuppression,
+                browser_echo_cancellation: current.browserEchoCancellation,
+                browser_auto_gain_control: current.browserAutoGainControl,
+                push_to_talk: current.pushToTalk,
+              },
             });
           }
           sendVoiceSocketEvent(ws, 'session.updated', { sessionId: current.sessionId });

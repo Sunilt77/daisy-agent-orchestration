@@ -804,6 +804,7 @@ export function initDb() {
       language_code TEXT DEFAULT 'en',
       auto_tts INTEGER DEFAULT 1,
       notes TEXT,
+      meta TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -1168,6 +1169,7 @@ export function ensureVoiceTables() {
         language_code TEXT DEFAULT 'en',
         auto_tts INTEGER DEFAULT 1,
         notes TEXT,
+        meta TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
@@ -1201,6 +1203,10 @@ export function ensureVoiceTables() {
       CREATE INDEX IF NOT EXISTS idx_resource_shares_subject_lookup
         ON resource_shares(resource_type, shared_with_user_id, shared_with_org_id);
     `);
+    const voicePresetColumns = db.prepare("PRAGMA table_info(voice_config_presets)").all() as Array<{ name: string }>;
+    if (!voicePresetColumns.some((column) => column.name === 'meta')) {
+      db.exec('ALTER TABLE voice_config_presets ADD COLUMN meta TEXT');
+    }
   } catch (e) {
     console.error('Voice table migration error:', e);
     throw e;

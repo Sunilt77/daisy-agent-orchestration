@@ -33,6 +33,17 @@ type VoiceConfigPreset = {
   language_code: string;
   auto_tts: boolean;
   notes?: string;
+  meta?: {
+    vad_enabled?: boolean;
+    vad_silence_threshold_secs?: number;
+    vad_threshold?: number;
+    min_speech_duration_ms?: number;
+    min_silence_duration_ms?: number;
+    max_tokens_to_recompute?: number;
+    browser_noise_suppression?: boolean;
+    browser_echo_cancellation?: boolean;
+    browser_auto_gain_control?: boolean;
+  };
 };
 
 type ResourceAccessPayload = {
@@ -59,6 +70,12 @@ function toBase64(buffer: ArrayBuffer) {
   return btoa(binary);
 }
 
+const DEFAULT_VAD_SILENCE_THRESHOLD_SECS = 0.8;
+const DEFAULT_VAD_THRESHOLD = 0.6;
+const DEFAULT_MIN_SPEECH_DURATION_MS = 220;
+const DEFAULT_MIN_SILENCE_DURATION_MS = 420;
+const DEFAULT_MAX_TOKENS_TO_RECOMPUTE = 5;
+
 export default function VoicePage() {
   const [targets, setTargets] = useState<VoiceTarget[]>([]);
   const [voiceConfigs, setVoiceConfigs] = useState<VoiceConfigPreset[]>([]);
@@ -72,6 +89,15 @@ export default function VoicePage() {
   const [sampleRate, setSampleRate] = useState(16000);
   const [languageCode, setLanguageCode] = useState('en');
   const [autoTts, setAutoTts] = useState(true);
+  const [vadEnabled, setVadEnabled] = useState(true);
+  const [vadSilenceThresholdSecs, setVadSilenceThresholdSecs] = useState(DEFAULT_VAD_SILENCE_THRESHOLD_SECS);
+  const [vadThreshold, setVadThreshold] = useState(DEFAULT_VAD_THRESHOLD);
+  const [minSpeechDurationMs, setMinSpeechDurationMs] = useState(DEFAULT_MIN_SPEECH_DURATION_MS);
+  const [minSilenceDurationMs, setMinSilenceDurationMs] = useState(DEFAULT_MIN_SILENCE_DURATION_MS);
+  const [maxTokensToRecompute, setMaxTokensToRecompute] = useState(DEFAULT_MAX_TOKENS_TO_RECOMPUTE);
+  const [browserNoiseSuppression, setBrowserNoiseSuppression] = useState(true);
+  const [browserEchoCancellation, setBrowserEchoCancellation] = useState(true);
+  const [browserAutoGainControl, setBrowserAutoGainControl] = useState(false);
   const [textInput, setTextInput] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -303,6 +329,15 @@ export default function VoicePage() {
     setLanguageCode(String(selectedTarget.voice_profile.language_code || 'en'));
     setAutoTts(Boolean(selectedTarget.voice_profile.auto_tts ?? true));
     setSelectedVoiceConfigId(String(selectedTarget.voice_profile.meta?.preset_id || ''));
+    setVadEnabled(Boolean(selectedTarget.voice_profile.meta?.vad_enabled ?? true));
+    setVadSilenceThresholdSecs(Number(selectedTarget.voice_profile.meta?.vad_silence_threshold_secs ?? DEFAULT_VAD_SILENCE_THRESHOLD_SECS));
+    setVadThreshold(Number(selectedTarget.voice_profile.meta?.vad_threshold ?? DEFAULT_VAD_THRESHOLD));
+    setMinSpeechDurationMs(Number(selectedTarget.voice_profile.meta?.min_speech_duration_ms ?? DEFAULT_MIN_SPEECH_DURATION_MS));
+    setMinSilenceDurationMs(Number(selectedTarget.voice_profile.meta?.min_silence_duration_ms ?? DEFAULT_MIN_SILENCE_DURATION_MS));
+    setMaxTokensToRecompute(Number(selectedTarget.voice_profile.meta?.max_tokens_to_recompute ?? DEFAULT_MAX_TOKENS_TO_RECOMPUTE));
+    setBrowserNoiseSuppression(Boolean(selectedTarget.voice_profile.meta?.browser_noise_suppression ?? true));
+    setBrowserEchoCancellation(Boolean(selectedTarget.voice_profile.meta?.browser_echo_cancellation ?? true));
+    setBrowserAutoGainControl(Boolean(selectedTarget.voice_profile.meta?.browser_auto_gain_control ?? false));
   }, [selectedTarget]);
 
   const applyVoiceConfig = (presetId: string) => {
@@ -316,6 +351,15 @@ export default function VoicePage() {
     setSampleRate(Number(preset.sample_rate || 16000));
     setLanguageCode(String(preset.language_code || 'en'));
     setAutoTts(Boolean(preset.auto_tts ?? true));
+    setVadEnabled(Boolean(preset.meta?.vad_enabled ?? true));
+    setVadSilenceThresholdSecs(Number(preset.meta?.vad_silence_threshold_secs ?? DEFAULT_VAD_SILENCE_THRESHOLD_SECS));
+    setVadThreshold(Number(preset.meta?.vad_threshold ?? DEFAULT_VAD_THRESHOLD));
+    setMinSpeechDurationMs(Number(preset.meta?.min_speech_duration_ms ?? DEFAULT_MIN_SPEECH_DURATION_MS));
+    setMinSilenceDurationMs(Number(preset.meta?.min_silence_duration_ms ?? DEFAULT_MIN_SILENCE_DURATION_MS));
+    setMaxTokensToRecompute(Number(preset.meta?.max_tokens_to_recompute ?? DEFAULT_MAX_TOKENS_TO_RECOMPUTE));
+    setBrowserNoiseSuppression(Boolean(preset.meta?.browser_noise_suppression ?? true));
+    setBrowserEchoCancellation(Boolean(preset.meta?.browser_echo_cancellation ?? true));
+    setBrowserAutoGainControl(Boolean(preset.meta?.browser_auto_gain_control ?? false));
   };
 
   useEffect(() => {
@@ -380,6 +424,15 @@ export default function VoicePage() {
     url.searchParams.set('sampleRate', String(sampleRate));
     url.searchParams.set('languageCode', languageCode);
     url.searchParams.set('autoTts', autoTts ? 'true' : 'false');
+    url.searchParams.set('vadEnabled', vadEnabled ? 'true' : 'false');
+    url.searchParams.set('vadSilenceThresholdSecs', String(vadSilenceThresholdSecs));
+    url.searchParams.set('vadThreshold', String(vadThreshold));
+    url.searchParams.set('minSpeechDurationMs', String(minSpeechDurationMs));
+    url.searchParams.set('minSilenceDurationMs', String(minSilenceDurationMs));
+    url.searchParams.set('maxTokensToRecompute', String(maxTokensToRecompute));
+    url.searchParams.set('browserNoiseSuppression', browserNoiseSuppression ? 'true' : 'false');
+    url.searchParams.set('browserEchoCancellation', browserEchoCancellation ? 'true' : 'false');
+    url.searchParams.set('browserAutoGainControl', browserAutoGainControl ? 'true' : 'false');
     const ws = new WebSocket(url);
     wsRef.current = ws;
     void saveProfile();
@@ -506,6 +559,15 @@ export default function VoicePage() {
         auto_tts: autoTts,
         meta: {
           preset_id: selectedVoiceConfigId ? Number(selectedVoiceConfigId) : null,
+          vad_enabled: vadEnabled,
+          vad_silence_threshold_secs: vadSilenceThresholdSecs,
+          vad_threshold: vadThreshold,
+          min_speech_duration_ms: minSpeechDurationMs,
+          min_silence_duration_ms: minSilenceDurationMs,
+          max_tokens_to_recompute: maxTokensToRecompute,
+          browser_noise_suppression: browserNoiseSuppression,
+          browser_echo_cancellation: browserEchoCancellation,
+          browser_auto_gain_control: browserAutoGainControl,
         },
       }),
     });
@@ -527,6 +589,17 @@ export default function VoicePage() {
         sample_rate: sampleRate,
         language_code: languageCode,
         auto_tts: autoTts,
+        meta: {
+          vad_enabled: vadEnabled,
+          vad_silence_threshold_secs: vadSilenceThresholdSecs,
+          vad_threshold: vadThreshold,
+          min_speech_duration_ms: minSpeechDurationMs,
+          min_silence_duration_ms: minSilenceDurationMs,
+          max_tokens_to_recompute: maxTokensToRecompute,
+          browser_noise_suppression: browserNoiseSuppression,
+          browser_echo_cancellation: browserEchoCancellation,
+          browser_auto_gain_control: browserAutoGainControl,
+        },
       }),
     });
     const data = await res.json().catch(() => ({}));
@@ -554,6 +627,17 @@ export default function VoicePage() {
         sample_rate: sampleRate,
         language_code: languageCode,
         auto_tts: autoTts,
+        meta: {
+          vad_enabled: vadEnabled,
+          vad_silence_threshold_secs: vadSilenceThresholdSecs,
+          vad_threshold: vadThreshold,
+          min_speech_duration_ms: minSpeechDurationMs,
+          min_silence_duration_ms: minSilenceDurationMs,
+          max_tokens_to_recompute: maxTokensToRecompute,
+          browser_noise_suppression: browserNoiseSuppression,
+          browser_echo_cancellation: browserEchoCancellation,
+          browser_auto_gain_control: browserAutoGainControl,
+        },
         notes: preset.notes || '',
       }),
     });
@@ -602,7 +686,15 @@ export default function VoicePage() {
   const startRecording = async () => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     setError('');
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate } });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate,
+        noiseSuppression: browserNoiseSuppression,
+        echoCancellation: browserEchoCancellation,
+        autoGainControl: browserAutoGainControl,
+      },
+    });
     const audioContext = new AudioContext({ sampleRate });
     const source = audioContext.createMediaStreamSource(stream);
     const processor = audioContext.createScriptProcessor(4096, 1, 1);
@@ -621,6 +713,15 @@ export default function VoicePage() {
       sampleRate,
       languageCode,
       autoTts,
+      vadEnabled,
+      vadSilenceThresholdSecs,
+      vadThreshold,
+      minSpeechDurationMs,
+      minSilenceDurationMs,
+      maxTokensToRecompute,
+      browserNoiseSuppression,
+      browserEchoCancellation,
+      browserAutoGainControl,
     }));
 
     processor.onaudioprocess = (event) => {
@@ -763,6 +864,51 @@ export default function VoicePage() {
               <div>
                 <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Language</label>
                 <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={languageCode} onChange={(e) => setLanguageCode(e.target.value)} />
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-4">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Turn Detection And Disturbance Control</div>
+                <div className="text-xs text-slate-500 mt-1">Use these controls to ignore short background disturbances, commit turns faster after real pauses, and keep the conversation feeling responsive.</div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                  <input type="checkbox" checked={vadEnabled} onChange={(e) => setVadEnabled(e.target.checked)} />
+                  VAD auto-commit
+                </label>
+                <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                  <input type="checkbox" checked={browserNoiseSuppression} onChange={(e) => setBrowserNoiseSuppression(e.target.checked)} />
+                  Browser noise suppression
+                </label>
+                <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                  <input type="checkbox" checked={browserEchoCancellation} onChange={(e) => setBrowserEchoCancellation(e.target.checked)} />
+                  Echo cancellation
+                </label>
+                <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                  <input type="checkbox" checked={browserAutoGainControl} onChange={(e) => setBrowserAutoGainControl(e.target.checked)} />
+                  Auto gain control
+                </label>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Silence Threshold (sec)</label>
+                  <input type="number" min="0.2" max="3" step="0.1" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={vadSilenceThresholdSecs} onChange={(e) => setVadSilenceThresholdSecs(Number(e.target.value) || DEFAULT_VAD_SILENCE_THRESHOLD_SECS)} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">VAD Threshold</label>
+                  <input type="number" min="0.1" max="0.95" step="0.05" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={vadThreshold} onChange={(e) => setVadThreshold(Number(e.target.value) || DEFAULT_VAD_THRESHOLD)} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Min Speech (ms)</label>
+                  <input type="number" min="50" max="2000" step="10" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={minSpeechDurationMs} onChange={(e) => setMinSpeechDurationMs(Number(e.target.value) || DEFAULT_MIN_SPEECH_DURATION_MS)} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Min Silence (ms)</label>
+                  <input type="number" min="50" max="3000" step="10" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={minSilenceDurationMs} onChange={(e) => setMinSilenceDurationMs(Number(e.target.value) || DEFAULT_MIN_SILENCE_DURATION_MS)} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Recompute Window</label>
+                  <input type="number" min="0" max="50" step="1" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={maxTokensToRecompute} onChange={(e) => setMaxTokensToRecompute(Number(e.target.value) || DEFAULT_MAX_TOKENS_TO_RECOMPUTE)} />
+                </div>
               </div>
             </div>
 

@@ -26,7 +26,24 @@ interface VoiceConfigPreset {
   language_code: string;
   auto_tts: boolean;
   notes?: string;
+  meta?: {
+    vad_enabled?: boolean;
+    vad_silence_threshold_secs?: number;
+    vad_threshold?: number;
+    min_speech_duration_ms?: number;
+    min_silence_duration_ms?: number;
+    max_tokens_to_recompute?: number;
+    browser_noise_suppression?: boolean;
+    browser_echo_cancellation?: boolean;
+    browser_auto_gain_control?: boolean;
+  };
 }
+
+const DEFAULT_VAD_SILENCE_THRESHOLD_SECS = 0.8;
+const DEFAULT_VAD_THRESHOLD = 0.6;
+const DEFAULT_MIN_SPEECH_DURATION_MS = 220;
+const DEFAULT_MIN_SILENCE_DURATION_MS = 420;
+const DEFAULT_MAX_TOKENS_TO_RECOMPUTE = 5;
 
 interface Crew {
   id: number;
@@ -48,6 +65,7 @@ interface Crew {
     sample_rate?: number;
     language_code?: string;
     auto_tts?: boolean;
+    meta?: VoiceConfigPreset['meta'];
   } | null;
   agents: Agent[];
 }
@@ -91,6 +109,15 @@ export default function CrewsPage() {
     voice_sample_rate: 16000,
     voice_language_code: 'en',
     voice_auto_tts: true,
+    voice_vad_enabled: true,
+    voice_vad_silence_threshold_secs: 0.8,
+    voice_vad_threshold: 0.6,
+    voice_min_speech_duration_ms: 220,
+    voice_min_silence_duration_ms: 420,
+    voice_max_tokens_to_recompute: 5,
+    voice_browser_noise_suppression: true,
+    voice_browser_echo_cancellation: true,
+    voice_browser_auto_gain_control: false,
     voice_preset_id: '',
   });
 
@@ -303,6 +330,15 @@ export default function CrewsPage() {
         voice_sample_rate: Number(crew.voice_profile?.sample_rate || 16000),
         voice_language_code: String(crew.voice_profile?.language_code || 'en'),
         voice_auto_tts: Boolean(crew.voice_profile?.auto_tts ?? true),
+        voice_vad_enabled: Boolean(crew.voice_profile?.meta?.vad_enabled ?? true),
+        voice_vad_silence_threshold_secs: Number(crew.voice_profile?.meta?.vad_silence_threshold_secs ?? DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+        voice_vad_threshold: Number(crew.voice_profile?.meta?.vad_threshold ?? DEFAULT_VAD_THRESHOLD),
+        voice_min_speech_duration_ms: Number(crew.voice_profile?.meta?.min_speech_duration_ms ?? DEFAULT_MIN_SPEECH_DURATION_MS),
+        voice_min_silence_duration_ms: Number(crew.voice_profile?.meta?.min_silence_duration_ms ?? DEFAULT_MIN_SILENCE_DURATION_MS),
+        voice_max_tokens_to_recompute: Number(crew.voice_profile?.meta?.max_tokens_to_recompute ?? DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+        voice_browser_noise_suppression: Boolean(crew.voice_profile?.meta?.browser_noise_suppression ?? true),
+        voice_browser_echo_cancellation: Boolean(crew.voice_profile?.meta?.browser_echo_cancellation ?? true),
+        voice_browser_auto_gain_control: Boolean(crew.voice_profile?.meta?.browser_auto_gain_control ?? false),
         voice_preset_id: String((crew.voice_profile as any)?.meta?.preset_id || ''),
       });
     } else {
@@ -325,6 +361,15 @@ export default function CrewsPage() {
         voice_sample_rate: 16000,
         voice_language_code: 'en',
         voice_auto_tts: true,
+        voice_vad_enabled: true,
+        voice_vad_silence_threshold_secs: 0.8,
+        voice_vad_threshold: 0.6,
+        voice_min_speech_duration_ms: 220,
+        voice_min_silence_duration_ms: 420,
+        voice_max_tokens_to_recompute: 5,
+        voice_browser_noise_suppression: true,
+        voice_browser_echo_cancellation: true,
+        voice_browser_auto_gain_control: false,
         voice_preset_id: '',
       });
     }
@@ -372,6 +417,15 @@ export default function CrewsPage() {
             auto_tts: Boolean(formData.voice_auto_tts),
             meta: {
               preset_id: formData.voice_preset_id ? Number(formData.voice_preset_id) : null,
+              vad_enabled: Boolean(formData.voice_vad_enabled),
+              vad_silence_threshold_secs: Number(formData.voice_vad_silence_threshold_secs || DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+              vad_threshold: Number(formData.voice_vad_threshold || DEFAULT_VAD_THRESHOLD),
+              min_speech_duration_ms: Number(formData.voice_min_speech_duration_ms || DEFAULT_MIN_SPEECH_DURATION_MS),
+              min_silence_duration_ms: Number(formData.voice_min_silence_duration_ms || DEFAULT_MIN_SILENCE_DURATION_MS),
+              max_tokens_to_recompute: Number(formData.voice_max_tokens_to_recompute || DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+              browser_noise_suppression: Boolean(formData.voice_browser_noise_suppression),
+              browser_echo_cancellation: Boolean(formData.voice_browser_echo_cancellation),
+              browser_auto_gain_control: Boolean(formData.voice_browser_auto_gain_control),
             },
           }),
         });
@@ -489,6 +543,15 @@ export default function CrewsPage() {
       voice_sample_rate: Number(preset.sample_rate || 16000),
       voice_language_code: String(preset.language_code || 'en'),
       voice_auto_tts: Boolean(preset.auto_tts ?? true),
+      voice_vad_enabled: Boolean(preset.meta?.vad_enabled ?? true),
+      voice_vad_silence_threshold_secs: Number(preset.meta?.vad_silence_threshold_secs ?? DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+      voice_vad_threshold: Number(preset.meta?.vad_threshold ?? DEFAULT_VAD_THRESHOLD),
+      voice_min_speech_duration_ms: Number(preset.meta?.min_speech_duration_ms ?? DEFAULT_MIN_SPEECH_DURATION_MS),
+      voice_min_silence_duration_ms: Number(preset.meta?.min_silence_duration_ms ?? DEFAULT_MIN_SILENCE_DURATION_MS),
+      voice_max_tokens_to_recompute: Number(preset.meta?.max_tokens_to_recompute ?? DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+      voice_browser_noise_suppression: Boolean(preset.meta?.browser_noise_suppression ?? true),
+      voice_browser_echo_cancellation: Boolean(preset.meta?.browser_echo_cancellation ?? true),
+      voice_browser_auto_gain_control: Boolean(preset.meta?.browser_auto_gain_control ?? false),
     }));
   };
 
@@ -507,6 +570,17 @@ export default function CrewsPage() {
         sample_rate: Number(formData.voice_sample_rate || 16000),
         language_code: formData.voice_language_code,
         auto_tts: Boolean(formData.voice_auto_tts),
+        meta: {
+          vad_enabled: Boolean(formData.voice_vad_enabled),
+          vad_silence_threshold_secs: Number(formData.voice_vad_silence_threshold_secs || DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+          vad_threshold: Number(formData.voice_vad_threshold || DEFAULT_VAD_THRESHOLD),
+          min_speech_duration_ms: Number(formData.voice_min_speech_duration_ms || DEFAULT_MIN_SPEECH_DURATION_MS),
+          min_silence_duration_ms: Number(formData.voice_min_silence_duration_ms || DEFAULT_MIN_SILENCE_DURATION_MS),
+          max_tokens_to_recompute: Number(formData.voice_max_tokens_to_recompute || DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+          browser_noise_suppression: Boolean(formData.voice_browser_noise_suppression),
+          browser_echo_cancellation: Boolean(formData.voice_browser_echo_cancellation),
+          browser_auto_gain_control: Boolean(formData.voice_browser_auto_gain_control),
+        },
       }),
     });
     const data = await res.json().catch(() => ({}));
@@ -534,6 +608,17 @@ export default function CrewsPage() {
         sample_rate: Number(formData.voice_sample_rate || 16000),
         language_code: formData.voice_language_code,
         auto_tts: Boolean(formData.voice_auto_tts),
+        meta: {
+          vad_enabled: Boolean(formData.voice_vad_enabled),
+          vad_silence_threshold_secs: Number(formData.voice_vad_silence_threshold_secs || DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+          vad_threshold: Number(formData.voice_vad_threshold || DEFAULT_VAD_THRESHOLD),
+          min_speech_duration_ms: Number(formData.voice_min_speech_duration_ms || DEFAULT_MIN_SPEECH_DURATION_MS),
+          min_silence_duration_ms: Number(formData.voice_min_silence_duration_ms || DEFAULT_MIN_SILENCE_DURATION_MS),
+          max_tokens_to_recompute: Number(formData.voice_max_tokens_to_recompute || DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+          browser_noise_suppression: Boolean(formData.voice_browser_noise_suppression),
+          browser_echo_cancellation: Boolean(formData.voice_browser_echo_cancellation),
+          browser_auto_gain_control: Boolean(formData.voice_browser_auto_gain_control),
+        },
         notes: preset.notes || '',
       }),
     });
@@ -1351,6 +1436,50 @@ export default function CrewsPage() {
                       <input type="checkbox" checked={formData.voice_auto_tts} onChange={e => setFormData({ ...formData, voice_auto_tts: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
                       <span className="text-sm text-slate-700">Auto-play TTS replies for this crew</span>
                     </label>
+                    <div className="rounded-2xl border border-emerald-100 bg-white/80 p-4 space-y-3">
+                      <div>
+                        <div className="text-sm font-medium text-slate-900">Turn Detection And Disturbance Control</div>
+                        <div className="text-xs text-slate-500 mt-1">These defaults are reused by crew voice sessions so short disturbances can be ignored without making real pauses feel slow.</div>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                        <label className="flex items-center gap-2 text-sm text-slate-700">
+                          <input type="checkbox" checked={formData.voice_vad_enabled} onChange={e => setFormData({ ...formData, voice_vad_enabled: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                          VAD auto-commit
+                        </label>
+                        <label className="flex items-center gap-2 text-sm text-slate-700">
+                          <input type="checkbox" checked={formData.voice_browser_noise_suppression} onChange={e => setFormData({ ...formData, voice_browser_noise_suppression: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                          Browser noise suppression
+                        </label>
+                        <label className="flex items-center gap-2 text-sm text-slate-700">
+                          <input type="checkbox" checked={formData.voice_browser_echo_cancellation} onChange={e => setFormData({ ...formData, voice_browser_echo_cancellation: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                          Echo cancellation
+                        </label>
+                        <label className="flex items-center gap-2 text-sm text-slate-700">
+                          <input type="checkbox" checked={formData.voice_browser_auto_gain_control} onChange={e => setFormData({ ...formData, voice_browser_auto_gain_control: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                          Auto gain control
+                        </label>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Silence Threshold (sec)</label>
+                          <input type="number" min="0.2" max="3" step="0.1" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_vad_silence_threshold_secs} onChange={e => setFormData({ ...formData, voice_vad_silence_threshold_secs: Number(e.target.value) || DEFAULT_VAD_SILENCE_THRESHOLD_SECS })} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">VAD Threshold</label>
+                          <input type="number" min="0.1" max="0.95" step="0.05" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_vad_threshold} onChange={e => setFormData({ ...formData, voice_vad_threshold: Number(e.target.value) || DEFAULT_VAD_THRESHOLD })} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Min Speech (ms)</label>
+                          <input type="number" min="50" max="2000" step="10" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_min_speech_duration_ms} onChange={e => setFormData({ ...formData, voice_min_speech_duration_ms: Number(e.target.value) || DEFAULT_MIN_SPEECH_DURATION_MS })} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Min Silence (ms)</label>
+                          <input type="number" min="50" max="3000" step="10" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_min_silence_duration_ms} onChange={e => setFormData({ ...formData, voice_min_silence_duration_ms: Number(e.target.value) || DEFAULT_MIN_SILENCE_DURATION_MS })} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Recompute Window</label>
+                          <input type="number" min="0" max="50" step="1" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_max_tokens_to_recompute} onChange={e => setFormData({ ...formData, voice_max_tokens_to_recompute: Number(e.target.value) || DEFAULT_MAX_TOKENS_TO_RECOMPUTE })} />
+                        </div>
+                      </div>
+                    </div>
                   </div>
                   )}
 
