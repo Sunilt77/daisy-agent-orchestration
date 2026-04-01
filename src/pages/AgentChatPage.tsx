@@ -3,6 +3,7 @@ import {
   MessageSquare, Plus, Send, Bot, User, Loader2, GitBranch, ExternalLink,
   Search, Sparkles, Activity, CheckCircle2, XCircle, Clock, AlertTriangle,
   ChevronDown, ChevronRight, Zap, Network, ArrowRight, Paperclip, X, ThumbsUp, ThumbsDown,
+  PanelLeftClose, PanelLeftOpen, Maximize2, Minimize2,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { loadPersisted, savePersisted } from '../utils/persistence';
@@ -365,6 +366,8 @@ export default function AgentChatPage() {
   const [draftAttachments, setDraftAttachments] = useState<ChatAttachment[]>([]);
   const [feedbackByExecution, setFeedbackByExecution] = useState<Record<number, FeedbackState>>({});
   const [sessionPage, setSessionPage] = useState(1);
+  const [historyHidden, setHistoryHidden] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
   const loadedSessionKeyRef = useRef<string>('');
   const sendingRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -424,6 +427,7 @@ export default function AgentChatPage() {
     [sessions, selectedSessionId]
   );
   const chatModeLabel = selectedSessionId ? 'Continuing selected chat' : 'Fresh chat ready';
+  const chatColumnClass = historyHidden || focusMode ? 'col-span-12' : 'col-span-12 lg:col-span-9 xl:col-span-9';
 
   const loadAgents = async () => {
     const res = await fetch('/api/agents');
@@ -450,6 +454,8 @@ export default function AgentChatPage() {
       }
       if (typeof persisted.draft === 'string') setDraft(persisted.draft);
       if (Array.isArray(persisted.draftAttachments)) setDraftAttachments(persisted.draftAttachments);
+      if (typeof persisted.historyHidden === 'boolean') setHistoryHidden(persisted.historyHidden);
+      if (typeof persisted.focusMode === 'boolean') setFocusMode(persisted.focusMode);
     }
     setStateReady(true);
   }, []);
@@ -457,9 +463,9 @@ export default function AgentChatPage() {
   useEffect(() => {
     if (!stateReady) return;
     savePersisted(AGENT_CHAT_UI_KEY, {
-      selectedAgentId, selectedSessionId, debugMode, showToolTrace, supervisorMode, delegateAgentIds, draft, draftAttachments,
+      selectedAgentId, selectedSessionId, debugMode, showToolTrace, supervisorMode, delegateAgentIds, draft, draftAttachments, historyHidden, focusMode,
     });
-  }, [stateReady, selectedAgentId, selectedSessionId, debugMode, showToolTrace, supervisorMode, delegateAgentIds, draft, draftAttachments]);
+  }, [stateReady, selectedAgentId, selectedSessionId, debugMode, showToolTrace, supervisorMode, delegateAgentIds, draft, draftAttachments, historyHidden, focusMode]);
 
   const loadSessions = async (agentId: number, silent = false) => {
     if (!silent) setLoading(true);
@@ -855,6 +861,7 @@ export default function AgentChatPage() {
       {/* Main layout */}
       <div className="grid grid-cols-12 gap-4 flex-1 min-h-0 overflow-hidden">
         {/* Sidebar */}
+        {!historyHidden && !focusMode && (
         <section className="col-span-12 lg:col-span-3 xl:col-span-3 panel-chrome bg-white/85 rounded-2xl border border-slate-200 p-4 flex flex-col min-h-0 overflow-hidden">
           <div className="shrink-0">
             <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Agent Workspace</label>
@@ -983,9 +990,10 @@ export default function AgentChatPage() {
             )}
           </div>
         </section>
+        )}
 
         {/* Chat panel */}
-        <section className="col-span-12 lg:col-span-9 xl:col-span-9 panel-chrome bg-white/85 rounded-2xl border border-slate-200 flex flex-col min-h-0 overflow-hidden">
+        <section className={`${chatColumnClass} panel-chrome bg-white/90 rounded-2xl border border-slate-200 flex flex-col min-h-0 overflow-hidden`}>
           {/* Chat header */}
           <div className="flex items-center justify-between gap-2 px-5 py-3 border-b border-slate-200 shrink-0">
             <div className="flex items-center gap-2.5 min-w-0">
@@ -1014,6 +1022,24 @@ export default function AgentChatPage() {
               {selectedSessionId ? 'Loaded from history' : 'Fresh conversation'}
             </div>
             <div className="flex items-center gap-3 shrink-0">
+              <button
+                type="button"
+                onClick={() => setHistoryHidden((prev) => !prev)}
+                className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-600 hover:border-indigo-200 hover:text-indigo-700"
+                title={historyHidden ? 'Show history sidebar' : 'Hide history sidebar'}
+              >
+                {historyHidden ? <PanelLeftOpen size={12} /> : <PanelLeftClose size={12} />}
+                <span className="hidden md:inline">{historyHidden ? 'Show History' : 'Hide History'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setFocusMode((prev) => !prev)}
+                className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-600 hover:border-indigo-200 hover:text-indigo-700"
+                title={focusMode ? 'Exit focus mode' : 'Maximize chat workspace'}
+              >
+                {focusMode ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+                <span className="hidden md:inline">{focusMode ? 'Exit Focus' : 'Focus Mode'}</span>
+              </button>
               <div className="hidden md:flex items-center gap-1 text-xs text-slate-500">
                 <Activity size={12} />
                 {messages.length} msgs
@@ -1030,7 +1056,7 @@ export default function AgentChatPage() {
           </div>
 
           {/* Messages area */}
-          <div ref={messagesContainerRef} className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-4 scroll-smooth">
+          <div ref={messagesContainerRef} className={`flex-1 min-h-0 overflow-y-auto py-5 space-y-4 scroll-smooth ${focusMode ? 'px-8 xl:px-16' : 'px-5'}`}>
             {messages.length === 0 && (
               <div className="h-full flex flex-col items-center justify-center gap-3 text-slate-400">
                 <Bot size={36} className="opacity-30" />
@@ -1051,14 +1077,13 @@ export default function AgentChatPage() {
                 </div>
 
                 {/* Bubble */}
-                <div className={`flex-1 ${m.role === 'user' ? 'max-w-[85%] items-end flex flex-col' : (m.trace?.length || m.debug || m.delegation) ? 'max-w-[95%]' : 'max-w-[85%]'}`}>
+                <div className={`flex-1 ${m.role === 'user' ? 'max-w-[78%] items-end flex flex-col' : (m.trace?.length || m.debug || m.delegation) ? 'max-w-[92%]' : 'max-w-[78%]'}`}>
                   {/* Sender label */}
-                  <div className={`text-[10px] font-black uppercase tracking-widest mb-1.5 ${m.role === 'user' ? 'text-indigo-500 text-right' : 'text-slate-500'}`}>
-                    {m.role === 'user' ? 'You' : selectedAgent?.name || 'Agent'}
-                    {m.ts && <span className="font-normal text-slate-400 ml-2 normal-case tracking-normal">{new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>}
+                  <div className={`text-[10px] font-semibold mb-1.5 ${m.role === 'user' ? 'text-indigo-500 text-right' : 'text-slate-500'}`}>
+                    {m.ts && <span className="font-normal tracking-normal">{new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>}
                   </div>
 
-                  <div className={`rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm ${
+                  <div className={`rounded-[1.35rem] px-4 py-3 text-sm leading-7 shadow-sm ${
                     m.role === 'user'
                       ? 'bg-indigo-600 text-white rounded-tr-sm'
                       : 'bg-white text-slate-800 border border-slate-200 rounded-tl-sm'
@@ -1192,7 +1217,7 @@ export default function AgentChatPage() {
           </div>
 
           {/* Input area */}
-          <div className="px-5 py-4 border-t border-slate-200 bg-white/60 backdrop-blur-sm shrink-0">
+          <div className={`border-t border-slate-200 bg-white/70 backdrop-blur-sm shrink-0 ${focusMode ? 'px-8 xl:px-16 py-4' : 'px-5 py-4'}`}>
             {error && (
               <div className="flex items-center gap-2 text-xs text-red-600 mb-3 rounded-lg bg-red-50 border border-red-200 px-3 py-2">
                 <XCircle size={13} className="shrink-0" />
@@ -1202,9 +1227,6 @@ export default function AgentChatPage() {
             <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
               <span className={`rounded-full px-2.5 py-1 font-semibold ${selectedSessionId ? 'bg-indigo-100 text-indigo-700' : 'bg-emerald-100 text-emerald-700'}`}>
                 {selectedSessionId ? 'Replying in selected chat' : 'Starting a new chat'}
-              </span>
-              <span className="rounded-full bg-slate-100 px-2.5 py-1 font-semibold text-slate-600">
-                {selectedAgent?.name || 'No agent selected'}
               </span>
               {supervisorMode ? (
                 <span className="rounded-full bg-violet-100 px-2.5 py-1 font-semibold text-violet-700">
@@ -1250,11 +1272,11 @@ export default function AgentChatPage() {
                     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
                   }}
                   placeholder={supervisorMode
-                    ? `Assign a task to "${selectedAgent?.name || 'supervisor'}" with ${delegateAgentIds.length} delegate${delegateAgentIds.length !== 1 ? 's' : ''}… (Shift+Enter for newline)`
-                    : `Message ${selectedAgent?.name || 'agent'}… (Shift+Enter for newline)`}
+                    ? `Assign a task to ${selectedAgent?.name || 'the supervisor'} with ${delegateAgentIds.length} delegate${delegateAgentIds.length !== 1 ? 's' : ''}...`
+                    : `Message ${selectedAgent?.name || 'the agent'}...`}
                   disabled={sending}
-                  rows={4}
-                  className="w-full rounded-2xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-400 resize-none disabled:opacity-60 min-h-[110px] max-h-64 leading-relaxed transition-all"
+                  rows={3}
+                  className="w-full rounded-2xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-400 resize-none disabled:opacity-60 min-h-[72px] max-h-48 leading-relaxed transition-all"
                   style={{ scrollbarWidth: 'thin' }}
                 />
                 {draft.length > 0 && (
@@ -1265,22 +1287,22 @@ export default function AgentChatPage() {
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={!selectedAgentId || sending}
-                className="h-14 w-14 shrink-0 rounded-2xl border border-slate-300 bg-white text-slate-600 disabled:opacity-50 flex items-center justify-center hover:border-indigo-300 hover:text-indigo-600 transition-all"
+                className="h-12 w-12 shrink-0 rounded-2xl border border-slate-300 bg-white text-slate-600 disabled:opacity-50 flex items-center justify-center hover:border-indigo-300 hover:text-indigo-600 transition-all"
                 title="Attach image or file"
               >
-                <Paperclip size={18} />
+                <Paperclip size={16} />
               </button>
               <button
                 onClick={sendMessage}
                 disabled={(!draft.trim() && !draftAttachments.length) || !selectedAgentId || sending || (supervisorMode && !delegateAgentIds.length)}
-                className="h-14 px-5 rounded-2xl bg-indigo-600 text-white text-sm disabled:opacity-50 flex flex-col items-center justify-center gap-1 hover:bg-indigo-700 active:scale-95 transition-all shadow-lg shadow-indigo-200 font-bold"
+                className="h-12 px-4 rounded-2xl bg-indigo-600 text-white text-sm disabled:opacity-50 flex items-center justify-center gap-2 hover:bg-indigo-700 active:scale-95 transition-all shadow-lg shadow-indigo-200 font-bold"
               >
-                {sending ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
+                {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
                 <span className="text-[10px] font-black uppercase tracking-widest">{sending ? 'Wait' : 'Send'}</span>
               </button>
             </div>
             <div className="mt-2 flex items-center gap-4 text-[10px] text-slate-400">
-              <span>Enter to send · Shift+Enter for newline</span>
+              <span>Enter sends • Shift+Enter adds a line break</span>
               {supervisorMode && delegateAgentIds.length > 0 && (
                 <span className="text-violet-500 font-semibold">
                   ◆ Supervisor mode · {delegateAgentIds.length} delegate{delegateAgentIds.length > 1 ? 's' : ''}
