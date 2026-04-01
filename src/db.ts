@@ -807,6 +807,35 @@ export function initDb() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS resource_owners (
+      resource_type TEXT NOT NULL,
+      resource_id INTEGER NOT NULL,
+      owner_user_id TEXT NOT NULL,
+      owner_org_id TEXT,
+      visibility TEXT DEFAULT 'private',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (resource_type, resource_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS resource_shares (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      resource_type TEXT NOT NULL,
+      resource_id INTEGER NOT NULL,
+      shared_with_user_id TEXT,
+      shared_with_org_id TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_resource_owners_owner_lookup
+      ON resource_owners(resource_type, owner_user_id, owner_org_id, visibility);
+
+    CREATE INDEX IF NOT EXISTS idx_resource_shares_resource_lookup
+      ON resource_shares(resource_type, resource_id);
+
+    CREATE INDEX IF NOT EXISTS idx_resource_shares_subject_lookup
+      ON resource_shares(resource_type, shared_with_user_id, shared_with_org_id);
   `);
     }
 
@@ -1142,6 +1171,35 @@ export function ensureVoiceTables() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
+
+      CREATE TABLE IF NOT EXISTS resource_owners (
+        resource_type TEXT NOT NULL,
+        resource_id INTEGER NOT NULL,
+        owner_user_id TEXT NOT NULL,
+        owner_org_id TEXT,
+        visibility TEXT DEFAULT 'private',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (resource_type, resource_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS resource_shares (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        resource_type TEXT NOT NULL,
+        resource_id INTEGER NOT NULL,
+        shared_with_user_id TEXT,
+        shared_with_org_id TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_resource_owners_owner_lookup
+        ON resource_owners(resource_type, owner_user_id, owner_org_id, visibility);
+
+      CREATE INDEX IF NOT EXISTS idx_resource_shares_resource_lookup
+        ON resource_shares(resource_type, resource_id);
+
+      CREATE INDEX IF NOT EXISTS idx_resource_shares_subject_lookup
+        ON resource_shares(resource_type, shared_with_user_id, shared_with_org_id);
     `);
   } catch (e) {
     console.error('Voice table migration error:', e);

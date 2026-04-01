@@ -65,16 +65,23 @@ import { registerRuntimeControlRoutes } from './src/server/registerRuntimeContro
 import { WebSocketServer, WebSocket } from 'ws';
 import { requireUser } from './src/platform/auth';
 import {
+  assignResourceOwner,
   getScopedAgentIds,
   getScopedBundleIds,
   getScopedCrewIds,
   getScopedProjectIds,
   getScopedToolIds,
+  getScopedVoiceConfigIds,
+  getResourceAccess,
+  requireManageableResource,
   requireVisibleAgentId,
+  requireVisibleBundleId,
   requireVisibleCrewId,
   requireVisibleProjectId,
   requireVisibleToolId,
+  requireVisibleVoiceConfigId,
   resolveOrchestratorAccessScope,
+  setResourceAccess,
 } from './src/server/orchestratorAccess';
 
 const app = express();
@@ -2302,7 +2309,6 @@ app.get('/api/tools/:id/versions', requireUser, async (req, res) => {
 app.post('/api/tools/:id/restore/:versionId', requireUser, async (req, res) => {
   try {
     const scope = await resolveOrchestratorAccessScope(req);
-    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared tools right now.' });
     const prisma = getPrisma();
     const toolId = Number(req.params.id);
     const versionId = Number(req.params.versionId);
@@ -2310,6 +2316,7 @@ app.post('/api/tools/:id/restore/:versionId', requireUser, async (req, res) => {
       return res.status(400).json({ error: 'Invalid tool or version id' });
     }
     requireVisibleToolId(scope, toolId);
+    if (!scope.isAdmin) requireManageableResource(scope, 'tool', toolId);
     const tool = db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId) as any;
     if (!tool) return res.status(404).json({ error: 'Tool not found' });
     const version = db.prepare(`
@@ -2408,7 +2415,6 @@ function inferToolCategory(name: any, description: any, type: any, config: any, 
 app.post('/api/tools', requireUser, async (req, res) => {
   try {
     const scope = await resolveOrchestratorAccessScope(req);
-    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can create shared tools right now.' });
     const prisma = getPrisma();
     const { name, description, category, type, config, skip_validate } = req.body;
     if (type === 'mcp') {
@@ -2446,6 +2452,9 @@ app.post('/api/tools', requireUser, async (req, res) => {
         createdAt: new Date(now),
       },
     });
+    if (!scope.isAdmin && req.user) {
+      assignResourceOwner('tool', Number(created.id), req.user);
+    }
     await refreshPersistentMirror();
     res.json({ id: created.id });
   } catch (e: any) {
@@ -2456,10 +2465,10 @@ app.post('/api/tools', requireUser, async (req, res) => {
 app.put('/api/tools/:id', requireUser, async (req, res) => {
   try {
     const scope = await resolveOrchestratorAccessScope(req);
-    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared tools right now.' });
     const prisma = getPrisma();
     const { id } = req.params;
     requireVisibleToolId(scope, Number(id));
+    if (!scope.isAdmin) requireManageableResource(scope, 'tool', Number(id));
     const { name, description, category, type, config, skip_validate } = req.body;
     if (type === 'mcp') {
       if (!skip_validate) {
@@ -2539,7 +2548,6 @@ app.post('/api/tools/mcp-test', requireUser, async (req, res) => {
 app.post('/api/tools/import-mcp-package', requireUser, async (req, res) => {
   try {
     const scope = await resolveOrchestratorAccessScope(req);
-    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can import shared MCP packages right now.' });
     const prisma = getPrisma();
     const {
       packageName,
@@ -2615,6 +2623,7 @@ app.post('/api/tools/import-mcp-package', requireUser, async (req, res) => {
       let toolId: number;
       let versionNumber: number;
       if (existing) {
+        if (!scope.isAdmin) requireManageableResource(scope, 'tool', Number(existing.id));
         versionNumber = Number(existing.version || 1) + 1;
         await prisma.orchestratorTool.update({
           where: { id: existing.id },
@@ -2666,6 +2675,9 @@ app.post('/api/tools/import-mcp-package', requireUser, async (req, res) => {
             createdAt: now,
           },
         });
+        if (!scope.isAdmin && req.user) {
+          assignResourceOwner('tool', Number(created.id), req.user);
+        }
         toolId = created.id;
       }
 
@@ -2727,6 +2739,7 @@ app.post('/api/tools/import-mcp-package', requireUser, async (req, res) => {
         : 0;
 
       if (existingBundle) {
+        if (!scope.isAdmin) requireManageableResource(scope, 'mcp_bundle', Number(existingBundle.id));
         await prisma.orchestratorMcpBundle.update({
           where: { id: existingBundle.id },
           data: {
@@ -2748,6 +2761,9 @@ app.post('/api/tools/import-mcp-package', requireUser, async (req, res) => {
             updatedAt: now,
           },
         });
+        if (!scope.isAdmin && req.user) {
+          assignResourceOwner('mcp_bundle', Number(bundle.id), req.user);
+        }
         bundleId = bundle.id;
       }
 
@@ -2843,11 +2859,11 @@ app.delete('/api/tools/:id', requireUser, async (req, res) => {
   console.log(`Deleting tool ${req.params.id}`);
   try {
     const scope = await resolveOrchestratorAccessScope(req);
-    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared tools right now.' });
     const force = String(req.query.force || '') === 'true';
     const idNum = Number(req.params.id);
     if (!Number.isFinite(idNum)) return res.status(400).json({ error: 'Invalid tool id' });
     requireVisibleToolId(scope, idNum);
+    if (!scope.isAdmin) requireManageableResource(scope, 'tool', idNum);
     const tool = db.prepare('SELECT id, name FROM tools WHERE id = ?').get(idNum) as any;
     if (!tool) return res.status(404).json({ error: 'Tool not found' });
     const dependencies = getToolDependencies(idNum, scope);
@@ -2871,11 +2887,62 @@ app.delete('/api/tools/:id', requireUser, async (req, res) => {
     await prisma.orchestratorTool.delete({ where: { id: idNum } });
     await refreshPersistentMirror();
     db.prepare('DELETE FROM tool_executions WHERE tool_id = ?').run(idNum);
+    db.prepare('DELETE FROM resource_shares WHERE resource_type = ? AND resource_id = ?').run('tool', idNum);
+    db.prepare('DELETE FROM resource_owners WHERE resource_type = ? AND resource_id = ?').run('tool', idNum);
     console.log(`Tool ${req.params.id} deleted successfully`);
     res.json({ success: true, forced: force, deleted_tool_id: idNum });
   } catch (e: any) {
     console.error("Error deleting tool:", e);
     res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/resource-access/:resourceType/:resourceId', requireUser, async (req, res) => {
+  try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const resourceType = String(req.params.resourceType || '').trim();
+    const resourceId = Number(req.params.resourceId);
+    if (!Number.isFinite(resourceId) || resourceId <= 0) {
+      return res.status(400).json({ error: 'Invalid resource id' });
+    }
+    if (resourceType === 'tool') {
+      requireVisibleToolId(scope, resourceId);
+    } else if (resourceType === 'mcp_bundle') {
+      requireVisibleBundleId(scope, resourceId);
+    } else if (resourceType === 'voice_config') {
+      requireVisibleVoiceConfigId(scope, resourceId);
+    } else {
+      return res.status(400).json({ error: 'Unsupported resource type' });
+    }
+    res.json(getResourceAccess(resourceType, resourceId));
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to load resource access' });
+  }
+});
+
+app.put('/api/resource-access/:resourceType/:resourceId', requireUser, async (req, res) => {
+  try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const resourceType = String(req.params.resourceType || '').trim();
+    const resourceId = Number(req.params.resourceId);
+    if (!Number.isFinite(resourceId) || resourceId <= 0) {
+      return res.status(400).json({ error: 'Invalid resource id' });
+    }
+    if (resourceType === 'tool') {
+      requireVisibleToolId(scope, resourceId);
+    } else if (resourceType === 'mcp_bundle') {
+      requireVisibleBundleId(scope, resourceId);
+    } else if (resourceType === 'voice_config') {
+      requireVisibleVoiceConfigId(scope, resourceId);
+    } else {
+      return res.status(400).json({ error: 'Unsupported resource type' });
+    }
+    if (!scope.isAdmin) requireManageableResource(scope, resourceType, resourceId);
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    setResourceAccess(resourceType, resourceId, req.user, req.body || {});
+    res.json(getResourceAccess(resourceType, resourceId));
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to update resource access' });
   }
 });
 
@@ -4505,21 +4572,36 @@ app.post('/api/agents/:id/chat/stream', localRunLimiter, async (req, res) => {
     }
 });
 
-app.get('/api/voice/agents', (_req, res) => {
-  const agents = db.prepare('SELECT id, name, role, provider, model, status FROM agents ORDER BY id ASC').all() as any[];
+app.get('/api/voice/agents', requireUser, async (req, res) => {
+  const scope = await resolveOrchestratorAccessScope(req);
+  const scopedAgentIds = getScopedAgentIds(scope);
+  if (scopedAgentIds && !scopedAgentIds.length) return res.json([]);
+  const agents = db.prepare(`
+    SELECT id, name, role, provider, model, status
+    FROM agents
+    ${scopedAgentIds ? `WHERE id IN (${scopedAgentIds.map(() => '?').join(',')})` : ''}
+    ORDER BY id ASC
+  `).all(...(scopedAgentIds || [])) as any[];
   res.json(agents.map((agent) => ({
     ...agent,
     voice_profile: getAgentVoiceProfile(Number(agent.id)),
   })));
 });
 
-app.get('/api/voice/configs', (_req, res) => {
-  res.json(listVoiceConfigPresets());
+app.get('/api/voice/configs', requireUser, async (req, res) => {
+  const scope = await resolveOrchestratorAccessScope(req);
+  const scopedVoiceConfigIds = getScopedVoiceConfigIds(scope);
+  const presets = listVoiceConfigPresets();
+  res.json(scopedVoiceConfigIds ? presets.filter((preset) => scopedVoiceConfigIds.includes(Number(preset.id))) : presets);
 });
 
-app.post('/api/voice/configs', (req, res) => {
+app.post('/api/voice/configs', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const preset = saveVoiceConfigPreset(null, req.body || {});
+    if (!scope.isAdmin && req.user) {
+      assignResourceOwner('voice_config', Number(preset.id), req.user);
+    }
     res.status(201).json(preset);
   } catch (e: any) {
     const message = String(e?.message || 'Failed to save voice preset');
@@ -4530,10 +4612,13 @@ app.post('/api/voice/configs', (req, res) => {
   }
 });
 
-app.put('/api/voice/configs/:id', (req, res) => {
+app.put('/api/voice/configs/:id', requireUser, async (req, res) => {
   const presetId = Number(req.params.id);
   if (!Number.isFinite(presetId) || presetId <= 0) return res.status(400).json({ error: 'Invalid voice preset id' });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleVoiceConfigId(scope, presetId);
+    if (!scope.isAdmin) requireManageableResource(scope, 'voice_config', presetId);
     const preset = saveVoiceConfigPreset(presetId, req.body || {});
     res.json(preset);
   } catch (e: any) {
@@ -4545,16 +4630,34 @@ app.put('/api/voice/configs/:id', (req, res) => {
   }
 });
 
-app.delete('/api/voice/configs/:id', (req, res) => {
+app.delete('/api/voice/configs/:id', requireUser, async (req, res) => {
   const presetId = Number(req.params.id);
   if (!Number.isFinite(presetId) || presetId <= 0) return res.status(400).json({ error: 'Invalid voice preset id' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  requireVisibleVoiceConfigId(scope, presetId);
+  if (!scope.isAdmin) requireManageableResource(scope, 'voice_config', presetId);
   db.prepare('DELETE FROM voice_config_presets WHERE id = ?').run(presetId);
+  db.prepare('DELETE FROM resource_shares WHERE resource_type = ? AND resource_id = ?').run('voice_config', presetId);
+  db.prepare('DELETE FROM resource_owners WHERE resource_type = ? AND resource_id = ?').run('voice_config', presetId);
   res.json({ ok: true });
 });
 
-app.get('/api/voice/targets', (_req, res) => {
-  const agents = db.prepare('SELECT id, name, role, provider, model, status FROM agents ORDER BY id ASC').all() as any[];
-  const crews = db.prepare('SELECT id, name, process, coordinator_agent_id, is_exposed FROM crews ORDER BY id ASC').all() as any[];
+app.get('/api/voice/targets', requireUser, async (req, res) => {
+  const scope = await resolveOrchestratorAccessScope(req);
+  const scopedAgentIds = getScopedAgentIds(scope);
+  const scopedCrewIds = getScopedCrewIds(scope);
+  const agents = db.prepare(`
+    SELECT id, name, role, provider, model, status
+    FROM agents
+    ${scopedAgentIds ? `WHERE id IN (${scopedAgentIds.map(() => '?').join(',')})` : ''}
+    ORDER BY id ASC
+  `).all(...(scopedAgentIds || [])) as any[];
+  const crews = db.prepare(`
+    SELECT id, name, process, coordinator_agent_id, is_exposed
+    FROM crews
+    ${scopedCrewIds ? `WHERE id IN (${scopedCrewIds.map(() => '?').join(',')})` : ''}
+    ORDER BY id ASC
+  `).all(...(scopedCrewIds || [])) as any[];
   res.json({
     agents: agents.map((agent) => ({
       id: Number(agent.id),
@@ -4693,9 +4796,11 @@ app.get('/api/voice/exposed/:type/:id', (req, res) => {
   });
 });
 
-app.get('/api/voice/crews/:id/profile', (req, res) => {
+app.get('/api/voice/crews/:id/profile', requireUser, async (req, res) => {
   const crewId = Number(req.params.id);
   if (!Number.isFinite(crewId)) return res.status(400).json({ error: 'Invalid crew id' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  requireVisibleCrewId(scope, crewId);
   res.json(getCrewVoiceProfile(crewId) || {
     crew_id: crewId,
     voice_provider: 'elevenlabs',
@@ -4710,16 +4815,20 @@ app.get('/api/voice/crews/:id/profile', (req, res) => {
   });
 });
 
-app.put('/api/voice/crews/:id/profile', (req, res) => {
+app.put('/api/voice/crews/:id/profile', requireUser, async (req, res) => {
   const crewId = Number(req.params.id);
   if (!Number.isFinite(crewId)) return res.status(400).json({ error: 'Invalid crew id' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  requireVisibleCrewId(scope, crewId);
   saveCrewVoiceProfile(crewId, req.body || {});
   res.json(getCrewVoiceProfile(crewId));
 });
 
-app.get('/api/voice/agents/:id/profile', (req, res) => {
+app.get('/api/voice/agents/:id/profile', requireUser, async (req, res) => {
   const agentId = Number(req.params.id);
   if (!Number.isFinite(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  requireVisibleAgentId(scope, agentId);
   res.json(getAgentVoiceProfile(agentId) || {
     agent_id: agentId,
     voice_provider: 'elevenlabs',
@@ -4734,9 +4843,11 @@ app.get('/api/voice/agents/:id/profile', (req, res) => {
   });
 });
 
-app.put('/api/voice/agents/:id/profile', (req, res) => {
+app.put('/api/voice/agents/:id/profile', requireUser, async (req, res) => {
   const agentId = Number(req.params.id);
   if (!Number.isFinite(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  requireVisibleAgentId(scope, agentId);
   saveAgentVoiceProfile(agentId, req.body || {});
   res.json(getAgentVoiceProfile(agentId));
 });

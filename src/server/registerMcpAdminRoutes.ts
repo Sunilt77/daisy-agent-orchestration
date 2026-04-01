@@ -1,10 +1,12 @@
 import type express from 'express';
 import { requireUser } from '../platform/auth';
 import {
+  assignResourceOwner,
   getScopedAgentIds,
   getScopedBundleIds,
   getScopedToolIds,
   isPlatformAdminUser,
+  requireManageableResource,
   requireVisibleBundleId,
   requireVisibleToolId,
   resolveOrchestratorAccessScope,
@@ -328,8 +330,8 @@ export function registerMcpAdminRoutes({
     const toolId = Number(req.params.toolId);
     if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
     const scope = await resolveOrchestratorAccessScope(req);
-    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared MCP exposure right now.' });
     requireVisibleToolId(scope, toolId);
+    if (!scope.isAdmin) requireManageableResource(scope, 'tool', toolId);
     const { exposed, exposed_name, description } = req.body || {};
     const prisma = getPrisma();
     let tool = await prisma.orchestratorTool.findUnique({
@@ -466,8 +468,8 @@ export function registerMcpAdminRoutes({
     const versionId = Number(req.params.versionId);
     if (!Number.isFinite(toolId) || !Number.isFinite(versionId)) return res.status(400).json({ error: 'Invalid tool or version id' });
     const scope = await resolveOrchestratorAccessScope(req);
-    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared MCP exposure right now.' });
     requireVisibleToolId(scope, toolId);
+    if (!scope.isAdmin) requireManageableResource(scope, 'tool', toolId);
     const version = db.prepare(`
       SELECT *
       FROM mcp_exposed_tool_versions
@@ -701,8 +703,8 @@ export function registerMcpAdminRoutes({
 
     try {
       const scope = await resolveOrchestratorAccessScope(req);
-      if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared MCP bundles right now.' });
       requireVisibleBundleId(scope, bundleId);
+      if (!scope.isAdmin) requireManageableResource(scope, 'mcp_bundle', bundleId);
       db.prepare('UPDATE mcp_bundles SET is_exposed = ? WHERE id = ?')
         .run(is_exposed ? 1 : 0, bundleId);
 
@@ -742,13 +744,14 @@ export function registerMcpAdminRoutes({
 
     try {
       const scope = await resolveOrchestratorAccessScope(req);
-      if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can create shared MCP bundles right now.' });
       const prisma = getPrisma();
+      for (const toolId of parsedIds) requireVisibleToolId(scope, toolId);
       const existing = await prisma.orchestratorMcpBundle.findUnique({ where: { slug: cleanSlug } });
       let bundleId: number;
       let previousVersion = 0;
       if (existing) {
         bundleId = existing.id;
+        if (!scope.isAdmin) requireManageableResource(scope, 'mcp_bundle', bundleId);
         previousVersion = Number((await prisma.orchestratorMcpBundleVersion.aggregate({
           where: { bundleId },
           _max: { versionNumber: true },
@@ -776,6 +779,9 @@ export function registerMcpAdminRoutes({
             description: typeof description === 'string' ? description : null,
           },
         });
+        if (!scope.isAdmin && req.user) {
+          assignResourceOwner('mcp_bundle', Number(created.id), req.user);
+        }
 
         try {
           db.prepare('UPDATE mcp_bundles SET is_exposed = ? WHERE id = ?')
@@ -820,8 +826,8 @@ export function registerMcpAdminRoutes({
     const versionId = Number(req.params.versionId);
     if (!Number.isFinite(bundleId) || !Number.isFinite(versionId)) return res.status(400).json({ error: 'Invalid bundle or version id' });
     const scope = await resolveOrchestratorAccessScope(req);
-    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared MCP bundles right now.' });
     requireVisibleBundleId(scope, bundleId);
+    if (!scope.isAdmin) requireManageableResource(scope, 'mcp_bundle', bundleId);
     const bundle = db.prepare('SELECT id FROM mcp_bundles WHERE id = ?').get(bundleId) as any;
     if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
     const version = db.prepare(`
@@ -839,6 +845,7 @@ export function registerMcpAdminRoutes({
     const currentVersion = Number((db.prepare('SELECT MAX(version_number) as max_version FROM mcp_bundle_versions WHERE bundle_id = ?').get(bundleId) as any)?.max_version || 0);
     try {
       const prisma = getPrisma();
+      for (const toolId of toolIds) requireVisibleToolId(scope, toolId);
       const validTools = await prisma.orchestratorTool.findMany({
         where: { id: { in: toolIds } },
         select: { id: true },
@@ -881,8 +888,8 @@ export function registerMcpAdminRoutes({
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid bundle id' });
     const scope = await resolveOrchestratorAccessScope(req);
-    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared MCP bundles right now.' });
     requireVisibleBundleId(scope, id);
+    if (!scope.isAdmin) requireManageableResource(scope, 'mcp_bundle', id);
     const force = String(req.query.force || '') === 'true';
     const dependencies = getMcpBundleDependencies(db, id, scope.isAdmin ? null : getScopedAgentIds(scope));
     if (dependencies.agents_count > 0 && !force) {
@@ -894,6 +901,8 @@ export function registerMcpAdminRoutes({
       await prisma.orchestratorMcpBundleTool.deleteMany({ where: { bundleId: id } });
       await prisma.orchestratorMcpBundleVersion.deleteMany({ where: { bundleId: id } });
       await prisma.orchestratorMcpBundle.delete({ where: { id } });
+      db.prepare('DELETE FROM resource_shares WHERE resource_type = ? AND resource_id = ?').run('mcp_bundle', id);
+      db.prepare('DELETE FROM resource_owners WHERE resource_type = ? AND resource_id = ?').run('mcp_bundle', id);
       await refreshPersistentMirror();
       res.json({ success: true, forced: force });
     } catch (e: any) {
