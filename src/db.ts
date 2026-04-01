@@ -1231,6 +1231,7 @@ export function ensureAttachmentTables() {
         storage_provider TEXT DEFAULT 'gcs',
         storage_key TEXT NOT NULL,
         file_url TEXT NOT NULL,
+        local_path TEXT,
         metadata TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
@@ -1249,6 +1250,10 @@ export function ensureAttachmentTables() {
       CREATE INDEX IF NOT EXISTS idx_attachments_uploader_lookup
         ON attachments(uploader_user_id, uploader_org_id, created_at);
     `);
+    const attachmentColumns = db.prepare("PRAGMA table_info(attachments)").all() as Array<{ name: string }>;
+    if (!attachmentColumns.some((column) => column.name === 'local_path')) {
+      db.exec('ALTER TABLE attachments ADD COLUMN local_path TEXT');
+    }
   } catch (e) {
     console.error('Attachment table migration error:', e);
     throw e;

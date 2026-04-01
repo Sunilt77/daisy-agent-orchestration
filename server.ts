@@ -772,6 +772,7 @@ type AttachmentRef = {
   size_bytes?: number | null;
   url: string;
   storage_key?: string;
+  local_path?: string;
   created_at?: string;
 };
 type SessionMessage = {
@@ -814,6 +815,7 @@ function normalizeAttachmentRow(row: any): AttachmentRef {
     size_bytes: row.size_bytes != null ? Number(row.size_bytes) : null,
     url: String(row.file_url || row.url || ''),
     storage_key: row.storage_key || undefined,
+    local_path: row.local_path || undefined,
     created_at: row.created_at || undefined,
   };
 }
@@ -829,6 +831,7 @@ function normalizeIncomingAttachments(value: any): AttachmentRef[] {
       size_bytes: Number.isFinite(Number(item?.size_bytes)) ? Number(item.size_bytes) : null,
       url: String(item?.url || item?.file_url || '').trim(),
       storage_key: item?.storage_key ? String(item.storage_key) : undefined,
+      local_path: item?.local_path ? String(item.local_path) : undefined,
       created_at: item?.created_at ? String(item.created_at) : undefined,
     }))
     .filter((item) => item.id && item.url);
@@ -843,6 +846,7 @@ function buildAttachmentContext(attachments: AttachmentRef[]) {
       attachment.mime_type ? `mime=${attachment.mime_type}` : '',
       attachment.size_bytes != null ? `size=${attachment.size_bytes} bytes` : '',
       attachment.url ? `url=${attachment.url}` : '',
+      attachment.local_path ? `local_file_path=${attachment.local_path}` : '',
     ].filter(Boolean);
     return parts.join(' | ');
   });
@@ -856,12 +860,23 @@ function buildAttachmentContext(attachments: AttachmentRef[]) {
 function getAttachmentsForScope(scopeType: string, scopeId: string) {
   ensureAttachmentTables();
   const rows = db.prepare(`
-    SELECT id, kind, original_name, mime_type, size_bytes, storage_key, file_url, created_at
+    SELECT id, kind, original_name, mime_type, size_bytes, storage_key, file_url, local_path, created_at
     FROM attachments
     WHERE scope_type = ? AND scope_id = ?
     ORDER BY created_at ASC, id ASC
   `).all(scopeType, scopeId) as any[];
   return rows.map(normalizeAttachmentRow);
+}
+
+function getAttachmentById(attachmentId: string) {
+  ensureAttachmentTables();
+  const row = db.prepare(`
+    SELECT *
+    FROM attachments
+    WHERE id = ?
+    LIMIT 1
+  `).get(attachmentId) as any;
+  return row || null;
 }
 
 async function saveSessionSummary(sessionId: string, summary: string) {
@@ -1277,12 +1292,13 @@ async function persistUploadedAttachment(params: {
       originalName: String(file.originalname || 'upload.bin'),
       mimeType: file.mimetype ? String(file.mimetype) : undefined,
     });
+    const resolvedFileUrl = stored.fileUrl || `/api/attachments/${attachmentId}/content`;
     const kind = inferAttachmentKind(file.mimetype);
     db.prepare(`
       INSERT INTO attachments (
         id, scope_type, scope_id, agent_id, crew_id, uploader_user_id, uploader_org_id,
-        kind, original_name, mime_type, size_bytes, storage_provider, storage_key, file_url, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        kind, original_name, mime_type, size_bytes, storage_provider, storage_key, file_url, local_path, metadata
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       attachmentId,
       params.scopeType || null,
@@ -1297,14 +1313,15 @@ async function persistUploadedAttachment(params: {
       Number.isFinite(Number(file.size)) ? Number(file.size) : null,
       stored.provider,
       stored.storageKey,
-      stored.fileUrl,
+      resolvedFileUrl,
+      stored.localPath || null,
       JSON.stringify({
         field_name: file.fieldname || null,
       }),
     );
 
     const row = db.prepare(`
-      SELECT id, kind, original_name, mime_type, size_bytes, storage_key, file_url, created_at
+      SELECT id, kind, original_name, mime_type, size_bytes, storage_key, file_url, local_path, created_at
       FROM attachments
       WHERE id = ?
     `).get(attachmentId) as any;
@@ -4960,6 +4977,31 @@ app.get('/api/agents/:id/sessions/:sessionId/messages', requireUser, async (req,
 
     const messages = await loadSessionConversation(String(sessionId));
     res.json({ session_id: sessionId, messages });
+});
+
+app.get('/api/attachments/:id/content', requireUser, async (req, res) => {
+  const attachmentId = String(req.params.id || '').trim();
+  if (!attachmentId) return res.status(400).json({ error: 'Attachment id is required' });
+
+  const row = getAttachmentById(attachmentId);
+  if (!row) return res.status(404).json({ error: 'Attachment not found' });
+
+  const scope = await resolveOrchestratorAccessScope(req);
+  if (row.crew_id) {
+    requireVisibleCrewId(scope, Number(row.crew_id));
+  } else if (row.agent_id) {
+    requireVisibleAgentId(scope, Number(row.agent_id));
+  } else {
+    return res.status(403).json({ error: 'Attachment access is not available for this resource' });
+  }
+
+  if (!row.local_path) {
+    return res.redirect(String(row.file_url || ''));
+  }
+
+  res.setHeader('Content-Type', String(row.mime_type || 'application/octet-stream'));
+  res.setHeader('Content-Disposition', `inline; filename="${String(row.original_name || 'attachment')}"`);
+  return res.sendFile(String(row.local_path));
 });
 
 app.post('/api/agents/:id/attachments', requireUser, async (req, res, next) => {

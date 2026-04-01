@@ -1,9 +1,12 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { Storage } from '@google-cloud/storage';
 
 export type StoredAttachment = {
-  provider: 'gcs';
+  provider: 'gcs' | 'mounted';
   storageKey: string;
-  fileUrl: string;
+  fileUrl: string | null;
+  localPath?: string;
 };
 
 function slugifySegment(input: string) {
@@ -21,11 +24,13 @@ function attachmentBucketConfig() {
     .trim()
     .replace(/^\/+|\/+$/g, '');
   const signedUrlHours = Math.max(1, Number(process.env.GCS_ATTACHMENTS_SIGNED_URL_HOURS || 24 * 7));
-  return { bucket, prefix, signedUrlHours };
+  const mountedRoot = bucket.startsWith('/') ? bucket : '';
+  return { bucket, prefix, signedUrlHours, mountedRoot };
 }
 
 export function isAttachmentStorageConfigured() {
-  return Boolean(attachmentBucketConfig().bucket);
+  const config = attachmentBucketConfig();
+  return Boolean(config.bucket || config.mountedRoot);
 }
 
 export async function uploadAttachmentBuffer(params: {
@@ -34,16 +39,27 @@ export async function uploadAttachmentBuffer(params: {
   mimeType?: string | null;
   attachmentId: string;
 }) : Promise<StoredAttachment> {
-  const { bucket, prefix, signedUrlHours } = attachmentBucketConfig();
-  if (!bucket) {
-    throw new Error('Attachment storage bucket is not configured. Set GCS_ATTACHMENTS_BUCKET or reuse GCS_SQLITE_BUCKET.');
+  const { bucket, prefix, signedUrlHours, mountedRoot } = attachmentBucketConfig();
+  if (!bucket && !mountedRoot) {
+    throw new Error('Attachment storage bucket is not configured. Set GCS_ATTACHMENTS_BUCKET, mounted root, or reuse GCS_SQLITE_BUCKET.');
+  }
+
+  const cleanName = slugifySegment(params.originalName || 'upload.bin') || 'upload.bin';
+  const remoteName = `${prefix}/${new Date().toISOString().slice(0, 10)}/${params.attachmentId}-${cleanName}`;
+  if (mountedRoot) {
+    const fullPath = path.join(mountedRoot, remoteName);
+    await mkdir(path.dirname(fullPath), { recursive: true });
+    await writeFile(fullPath, params.buffer);
+    return {
+      provider: 'mounted',
+      storageKey: remoteName,
+      fileUrl: null,
+      localPath: fullPath,
+    };
   }
 
   const storage = new Storage();
-  const cleanName = slugifySegment(params.originalName || 'upload.bin') || 'upload.bin';
-  const remoteName = `${prefix}/${new Date().toISOString().slice(0, 10)}/${params.attachmentId}-${cleanName}`;
   const file = storage.bucket(bucket).file(remoteName);
-
   await file.save(params.buffer, {
     resumable: false,
     metadata: params.mimeType ? { contentType: params.mimeType } : undefined,
