@@ -974,6 +974,7 @@ function listRelevantLearningLessons(agentId: number, userId: string | null | un
 }
 
 function buildLearningGuidance(agentId: number, userId: string | null | undefined, taskDescription: string) {
+  if (!isLearningEnabled('agent', Number(agentId))) return '';
   const preferenceText = getUserAgentPreference(userId, agentId);
   const lessons = listRelevantLearningLessons(agentId, userId, taskDescription);
   const sections: string[] = [];
@@ -991,6 +992,7 @@ function buildLearningGuidance(agentId: number, userId: string | null | undefine
 }
 
 function buildCrewLearningGuidance(crewId: number, userId: string | null | undefined, objective: string) {
+  if (!isLearningEnabled('crew', Number(crewId))) return '';
   ensureLearningTables();
   const taskSignature = normalizeTaskSignature(objective);
   const rows = db.prepare(`
@@ -1020,6 +1022,7 @@ function buildCrewLearningGuidance(crewId: number, userId: string | null | undef
 }
 
 function buildWorkflowLearningGuidance(workflowId: number, userId: string | null | undefined, input: any) {
+  if (!isLearningEnabled('workflow', Number(workflowId))) return '';
   ensureLearningTables();
   const signatureSource = typeof input === 'string' ? input : JSON.stringify(input || {});
   const taskSignature = normalizeTaskSignature(signatureSource);
@@ -1047,6 +1050,29 @@ function buildWorkflowLearningGuidance(workflowId: number, userId: string | null
     ...hints.map((hint) => `- ${hint}`),
     '- Keep the flow efficient: prefer the shortest validated route and skip redundant branches.',
   ].join('\n');
+}
+
+function isLearningEnabled(resourceType: 'agent' | 'crew' | 'workflow', resourceId: number) {
+  ensureLearningTables();
+  const row = db.prepare(`
+    SELECT enabled
+    FROM entity_learning_settings
+    WHERE resource_type = ? AND resource_id = ?
+    LIMIT 1
+  `).get(resourceType, resourceId) as any;
+  if (!row) return true;
+  return Number(row.enabled) === 1;
+}
+
+function setLearningEnabled(resourceType: 'agent' | 'crew' | 'workflow', resourceId: number, enabled: boolean) {
+  ensureLearningTables();
+  db.prepare(`
+    INSERT INTO entity_learning_settings (resource_type, resource_id, enabled, updated_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(resource_type, resource_id) DO UPDATE SET
+      enabled = excluded.enabled,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(resourceType, resourceId, enabled ? 1 : 0);
 }
 
 async function recordExecutionFeedback(exec: any, userId: string, payload: FeedbackPayload) {
@@ -4334,6 +4360,7 @@ app.get('/api/agents', requireUser, async (req, res) => {
         retry_policy: agent.retryPolicy,
         timeout_ms: agent.timeoutMs,
         is_exposed: agent.isExposed,
+        learning_enabled: isLearningEnabled('agent', agent.id),
         project_id: agent.projectId,
         created_at: agent.createdAt,
         updated_at: agent.updatedAt,
@@ -4379,6 +4406,7 @@ app.post('/api/agents', requireUser, async (req, res) => {
     mcp_bundle_ids,
     toolIds,
     is_exposed,
+    learning_enabled,
     project_id,
   } = req.body;
   const normalizedName = String(name || '').trim();
@@ -4420,6 +4448,7 @@ app.post('/api/agents', requireUser, async (req, res) => {
         projectId: project_id || null,
       },
     });
+    setLearningEnabled('agent', created.id, learning_enabled !== false);
 
     if (toolIds && Array.isArray(toolIds)) {
       const data = toolIds.map((toolId: any) => ({
@@ -4500,6 +4529,7 @@ app.put('/api/agents/:id', requireUser, async (req, res) => {
     mcp_bundle_ids,
     toolIds,
     is_exposed,
+    learning_enabled,
     project_id,
   } = req.body;
   const normalizedName = String(name || '').trim();
@@ -4545,6 +4575,7 @@ app.put('/api/agents/:id', requireUser, async (req, res) => {
         updatedAt: new Date(),
       },
     });
+    setLearningEnabled('agent', agentId, learning_enabled !== false);
 
     await prisma.orchestratorAgentTool.deleteMany({ where: { agentId } });
     if (toolIds && Array.isArray(toolIds)) {
@@ -4847,6 +4878,7 @@ app.get('/api/workflows', requireUser, async (req, res) => {
         name: workflow.name,
         description: workflow.description,
         status: workflow.status,
+        learning_enabled: isLearningEnabled('workflow', workflow.id),
         trigger_type: workflow.triggerType,
         graph: workflow.graph,
         version: workflow.version,
@@ -4881,6 +4913,7 @@ app.get('/api/workflows/:id', requireUser, async (req, res) => {
       name: workflow.name,
       description: workflow.description,
       status: workflow.status,
+      learning_enabled: isLearningEnabled('workflow', workflow.id),
       trigger_type: workflow.triggerType,
       graph: workflow.graph,
       version: workflow.version,
@@ -4898,7 +4931,7 @@ app.post('/api/workflows', requireUser, async (req, res) => {
   try {
     const scope = await resolveOrchestratorAccessScope(req);
     const prisma = getPrisma();
-    const { name, description, status, trigger_type, graph, project_id } = req.body || {};
+    const { name, description, status, trigger_type, graph, project_id, learning_enabled } = req.body || {};
     requireVisibleProjectId(scope, Number(project_id));
     const normalizedGraph = normalizeWorkflowGraph(parseWorkflowGraph(graph || { nodes: [], edges: [] }));
     const serializedGraph = JSON.stringify(normalizedGraph);
@@ -4929,6 +4962,7 @@ app.post('/api/workflows', requireUser, async (req, res) => {
         createdAt: new Date(now),
       },
     });
+    setLearningEnabled('workflow', workflow.id, learning_enabled !== false);
     await refreshPersistentMirror();
     res.json({ id: workflow.id });
   } catch (e: any) {
@@ -4945,7 +4979,7 @@ app.put('/api/workflows/:id', requireUser, async (req, res) => {
     const existing = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id) as any;
     if (!existing) return res.status(404).json({ error: 'Workflow not found' });
     requireVisibleProjectId(scope, existing.project_id ?? null);
-    const { name, description, status, trigger_type, graph, project_id } = req.body || {};
+    const { name, description, status, trigger_type, graph, project_id, learning_enabled } = req.body || {};
     if (project_id != null && project_id !== '') requireVisibleProjectId(scope, Number(project_id));
     const normalizedGraph = normalizeWorkflowGraph(parseWorkflowGraph(graph || existing.graph || { nodes: [], edges: [] }));
     const serializedGraph = JSON.stringify(normalizedGraph);
@@ -4978,6 +5012,7 @@ app.put('/api/workflows/:id', requireUser, async (req, res) => {
         createdAt: new Date(now),
       },
     });
+    setLearningEnabled('workflow', id, learning_enabled !== false);
     await refreshPersistentMirror();
     res.json({ success: true, version: nextVersion });
   } catch (e: any) {
@@ -7143,6 +7178,7 @@ app.get('/api/crews', requireUser, async (req, res) => {
         coordinator_agent_id: crew.coordinatorAgentId,
         project_id: crew.projectId,
         is_exposed: crew.isExposed,
+        learning_enabled: isLearningEnabled('crew', crew.id),
         description: crew.description,
         max_runtime_ms: crew.maxRuntimeMs,
         max_cost_usd: crew.maxCostUsd,
@@ -7294,7 +7330,7 @@ app.post('/api/crews/from-template', requireUser, async (req, res) => {
 });
 
 app.post('/api/crews', requireUser, async (req, res) => {
-  const { name, description, process, agentIds, project_id, is_exposed, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id } = req.body;
+  const { name, description, process, agentIds, project_id, is_exposed, learning_enabled, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id } = req.body;
   const normalizedProcess = process === 'hierarchical' ? 'hierarchical' : 'sequential';
   const normalizedAgentIds = Array.isArray(agentIds)
     ? Array.from(new Set(agentIds.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id))))
@@ -7330,6 +7366,7 @@ app.post('/api/crews', requireUser, async (req, res) => {
           : (normalizedCoordinatorId ?? null),
       },
     });
+    setLearningEnabled('crew', crew.id, learning_enabled !== false);
     const crewId = crew.id;
 
     await prisma.orchestratorCrewAgent.createMany({
@@ -7366,7 +7403,7 @@ app.post('/api/crews', requireUser, async (req, res) => {
 });
 
 app.put('/api/crews/:id', requireUser, async (req, res) => {
-    const { name, description, process, agentIds, project_id, is_exposed, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id } = req.body;
+  const { name, description, process, agentIds, project_id, is_exposed, learning_enabled, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id } = req.body;
     const normalizedProcess = process === 'hierarchical' ? 'hierarchical' : 'sequential';
     const normalizedAgentIds = Array.isArray(agentIds)
       ? Array.from(new Set(agentIds.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id))))
@@ -7389,7 +7426,7 @@ app.put('/api/crews/:id', requireUser, async (req, res) => {
       requireVisibleCrewId(scope, crewId);
       requireVisibleProjectId(scope, Number(project_id));
       for (const agentId of normalizedAgentIds) requireVisibleAgentId(scope, agentId);
-      await prisma.orchestratorCrew.update({
+    await prisma.orchestratorCrew.update({
         where: { id: crewId },
         data: {
           name,

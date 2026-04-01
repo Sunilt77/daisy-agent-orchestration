@@ -1361,6 +1361,17 @@ export function ensureLearningTables() {
 
       CREATE INDEX IF NOT EXISTS idx_workflow_run_feedback_workflow_lookup
         ON workflow_run_feedback(workflow_id, user_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS entity_learning_settings (
+        resource_type TEXT NOT NULL,
+        resource_id INTEGER NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (resource_type, resource_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_entity_learning_settings_lookup
+        ON entity_learning_settings(resource_type, resource_id, updated_at);
     `);
   } catch (e) {
     console.error('Learning table migration error:', e);

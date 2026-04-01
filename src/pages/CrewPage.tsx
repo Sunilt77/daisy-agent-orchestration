@@ -38,6 +38,7 @@ interface Crew {
   coordinator_agent_id?: number | null;
   project_id?: number | null;
   is_exposed?: boolean;
+  learning_enabled?: boolean;
   max_runtime_ms?: number | null;
   max_cost_usd?: number | null;
   max_tool_calls?: number | null;
@@ -95,6 +96,7 @@ export default function CrewPage() {
     process: '',
     coordinator_agent_id: '',
     is_exposed: false,
+    learning_enabled: true,
     max_runtime_ms: '',
     max_cost_usd: '',
     max_tool_calls: ''
@@ -215,6 +217,7 @@ export default function CrewPage() {
         process: currentCrew.process || 'sequential',
         coordinator_agent_id: currentCrew.coordinator_agent_id != null ? String(currentCrew.coordinator_agent_id) : '',
         is_exposed: Boolean(currentCrew.is_exposed),
+        learning_enabled: currentCrew.learning_enabled !== false,
         max_runtime_ms: currentCrew.max_runtime_ms != null ? String(currentCrew.max_runtime_ms) : '',
         max_cost_usd: currentCrew.max_cost_usd != null ? String(currentCrew.max_cost_usd) : '',
         max_tool_calls: currentCrew.max_tool_calls != null ? String(currentCrew.max_tool_calls) : '',
@@ -372,6 +375,7 @@ export default function CrewPage() {
         process: editCrew.process,
         coordinator_agent_id: editCrew.coordinator_agent_id === '' ? null : Number(editCrew.coordinator_agent_id),
         is_exposed: editCrew.is_exposed,
+        learning_enabled: editCrew.learning_enabled,
         max_runtime_ms: editCrew.max_runtime_ms === '' ? null : Number(editCrew.max_runtime_ms),
         max_cost_usd: editCrew.max_cost_usd === '' ? null : Number(editCrew.max_cost_usd),
         max_tool_calls: editCrew.max_tool_calls === '' ? null : Number(editCrew.max_tool_calls),
@@ -600,6 +604,15 @@ export default function CrewPage() {
                 onChange={e => setEditCrew({ ...editCrew, max_tool_calls: e.target.value })}
                 placeholder="20"
               />
+            </div>
+            <div className="md:col-span-6 flex items-center gap-2">
+              <input
+                type="checkbox"
+                className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                checked={editCrew.learning_enabled}
+                onChange={e => setEditCrew({ ...editCrew, learning_enabled: e.target.checked })}
+              />
+              <label className="text-sm font-medium text-slate-700">Enable Learning From Feedback</label>
             </div>
             <div className="md:col-span-6 flex items-center justify-end gap-3 pt-1">
               <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 text-sm font-medium">

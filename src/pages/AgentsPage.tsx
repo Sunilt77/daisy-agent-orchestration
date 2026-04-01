@@ -60,6 +60,7 @@ interface Agent {
   retry_policy?: string | null;
   timeout_ms?: number | null;
   is_exposed: boolean;
+  learning_enabled?: boolean;
   project_id?: number;
   tools: Tool[];
   mcp_tool_ids?: number[];
@@ -900,6 +901,7 @@ type AgentOptionalConfig =
     retry_policy: 'standard',
     timeout_ms: '',
     is_exposed: false,
+    learning_enabled: true,
     voice_id: 'JBFqnCBsd6RMkjVDRZzb',
     tts_model_id: 'eleven_multilingual_v2',
     stt_model_id: 'scribe_v2_realtime',
@@ -1352,6 +1354,7 @@ type AgentOptionalConfig =
       timeout_ms: formData.timeout_ms === '' ? null : Number(formData.timeout_ms),
       mcp_tool_ids: formData.mcp_tool_ids,
       mcp_bundle_ids: formData.mcp_bundle_ids,
+      learning_enabled: Boolean(formData.learning_enabled),
       project_id: normalizedProjectId,
     };
 
@@ -1429,6 +1432,7 @@ type AgentOptionalConfig =
       retry_policy: 'standard',
       timeout_ms: '',
       is_exposed: false,
+      learning_enabled: true,
       voice_id: 'JBFqnCBsd6RMkjVDRZzb',
       tts_model_id: 'eleven_multilingual_v2',
       stt_model_id: 'scribe_v2_realtime',
@@ -1500,6 +1504,7 @@ type AgentOptionalConfig =
           retry_policy: agent.retry_policy || 'standard',
           timeout_ms: agent.timeout_ms ?? '',
           is_exposed: agent.is_exposed || false,
+          learning_enabled: agent.learning_enabled !== false,
           voice_id: String(voiceProfile?.voice_id || 'JBFqnCBsd6RMkjVDRZzb'),
           tts_model_id: String(voiceProfile?.tts_model_id || 'eleven_multilingual_v2'),
           stt_model_id: String(voiceProfile?.stt_model_id || 'scribe_v2_realtime'),
@@ -2482,7 +2487,19 @@ type AgentOptionalConfig =
                   />
                   <label className="text-sm font-medium text-slate-700">Tools Enabled</label>
                 </div>
+                <div className="flex items-center gap-2 mt-7">
+                  <input
+                    type="checkbox"
+                    className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                    checked={formData.learning_enabled}
+                    onChange={e => setFormData({...formData, learning_enabled: e.target.checked})}
+                  />
+                  <label className="text-sm font-medium text-slate-700">Enable Learning From Feedback</label>
+                </div>
               </div>
+              <p className="text-xs text-slate-500 mt-3">
+                When enabled, this agent uses saved user feedback, success paths, and failure-avoidance lessons during future runs.
+              </p>
             </div>
             )}
 

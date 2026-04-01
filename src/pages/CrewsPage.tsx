@@ -51,6 +51,7 @@ interface Crew {
   description: string;
   process: 'sequential' | 'hierarchical';
   is_exposed: boolean;
+  learning_enabled?: boolean;
   coordinator_agent_id?: number | null;
   coordinator_agent?: Agent | null;
   project_id?: number;
@@ -99,6 +100,7 @@ export default function CrewsPage() {
     agentIds: [] as number[],
     coordinator_agent_id: null as number | null,
     is_exposed: false,
+    learning_enabled: true,
     max_runtime_ms: 120000,
     max_cost_usd: 5.0,
     max_tool_calls: 20,
@@ -320,6 +322,7 @@ export default function CrewsPage() {
         agentIds: crew.agents.map(a => a.id),
         coordinator_agent_id: crew.coordinator_agent_id ?? null,
         is_exposed: !!crew.is_exposed,
+        learning_enabled: crew.learning_enabled !== false,
         max_runtime_ms: crew.max_runtime_ms || 120000,
         max_cost_usd: crew.max_cost_usd || 5.0,
         max_tool_calls: crew.max_tool_calls || 20,
@@ -351,6 +354,7 @@ export default function CrewsPage() {
         agentIds: [],
         coordinator_agent_id: null,
         is_exposed: false,
+        learning_enabled: true,
         max_runtime_ms: 120000,
         max_cost_usd: 5.0,
         max_tool_calls: 20,
@@ -1339,35 +1343,49 @@ export default function CrewsPage() {
                   </div>
 
                   {showCrewConfig('limits') && (
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-slate-100">
-                    <div className="space-y-1">
-                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Runtime Limit (ms)</label>
-                      <input
-                        type="number"
-                        className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 focus:bg-white font-bold text-slate-900"
-                        value={formData.max_runtime_ms}
-                        onChange={e => setFormData({ ...formData, max_runtime_ms: Number(e.target.value) })}
-                      />
+                  <div className="pt-4 border-t border-slate-100">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                      <div className="space-y-1">
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Runtime Limit (ms)</label>
+                        <input
+                          type="number"
+                          className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 focus:bg-white font-bold text-slate-900"
+                          value={formData.max_runtime_ms}
+                          onChange={e => setFormData({ ...formData, max_runtime_ms: Number(e.target.value) })}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Cost Cap ($ USD)</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 focus:bg-white font-bold text-slate-900"
+                          value={formData.max_cost_usd}
+                          onChange={e => setFormData({ ...formData, max_cost_usd: Number(e.target.value) })}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Step Limit</label>
+                        <input
+                          type="number"
+                          className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 focus:bg-white font-bold text-slate-900"
+                          value={formData.max_tool_calls}
+                          onChange={e => setFormData({ ...formData, max_tool_calls: Number(e.target.value) })}
+                        />
+                      </div>
                     </div>
-                    <div className="space-y-1">
-                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Cost Cap ($ USD)</label>
+                    <label className="mt-4 flex items-center gap-2 cursor-pointer">
                       <input
-                        type="number"
-                        step="0.01"
-                        className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 focus:bg-white font-bold text-slate-900"
-                        value={formData.max_cost_usd}
-                        onChange={e => setFormData({ ...formData, max_cost_usd: Number(e.target.value) })}
+                        type="checkbox"
+                        className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                        checked={formData.learning_enabled}
+                        onChange={e => setFormData({ ...formData, learning_enabled: e.target.checked })}
                       />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Step Limit</label>
-                      <input
-                        type="number"
-                        className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 focus:bg-white font-bold text-slate-900"
-                        value={formData.max_tool_calls}
-                        onChange={e => setFormData({ ...formData, max_tool_calls: Number(e.target.value) })}
-                      />
-                    </div>
+                      <span className="text-sm text-slate-700">Enable Learning From Feedback</span>
+                    </label>
+                    <p className="text-xs text-slate-500 mt-2">
+                      When enabled, this crew uses saved run feedback to influence planning, delegation, and synthesis on future runs.
+                    </p>
                   </div>
                   )}
 

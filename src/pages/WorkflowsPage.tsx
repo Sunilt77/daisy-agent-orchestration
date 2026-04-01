@@ -23,6 +23,7 @@ type WorkflowRecord = {
   name: string;
   description?: string | null;
   status: string;
+  learning_enabled?: boolean;
   trigger_type?: string;
   graph: string;
   version?: number;
@@ -248,6 +249,7 @@ export default function WorkflowsPage() {
   const [workflowDescription, setWorkflowDescription] = useState('');
   const [workflowStatus, setWorkflowStatus] = useState('draft');
   const [workflowTriggerType, setWorkflowTriggerType] = useState('manual');
+  const [workflowLearningEnabled, setWorkflowLearningEnabled] = useState(true);
   const [workflowProjectId, setWorkflowProjectId] = useState<string>('');
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<WorkflowNodeData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -299,6 +301,7 @@ export default function WorkflowsPage() {
     setWorkflowDescription(String(data.description || ''));
     setWorkflowStatus(String(data.status || 'draft'));
     setWorkflowTriggerType(String(data.trigger_type || 'manual'));
+    setWorkflowLearningEnabled(data.learning_enabled !== false);
     setWorkflowProjectId(data.project_id != null ? String(data.project_id) : '');
     const graph = safeJson(data.graph || '{}', DEFAULT_GRAPH);
     setNodes(Array.isArray(graph.nodes) && graph.nodes.length ? graph.nodes : DEFAULT_GRAPH.nodes as any);
@@ -318,6 +321,7 @@ export default function WorkflowsPage() {
       setWorkflowDescription('');
       setWorkflowStatus('draft');
       setWorkflowTriggerType('manual');
+      setWorkflowLearningEnabled(true);
       setWorkflowProjectId('');
       setNodes(DEFAULT_GRAPH.nodes as any);
       setEdges(DEFAULT_GRAPH.edges as any);
@@ -490,6 +494,7 @@ export default function WorkflowsPage() {
       name: workflowName,
       description: workflowDescription,
       status: workflowStatus,
+      learning_enabled: workflowLearningEnabled,
       trigger_type: workflowTriggerType,
       project_id: workflowProjectId ? Number(workflowProjectId) : null,
       graph: { nodes, edges },
@@ -702,6 +707,15 @@ export default function WorkflowsPage() {
               <option value="draft">Draft</option>
               <option value="active">Active</option>
             </select>
+            <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                checked={workflowLearningEnabled}
+                onChange={(e) => setWorkflowLearningEnabled(e.target.checked)}
+              />
+              Enable Learning From Feedback
+            </label>
             <select value={workflowTriggerType} onChange={(e) => setWorkflowTriggerType(e.target.value)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
               <option value="manual">Manual trigger</option>
               <option value="webhook">Webhook trigger</option>
