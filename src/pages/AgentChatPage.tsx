@@ -76,6 +76,27 @@ type FeedbackState = {
 
 const SESSION_PAGE_SIZE = 12;
 
+function formatSessionBucket(input?: string) {
+  if (!input) return 'Earlier';
+  const date = new Date(input);
+  if (Number.isNaN(date.getTime())) return 'Earlier';
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const target = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const diffDays = Math.round((today.getTime() - target.getTime()) / 86400000);
+  if (diffDays <= 0) return 'Today';
+  if (diffDays === 1) return 'Yesterday';
+  if (diffDays <= 7) return 'Last 7 Days';
+  return 'Earlier';
+}
+
+function formatSessionTimestamp(input?: string) {
+  if (!input) return '';
+  const date = new Date(input);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
 async function safeJson(res: Response) {
   const text = await res.text();
   try { return text ? JSON.parse(text) : null; } catch { return null; }
@@ -385,6 +406,19 @@ export default function AgentChatPage() {
     [sessions, sessionPage]
   );
   const hasMoreSessions = visibleSessions.length < sessions.length;
+  const groupedVisibleSessions = useMemo(() => {
+    const groups: Array<{ label: string; items: SessionSummary[] }> = [];
+    for (const session of visibleSessions) {
+      const label = formatSessionBucket(session.last_seen_at || session.created_at);
+      const lastGroup = groups[groups.length - 1];
+      if (!lastGroup || lastGroup.label !== label) {
+        groups.push({ label, items: [session] });
+      } else {
+        lastGroup.items.push(session);
+      }
+    }
+    return groups;
+  }, [visibleSessions]);
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId) ?? null,
     [sessions, selectedSessionId]
@@ -848,7 +882,7 @@ export default function AgentChatPage() {
               <div className="mt-1 text-sm font-semibold text-slate-900">{chatModeLabel}</div>
               <div className="mt-1 text-xs text-slate-500">
                 {selectedSession
-                  ? `${selectedSession.message_count || 0} messages in this thread`
+                  ? `${selectedSession.message_count || 0} messages in this thread • last active ${formatSessionTimestamp(selectedSession.last_seen_at || selectedSession.created_at)}`
                   : 'Send a message to start a brand new conversation for this agent.'}
               </div>
             </div>
@@ -910,21 +944,33 @@ export default function AgentChatPage() {
           <div className="mt-2 space-y-1.5 flex-1 min-h-0 overflow-y-auto pr-0.5">
             {loading && <div className="text-xs text-slate-500 text-center py-4">Loading…</div>}
             {!loading && sessions.length === 0 && <div className="text-xs text-slate-500 text-center py-4">No saved chats yet.</div>}
-            {visibleSessions.map((s) => (
-              <button
-                key={s.id}
-                onClick={() => selectedAgentId && loadMessages(selectedAgentId, s.id)}
-                className={`w-full text-left rounded-lg border px-3 py-2 transition-colors ${
-                  selectedSessionId === s.id ? 'border-indigo-300 bg-indigo-50 text-indigo-900' : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-800'
-                }`}
-              >
-                <div className="text-xs font-semibold truncate">{s.user_id || s.id.slice(0, 12)}</div>
-                <div className="text-xs text-slate-500 truncate mt-0.5">{s.preview || 'No preview'}</div>
-                <div className="mt-0.5 flex items-center justify-between gap-2 text-[10px] text-slate-400">
-                  <span>{s.message_count || 0} messages</span>
-                  <span>{s.last_seen_at ? new Date(s.last_seen_at).toLocaleDateString() : ''}</span>
+            {groupedVisibleSessions.map((group) => (
+              <div key={group.label} className="space-y-1.5">
+                <div className="sticky top-0 z-10 bg-white/85 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400 backdrop-blur">
+                  {group.label}
                 </div>
-              </button>
+                {group.items.map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => selectedAgentId && loadMessages(selectedAgentId, s.id)}
+                    className={`w-full text-left rounded-lg border px-3 py-2 transition-colors ${
+                      selectedSessionId === s.id ? 'border-indigo-300 bg-indigo-50 text-indigo-900' : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-800'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-xs font-semibold truncate">{s.user_id || s.id.slice(0, 12)}</div>
+                      {selectedSessionId === s.id ? (
+                        <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-bold text-indigo-700">Open</span>
+                      ) : null}
+                    </div>
+                    <div className="text-xs text-slate-500 truncate mt-0.5">{s.preview || 'No preview'}</div>
+                    <div className="mt-0.5 flex items-center justify-between gap-2 text-[10px] text-slate-400">
+                      <span>{s.message_count || 0} messages</span>
+                      <span>{formatSessionTimestamp(s.last_seen_at || s.created_at)}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
             ))}
             {!loading && hasMoreSessions && (
               <button
@@ -1153,6 +1199,24 @@ export default function AgentChatPage() {
                 {error}
               </div>
             )}
+            <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+              <span className={`rounded-full px-2.5 py-1 font-semibold ${selectedSessionId ? 'bg-indigo-100 text-indigo-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                {selectedSessionId ? 'Replying in selected chat' : 'Starting a new chat'}
+              </span>
+              <span className="rounded-full bg-slate-100 px-2.5 py-1 font-semibold text-slate-600">
+                {selectedAgent?.name || 'No agent selected'}
+              </span>
+              {supervisorMode ? (
+                <span className="rounded-full bg-violet-100 px-2.5 py-1 font-semibold text-violet-700">
+                  Supervisor mode · {delegateAgentIds.length} delegates
+                </span>
+              ) : null}
+              {draftAttachments.length ? (
+                <span className="rounded-full bg-amber-100 px-2.5 py-1 font-semibold text-amber-700">
+                  {draftAttachments.length} attachment{draftAttachments.length === 1 ? '' : 's'} queued
+                </span>
+              ) : null}
+            </div>
             <input
               ref={fileInputRef}
               type="file"
