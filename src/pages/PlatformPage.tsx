@@ -298,6 +298,8 @@ export default function PlatformPage() {
     workflow_feedback: [],
     preferences: [],
   });
+  const [learningSearch, setLearningSearch] = useState('');
+  const [learningScope, setLearningScope] = useState<'all' | 'agent' | 'crew' | 'workflow'>('all');
 
   const notify = (type: 'success' | 'error', message: string) => {
     setNotice({ type, message });
@@ -628,7 +630,67 @@ export default function PlatformPage() {
     }
   };
 
+  const clearLearningEntity = async (resourceType: 'agent' | 'crew' | 'workflow', resourceId: number) => {
+    try {
+      await requestJson(`/api/admin/learning-insights/entity/${resourceType}/${resourceId}`, { method: 'DELETE' });
+      notify('success', `${resourceType} learning history cleared`);
+      await fetchAll();
+    } catch (e: any) {
+      notify('error', e.message || 'Failed to clear entity learning history');
+    }
+  };
+
   const learningStatusText = (enabled: number) => (Number(enabled) === 0 ? 'Disabled' : 'Enabled');
+  const learningQuery = learningSearch.trim().toLowerCase();
+  const filteredAgentLessons = useMemo(() => {
+    return learningInsights.agent_lessons.filter((row) => {
+      if (learningScope !== 'all' && learningScope !== 'agent') return false;
+      if (!learningQuery) return true;
+      return [row.agent_name, row.user_id, row.lesson_kind, row.guidance, row.task_signature || ''].some((value) =>
+        String(value).toLowerCase().includes(learningQuery),
+      );
+    });
+  }, [learningInsights.agent_lessons, learningQuery, learningScope]);
+
+  const filteredAgentFeedback = useMemo(() => {
+    return learningInsights.agent_feedback.filter((row) => {
+      if (learningScope !== 'all' && learningScope !== 'agent') return false;
+      if (!learningQuery) return true;
+      return [row.agent_name, row.user_id, row.feedback_text || '', row.task_signature || '', row.rating].some((value) =>
+        String(value).toLowerCase().includes(learningQuery),
+      );
+    });
+  }, [learningInsights.agent_feedback, learningQuery, learningScope]);
+
+  const filteredCrewFeedback = useMemo(() => {
+    return learningInsights.crew_feedback.filter((row) => {
+      if (learningScope !== 'all' && learningScope !== 'crew') return false;
+      if (!learningQuery) return true;
+      return [row.crew_name, row.user_id, row.feedback_text || '', row.rating].some((value) =>
+        String(value).toLowerCase().includes(learningQuery),
+      );
+    });
+  }, [learningInsights.crew_feedback, learningQuery, learningScope]);
+
+  const filteredWorkflowFeedback = useMemo(() => {
+    return learningInsights.workflow_feedback.filter((row) => {
+      if (learningScope !== 'all' && learningScope !== 'workflow') return false;
+      if (!learningQuery) return true;
+      return [row.workflow_name, row.user_id, row.feedback_text || '', row.rating].some((value) =>
+        String(value).toLowerCase().includes(learningQuery),
+      );
+    });
+  }, [learningInsights.workflow_feedback, learningQuery, learningScope]);
+
+  const filteredPreferences = useMemo(() => {
+    return learningInsights.preferences.filter((row) => {
+      if (learningScope !== 'all' && learningScope !== 'agent') return false;
+      if (!learningQuery) return true;
+      return [row.agent_name, row.user_id, row.preference_text].some((value) =>
+        String(value).toLowerCase().includes(learningQuery),
+      );
+    });
+  }, [learningInsights.preferences, learningQuery, learningScope]);
 
   return (
     <div className="space-y-7">
@@ -885,6 +947,21 @@ export default function PlatformPage() {
             ))}
           </div>
 
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_220px] gap-3">
+            <input
+              value={learningSearch}
+              onChange={(e) => setLearningSearch(e.target.value)}
+              className="ui-input"
+              placeholder="Search lessons, users, agents, crews, workflows..."
+            />
+            <select className="ui-select" value={learningScope} onChange={(e) => setLearningScope(e.target.value as any)}>
+              <option value="all">All Learning Records</option>
+              <option value="agent">Agent Learning Only</option>
+              <option value="crew">Crew Learning Only</option>
+              <option value="workflow">Workflow Learning Only</option>
+            </select>
+          </div>
+
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
             <div className="rounded-2xl border border-slate-200 p-4">
               <div className="flex items-center justify-between gap-3 mb-3">
@@ -892,12 +969,12 @@ export default function PlatformPage() {
                   <div className="text-sm font-black text-slate-900">Recent Learned Lessons</div>
                   <div className="text-xs text-slate-500">Failure avoidance and shortest-path guidance now affecting future runs.</div>
                 </div>
-                <span className="text-xs text-slate-500">{learningInsights.agent_lessons.length} rows</span>
+                <span className="text-xs text-slate-500">{filteredAgentLessons.length} rows</span>
               </div>
               <div className="space-y-3">
-                {learningInsights.agent_lessons.length === 0 ? (
+                {filteredAgentLessons.length === 0 ? (
                   <p className="text-sm text-slate-500">No lessons stored yet.</p>
-                ) : learningInsights.agent_lessons.slice(0, 6).map((row) => (
+                ) : filteredAgentLessons.slice(0, 6).map((row) => (
                   <div key={row.id} className="rounded-xl border border-slate-200 p-3">
                     <div className="flex items-start justify-between gap-3">
                       <div>
@@ -937,9 +1014,17 @@ export default function PlatformPage() {
                       <div className="text-sm font-semibold text-slate-900">{row.resource_type} #{row.resource_id}</div>
                       <div className="text-[11px] text-slate-500">{new Date(row.updated_at).toLocaleString()}</div>
                     </div>
-                    <span className={`rounded-full px-2 py-1 text-xs font-semibold ${Number(row.enabled) === 0 ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                      {learningStatusText(row.enabled)}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className={`rounded-full px-2 py-1 text-xs font-semibold ${Number(row.enabled) === 0 ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                        {learningStatusText(row.enabled)}
+                      </span>
+                      <button
+                        onClick={() => clearLearningEntity(row.resource_type, row.resource_id)}
+                        className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700"
+                      >
+                        Clear
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -950,19 +1035,22 @@ export default function PlatformPage() {
             <div className="rounded-2xl border border-slate-200 p-4">
               <div className="flex items-center justify-between gap-3 mb-3">
                 <div className="text-sm font-black text-slate-900">Agent Feedback</div>
-                <span className="text-xs text-slate-500">{learningInsights.agent_feedback.length} rows</span>
+                <span className="text-xs text-slate-500">{filteredAgentFeedback.length} rows</span>
               </div>
               <div className="space-y-3">
-                {learningInsights.agent_feedback.length === 0 ? (
+                {filteredAgentFeedback.length === 0 ? (
                   <p className="text-sm text-slate-500">No agent feedback captured yet.</p>
-                ) : learningInsights.agent_feedback.slice(0, 5).map((row) => (
+                ) : filteredAgentFeedback.slice(0, 5).map((row) => (
                   <div key={row.id} className="rounded-xl border border-slate-200 p-3">
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <div className="text-sm font-semibold text-slate-900">{row.agent_name}</div>
                         <div className="text-[11px] text-slate-500">{row.rating} • {Number(row.solved) === 1 ? 'solved' : 'not solved'}</div>
                       </div>
-                      <button onClick={() => removeLearningItem('agent-feedback', row.id)} className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">Delete</button>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => clearLearningEntity('agent', row.agent_id)} className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-700">Clear Agent</button>
+                        <button onClick={() => removeLearningItem('agent-feedback', row.id)} className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">Delete</button>
+                      </div>
                     </div>
                     <div className="mt-2 text-sm text-slate-700">{row.feedback_text || 'No correction text provided.'}</div>
                     <div className="mt-2 text-[11px] text-slate-500">user {row.user_id} • {new Date(row.created_at).toLocaleString()}</div>
@@ -974,19 +1062,22 @@ export default function PlatformPage() {
             <div className="rounded-2xl border border-slate-200 p-4">
               <div className="flex items-center justify-between gap-3 mb-3">
                 <div className="text-sm font-black text-slate-900">Crew Feedback</div>
-                <span className="text-xs text-slate-500">{learningInsights.crew_feedback.length} rows</span>
+                <span className="text-xs text-slate-500">{filteredCrewFeedback.length} rows</span>
               </div>
               <div className="space-y-3">
-                {learningInsights.crew_feedback.length === 0 ? (
+                {filteredCrewFeedback.length === 0 ? (
                   <p className="text-sm text-slate-500">No crew feedback captured yet.</p>
-                ) : learningInsights.crew_feedback.slice(0, 5).map((row) => (
+                ) : filteredCrewFeedback.slice(0, 5).map((row) => (
                   <div key={row.id} className="rounded-xl border border-slate-200 p-3">
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <div className="text-sm font-semibold text-slate-900">{row.crew_name}</div>
                         <div className="text-[11px] text-slate-500">{row.rating} • {Number(row.solved) === 1 ? 'solved' : 'not solved'}</div>
                       </div>
-                      <button onClick={() => removeLearningItem('crew-feedback', row.id)} className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">Delete</button>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => clearLearningEntity('crew', row.crew_id)} className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-700">Clear Crew</button>
+                        <button onClick={() => removeLearningItem('crew-feedback', row.id)} className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">Delete</button>
+                      </div>
                     </div>
                     <div className="mt-2 text-sm text-slate-700">{row.feedback_text || 'No correction text provided.'}</div>
                     <div className="mt-2 text-[11px] text-slate-500">user {row.user_id} • {new Date(row.created_at).toLocaleString()}</div>
@@ -998,19 +1089,22 @@ export default function PlatformPage() {
             <div className="rounded-2xl border border-slate-200 p-4">
               <div className="flex items-center justify-between gap-3 mb-3">
                 <div className="text-sm font-black text-slate-900">Workflow Feedback</div>
-                <span className="text-xs text-slate-500">{learningInsights.workflow_feedback.length} rows</span>
+                <span className="text-xs text-slate-500">{filteredWorkflowFeedback.length} rows</span>
               </div>
               <div className="space-y-3">
-                {learningInsights.workflow_feedback.length === 0 ? (
+                {filteredWorkflowFeedback.length === 0 ? (
                   <p className="text-sm text-slate-500">No workflow feedback captured yet.</p>
-                ) : learningInsights.workflow_feedback.slice(0, 5).map((row) => (
+                ) : filteredWorkflowFeedback.slice(0, 5).map((row) => (
                   <div key={row.id} className="rounded-xl border border-slate-200 p-3">
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <div className="text-sm font-semibold text-slate-900">{row.workflow_name}</div>
                         <div className="text-[11px] text-slate-500">{row.rating} • {Number(row.solved) === 1 ? 'solved' : 'not solved'}</div>
                       </div>
-                      <button onClick={() => removeLearningItem('workflow-feedback', row.id)} className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">Delete</button>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => clearLearningEntity('workflow', row.workflow_id)} className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-700">Clear Workflow</button>
+                        <button onClick={() => removeLearningItem('workflow-feedback', row.id)} className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">Delete</button>
+                      </div>
                     </div>
                     <div className="mt-2 text-sm text-slate-700">{row.feedback_text || 'No correction text provided.'}</div>
                     <div className="mt-2 text-[11px] text-slate-500">user {row.user_id} • {new Date(row.created_at).toLocaleString()}</div>
@@ -1026,13 +1120,13 @@ export default function PlatformPage() {
                 <div className="text-sm font-black text-slate-900">Recent User Preferences</div>
                 <div className="text-xs text-slate-500">Per-user hints the platform now feeds back into later agent runs.</div>
               </div>
-              <span className="text-xs text-slate-500">{learningInsights.preferences.length} rows</span>
+              <span className="text-xs text-slate-500">{filteredPreferences.length} rows</span>
             </div>
-            {learningInsights.preferences.length === 0 ? (
+            {filteredPreferences.length === 0 ? (
               <p className="text-sm text-slate-500">No learned user preferences yet.</p>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                {learningInsights.preferences.slice(0, 6).map((row) => (
+                {filteredPreferences.slice(0, 6).map((row) => (
                   <div key={`${row.user_id}-${row.agent_id}`} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                     <div className="text-sm font-semibold text-slate-900">{row.agent_name}</div>
                     <div className="mt-1 text-sm text-slate-700">{row.preference_text}</div>

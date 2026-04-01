@@ -1382,6 +1382,39 @@ export function registerPlatformRoutes(app: Express) {
     }
   });
 
+  router.delete('/api/admin/learning-insights/entity/:resourceType/:resourceId', requireUser, async (req, res, next) => {
+    try {
+      requirePlatformAdmin(req);
+      const resourceType = String(req.params.resourceType);
+      const resourceId = Number(req.params.resourceId);
+      if (!Number.isFinite(resourceId) || resourceId <= 0) throw new HttpError(400, 'Invalid resource id');
+
+      if (resourceType === 'agent') {
+        const lessonsDeleted = db.prepare('DELETE FROM agent_learning_lessons WHERE agent_id = ?').run(resourceId).changes;
+        const feedbackDeleted = db.prepare('DELETE FROM run_feedback WHERE agent_id = ?').run(resourceId).changes;
+        const prefsDeleted = db.prepare('DELETE FROM user_agent_preferences WHERE agent_id = ?').run(resourceId).changes;
+        const settingsDeleted = db.prepare("DELETE FROM entity_learning_settings WHERE resource_type = 'agent' AND resource_id = ?").run(resourceId).changes;
+        return res.json({ success: true, deleted: { lessons: lessonsDeleted, feedback: feedbackDeleted, preferences: prefsDeleted, settings: settingsDeleted } });
+      }
+
+      if (resourceType === 'crew') {
+        const feedbackDeleted = db.prepare('DELETE FROM crew_run_feedback WHERE crew_id = ?').run(resourceId).changes;
+        const settingsDeleted = db.prepare("DELETE FROM entity_learning_settings WHERE resource_type = 'crew' AND resource_id = ?").run(resourceId).changes;
+        return res.json({ success: true, deleted: { feedback: feedbackDeleted, settings: settingsDeleted } });
+      }
+
+      if (resourceType === 'workflow') {
+        const feedbackDeleted = db.prepare('DELETE FROM workflow_run_feedback WHERE workflow_id = ?').run(resourceId).changes;
+        const settingsDeleted = db.prepare("DELETE FROM entity_learning_settings WHERE resource_type = 'workflow' AND resource_id = ?").run(resourceId).changes;
+        return res.json({ success: true, deleted: { feedback: feedbackDeleted, settings: settingsDeleted } });
+      }
+
+      throw new HttpError(400, 'Unsupported resource type');
+    } catch (e) {
+      next(e);
+    }
+  });
+
   router.patch('/api/admin/access-controls/global', requireUser, async (req, res, next) => {
     try {
       requirePlatformAdmin(req);
