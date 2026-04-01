@@ -990,6 +990,65 @@ function buildLearningGuidance(agentId: number, userId: string | null | undefine
   return sections.join('\n\n');
 }
 
+function buildCrewLearningGuidance(crewId: number, userId: string | null | undefined, objective: string) {
+  ensureLearningTables();
+  const taskSignature = normalizeTaskSignature(objective);
+  const rows = db.prepare(`
+    SELECT rating, solved, feedback_text, created_at
+    FROM crew_run_feedback
+    WHERE crew_id = ?
+      AND (user_id IS NULL OR user_id = ?)
+    ORDER BY created_at DESC
+    LIMIT 5
+  `).all(crewId, userId || null) as any[];
+  const hints = rows
+    .map((row) => {
+      const solved = row?.solved == null ? null : Number(row.solved) === 1;
+      const text = compactPromptText(String(row?.feedback_text || '').trim(), 220);
+      if (!text) return '';
+      if (row?.rating === 'down' || solved === false) return `Avoid repeating: ${text}`;
+      return `Validated approach: ${text}`;
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+  if (!hints.length) return '';
+  return [
+    `Learned crew guidance for similar objectives (${taskSignature || 'general'}):`,
+    ...hints.map((hint) => `- ${hint}`),
+    '- Prefer the shortest collaborative path that solves the objective and avoid repeating previously criticized behavior.',
+  ].join('\n');
+}
+
+function buildWorkflowLearningGuidance(workflowId: number, userId: string | null | undefined, input: any) {
+  ensureLearningTables();
+  const signatureSource = typeof input === 'string' ? input : JSON.stringify(input || {});
+  const taskSignature = normalizeTaskSignature(signatureSource);
+  const rows = db.prepare(`
+    SELECT rating, solved, feedback_text, created_at
+    FROM workflow_run_feedback
+    WHERE workflow_id = ?
+      AND (user_id IS NULL OR user_id = ?)
+    ORDER BY created_at DESC
+    LIMIT 5
+  `).all(workflowId, userId || null) as any[];
+  const hints = rows
+    .map((row) => {
+      const solved = row?.solved == null ? null : Number(row.solved) === 1;
+      const text = compactPromptText(String(row?.feedback_text || '').trim(), 220);
+      if (!text) return '';
+      if (row?.rating === 'down' || solved === false) return `Avoid this workflow pattern: ${text}`;
+      return `Reuse this workflow pattern: ${text}`;
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+  if (!hints.length) return '';
+  return [
+    `Learned workflow guidance for similar inputs (${taskSignature || 'general'}):`,
+    ...hints.map((hint) => `- ${hint}`),
+    '- Keep the flow efficient: prefer the shortest validated route and skip redundant branches.',
+  ].join('\n');
+}
+
 async function recordExecutionFeedback(exec: any, userId: string, payload: FeedbackPayload) {
   ensureLearningTables();
   const agentId = Number(exec?.agent_id || 0);
@@ -2564,7 +2623,7 @@ async function createWorkflowRun(workflowId: number, triggerType: string, input:
   return await createRuntimeWorkflowRun(workflowId, triggerType, input, graph);
 }
 
-async function runWorkflowExecution(runId: number): Promise<{ run_id: number; status: string; output: any }> {
+async function runWorkflowExecution(runId: number, userId?: string | null): Promise<{ run_id: number; status: string; output: any }> {
   const run = await getRuntimeWorkflowRun(runId);
   if (!run) throw new Error('Workflow run not found');
   const workflow = await getPrisma().orchestratorWorkflow.findUnique({ where: { id: run.workflow_id } });
@@ -2591,6 +2650,7 @@ async function runWorkflowExecution(runId: number): Promise<{ run_id: number; st
   }
 
   const input = safeJsonParse<any>(run.input, {});
+  const workflowGuidance = buildWorkflowLearningGuidance(Number(workflow.id), userId || null, input);
   const logs: any[] = [];
   const nodeOutputs: Record<string, any> = {};
   const queue = startNodes.map((node) => node.id);
@@ -2615,17 +2675,21 @@ async function runWorkflowExecution(runId: number): Promise<{ run_id: number; st
 
     let nodeResult: any = null;
     if (type === 'trigger') {
-      nodeResult = { input };
+      nodeResult = {
+        input,
+        learning_guidance: workflowGuidance || undefined,
+      };
     } else if (type === 'agent') {
       const agentId = Number(data.agentId);
       const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any;
       if (!agent) throw new Error(`Workflow agent node references missing agent ${agentId}`);
-      const taskText = renderWorkflowTemplate(
+      const renderedTask = renderWorkflowTemplate(
         data.prompt || data.task || 'Handle the workflow input: {{input.message}}',
         input,
         nodeOutputs,
         lastOutput
       ) || 'Handle the workflow input.';
+      const taskText = workflowGuidance ? `${workflowGuidance}\n\nWorkflow task:\n${renderedTask}` : renderedTask;
       const jobId = await enqueueJob('run_agent', {
         agentId,
         task: taskText,
@@ -2648,16 +2712,17 @@ async function runWorkflowExecution(runId: number): Promise<{ run_id: number; st
         nodeOutputs,
         lastOutput
       ) || '';
+      const crewInput = workflowGuidance ? `${workflowGuidance}\n\nWorkflow objective:\n${initialInput}` : initialInput;
       const execInfo = db.prepare(`
         INSERT INTO crew_executions (crew_id, status, initial_input, retry_of, logs)
         VALUES (?, 'running', ?, NULL, '[]')
-      `).run(crewId, initialInput);
+      `).run(crewId, crewInput);
       const executionId = Number(execInfo.lastInsertRowid);
       await runCrewExecution(
         crewId,
         executionId,
-        initialInput,
-        { initiatedBy: 'workflow_node_crew' }
+        crewInput,
+        { initiatedBy: 'workflow_node_crew', userId: userId || undefined }
       );
       const crewExecution = db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any;
       const crewLogs = readCrewExecutionLogs(executionId);
@@ -5130,16 +5195,17 @@ app.post('/api/workflows/:id/execute', requireUser, async (req, res) => {
     const workflow = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id) as any;
     if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
     requireVisibleProjectId(scope, workflow.project_id ?? null);
+    const userId = String((req as any)?.user?.id || '').trim() || null;
     const input = req.body?.input ?? {};
     const triggerType = String(req.body?.trigger_type || workflow.trigger_type || 'manual');
     const runId = await createWorkflowRun(id, triggerType, input, workflow.graph);
     const shouldWait = req.query.wait === 'true' || req.body?.wait === true;
     if (!shouldWait) {
-      const jobId = await enqueueJob('run_workflow', { workflowId: id, runId });
+      const jobId = await enqueueJob('run_workflow', { workflowId: id, runId, userId });
       return res.status(202).json({ run_id: runId, job_id: jobId, status: 'pending' });
     }
     await persistWorkflowRun(runId, 'running', null, []);
-    const result = await runWorkflowExecution(runId);
+    const result = await runWorkflowExecution(runId, userId);
     res.json(result);
   } catch (e: any) {
     res.status(500).json({ error: e.message || 'Failed to execute workflow' });
@@ -5168,11 +5234,11 @@ app.post('/api/workflows/:id/webhook', async (req, res) => {
     const runId = await createWorkflowRun(id, 'webhook', input, workflow.graph);
     const shouldWait = req.query.wait === 'true' || req.body?.wait === true;
     if (!shouldWait) {
-      const jobId = await enqueueJob('run_workflow', { workflowId: id, runId });
+      const jobId = await enqueueJob('run_workflow', { workflowId: id, runId, userId: null });
       return res.status(202).json({ run_id: runId, job_id: jobId, status: 'pending' });
     }
     await persistWorkflowRun(runId, 'running', null, []);
-    const result = await runWorkflowExecution(runId);
+    const result = await runWorkflowExecution(runId, null);
     res.json(result);
   } catch (e: any) {
     res.status(500).json({ error: e.message || 'Failed to execute workflow webhook' });
@@ -8224,7 +8290,7 @@ async function processJob(job: { id: number; type: string; payload: any }) {
   }
 
   if (job.type === 'run_crew') {
-    const { crewId, executionId, initialInput, initiatedBy, retryOfExecutionId } = job.payload || {};
+    const { crewId, executionId, initialInput, initiatedBy, retryOfExecutionId, userId } = job.payload || {};
     db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run('running', executionId);
     db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
       .run(
@@ -8239,18 +8305,18 @@ async function processJob(job: { id: number; type: string; payload: any }) {
       crewId,
       executionId,
       initialInput || "",
-      { initiatedBy: initiatedBy || 'queued_crew_run' },
+      { initiatedBy: initiatedBy || 'queued_crew_run', userId: userId || undefined },
       { retryOfExecutionId: retryOfExecutionId ?? null }
     );
     return { executionId };
   }
 
   if (job.type === 'run_workflow') {
-    const { runId } = job.payload || {};
+    const { runId, userId } = job.payload || {};
     const numericRunId = Number(runId);
     if (!Number.isFinite(numericRunId)) throw new Error('Invalid workflow run id');
     await persistWorkflowRun(numericRunId, 'running', null, []);
-    return await runWorkflowExecution(numericRunId);
+    return await runWorkflowExecution(numericRunId, userId || null);
   }
 
   throw new Error(`Unknown job type: ${job.type}`);
@@ -9306,6 +9372,7 @@ async function runCrewExecution(
         try {
             const crewRow = db.prepare('SELECT process, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id FROM crews WHERE id = ?').get(crewId) as any;
             const process = crewRow?.process || 'sequential';
+            const crewGuidance = buildCrewLearningGuidance(Number(crewId), invocation?.userId || null, initialInput);
             let tasks = db.prepare('SELECT * FROM tasks WHERE crew_id = ? ORDER BY id ASC').all(crewId) as any[];
             let generatedRuntimeTasks = 0;
             if (!tasks.length) {
@@ -9325,7 +9392,10 @@ async function runCrewExecution(
                 }));
                 generatedRuntimeTasks = tasks.length;
             }
-            let context = initialInput ? `Initial Input Context:\n${initialInput}\n\n` : "";
+            let context = [
+              crewGuidance ? `${crewGuidance}\n\n` : '',
+              initialInput ? `Initial Input Context:\n${initialInput}\n\n` : '',
+            ].join('');
             let lastOutput = "";
             let plannerInputs: string[] | null = null;
             let plannerAgentForHierarchy: any | null = null;
@@ -9379,6 +9449,7 @@ async function runCrewExecution(
                     if (!delegateAgent) return null;
                     const taskDescription = [
                       String(task.description || `Delegated task ${idx + 1}`),
+                      crewGuidance ? `Crew Guidance:\n${crewGuidance}` : '',
                       initialInput ? `Original Objective:\n${initialInput}` : '',
                       `Expected Output:\n${String(task.expected_output || 'Completed task output')}`,
                       `Crew Context (JSON):\n${JSON.stringify({
@@ -9503,7 +9574,7 @@ async function runCrewExecution(
 
                 if (plannerAgent) {
                     const planTask = {
-                        description: `Create a task-by-task plan for the following objective and tasks.\nObjective:\n${initialInput || 'N/A'}\n\nTasks:\n${tasks.map((t: any, i: number) => `${i + 1}. ${t.description}`).join('\n')}\n\nReturn JSON: {"plan":["input for task 1","input for task 2",...]} (length must match tasks).`,
+                        description: `${crewGuidance ? `${crewGuidance}\n\n` : ''}Create a task-by-task plan for the following objective and tasks.\nObjective:\n${initialInput || 'N/A'}\n\nTasks:\n${tasks.map((t: any, i: number) => `${i + 1}. ${t.description}`).join('\n')}\n\nReturn JSON: {"plan":["input for task 1","input for task 2",...]} (length must match tasks).`,
                         expected_output: 'JSON object with plan array.',
                     };
 
@@ -9549,6 +9620,9 @@ async function runCrewExecution(
                     : `${context}${lastOutput ? `\n[Handoff]\nPrevious agent output:\n${lastOutput}\n` : ''}${recentOutputsText ? `\nRecent Upstream Outputs:\n${recentOutputsText}\n` : ''}`;
 
                 const taskDescriptionParts: string[] = [String(task.description || '')];
+                if (crewGuidance) {
+                    taskDescriptionParts.push(`Crew Guidance:\n${crewGuidance}`);
+                }
                 const planned = plannerInputs && plannerInputs[i] ? String(plannerInputs[i]) : '';
                 if (i === 0 && initialInput) {
                     taskDescriptionParts.push(`User Input:\n${initialInput}`);
@@ -9664,6 +9738,7 @@ async function runCrewExecution(
                 if (synthesisAgent && taskOutputs.length > 1) {
                   const synthesisTask = {
                     description: [
+                      crewGuidance ? `Crew Guidance:\n${crewGuidance}` : '',
                       `Create the final cumulative answer for this ${process} crew run.`,
                       initialInput ? `Original Objective:\n${initialInput}` : '',
                       'You must combine every upstream task output, remove duplicates, resolve conflicts, and provide one coherent final answer.',
@@ -9755,6 +9830,7 @@ function extractCrewFinalResult(logs: any[]): string {
 app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
   const crewId = req.params.id;
   const { initialInput, wait, waitMs, pollMs } = req.body || {};
+  const userId = String((req as any)?.user?.id || '').trim() || null;
   
   // Create execution record
   const stmt = db.prepare('INSERT INTO crew_executions (crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?)');
@@ -9777,6 +9853,7 @@ app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
     executionId,
     initialInput: initialInput || "",
     initiatedBy: 'crew_kickoff_http',
+    userId,
   });
 
   const shouldWait = req.query.wait === 'true' || wait === true;
