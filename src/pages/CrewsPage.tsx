@@ -1377,7 +1377,7 @@ export default function CrewsPage() {
                       <div>
                         <label className="flex items-center gap-2 text-sm font-medium text-emerald-950">
                           <AudioLines size={16} className="text-emerald-600" />
-                          Voice Runtime
+                          Voice Settings
                         </label>
                         <p className="text-xs text-emerald-900/75 mt-1">
                           Save voice defaults on this crew so live voice sessions can invoke the whole crew with its own STT/TTS profile.
@@ -1395,7 +1395,7 @@ export default function CrewsPage() {
                     <div className="pt-3 space-y-3">
                       <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 items-end">
                         <div>
-                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Voice Config Preset</label>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Voice Preset</label>
                           <select
                             className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 text-sm"
                             value={formData.voice_preset_id}

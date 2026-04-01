@@ -103,7 +103,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                     AgentOrch
                   </h1>
                   <div className="text-[10px] font-bold uppercase tracking-[0.32em] text-slate-400 mt-1">
-                    Swarm Runtime
+                    Agent Platform
                   </div>
                 </div>
               )}

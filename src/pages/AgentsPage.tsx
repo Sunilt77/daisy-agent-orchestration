@@ -980,9 +980,9 @@ type AgentOptionalConfig =
     { key: 'goal', label: 'Mission Goal' },
     { key: 'system_prompt', label: 'System Prompt' },
     { key: 'advanced', label: 'Advanced LLM Settings' },
-    { key: 'voice', label: 'Voice Runtime' },
-    { key: 'tools', label: 'Tools Access' },
-    { key: 'mcp', label: 'Direct MCP Connections' },
+    { key: 'voice', label: 'Voice Settings' },
+    { key: 'tools', label: 'Tool Access' },
+    { key: 'mcp', label: 'MCP Connections' },
   ];
 
   const showAgentConfig = (key: AgentOptionalConfig) => requiredAgentConfigs.includes(key) || visibleAgentConfigs.includes(key);
@@ -2680,7 +2680,7 @@ type AgentOptionalConfig =
             <details className="border border-indigo-100 rounded-xl p-4 bg-indigo-50/40 space-y-3 group">
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
                 <div>
-                  <label className="block text-sm font-medium text-indigo-900">Direct MCP Connections</label>
+                  <label className="block text-sm font-medium text-indigo-900">MCP Connections</label>
                   <p className="text-xs text-indigo-800/80 mt-1">
                     Attach MCP exposed tools and bundles directly to this agent without creating intermediate MCP tool entries.
                   </p>
@@ -2759,8 +2759,8 @@ type AgentOptionalConfig =
             <details className="space-y-4 group">
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
                   <div>
-                    <div className="text-sm font-medium text-slate-700">Exposure And Endpoints</div>
-                    <div className="text-xs text-slate-500 mt-1">Publish this agent for API, MCP, and voice websocket consumers.</div>
+                    <div className="text-sm font-medium text-slate-700">Publishing And Endpoints</div>
+                    <div className="text-xs text-slate-500 mt-1">Publish this agent for API, MCP, and voice WebSocket consumers.</div>
                   </div>
                   <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 group-open:bg-slate-900 group-open:text-white">
                     Expand
@@ -2774,7 +2774,7 @@ type AgentOptionalConfig =
                           checked={formData.is_exposed}
                           onChange={e => setFormData({...formData, is_exposed: e.target.checked})}
                       />
-                      <span className="text-sm font-medium text-slate-700">Expose as API / MCP Tool</span>
+                      <span className="text-sm font-medium text-slate-700">Publish as API / MCP Tool</span>
                   </label>
                   <p className="text-xs text-slate-500 mt-1 ml-6">
                       If checked, this agent can be called directly via the API or used as a tool in the Model Context Protocol.

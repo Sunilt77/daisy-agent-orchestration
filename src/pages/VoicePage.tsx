@@ -935,7 +935,7 @@ export default function VoicePage() {
           <div className="mt-1 text-xs text-slate-400">{selectedTarget?.subtitle || selectedTarget?.role || 'Select a runtime target'}</div>
         </div>
         <div className="rounded-2xl border border-white/10 bg-slate-950/88 px-4 py-4 text-white shadow-[0_18px_65px_rgba(15,23,42,0.28)]">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Connection</div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Session</div>
           <div className="mt-2 text-lg font-semibold">{isConnected ? 'Connected' : 'Disconnected'}</div>
           <div className="mt-1 text-xs text-slate-400">{sessionId ? `Session ${sessionId}` : 'Open a socket to start a voice turn'}</div>
         </div>
@@ -965,7 +965,7 @@ export default function VoicePage() {
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Runtime Type</label>
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Target Type</label>
                 <select
                   className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm bg-white"
                   value={targetType}
@@ -1033,7 +1033,7 @@ export default function VoicePage() {
             <details className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 group">
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
                 <div>
-                  <div className="text-sm font-semibold text-slate-900">Runtime Configuration</div>
+                  <div className="text-sm font-semibold text-slate-900">Voice Settings</div>
                   <div className="mt-1 text-xs text-slate-500">Voice ID, synthesis model, transcription model, language, and audio format.</div>
                 </div>
                 <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 group-open:bg-slate-900 group-open:text-white">
@@ -1141,7 +1141,7 @@ export default function VoicePage() {
               <details className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 group">
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
                   <div>
-                    <div className="text-sm font-semibold text-slate-900">Preset Access</div>
+                    <div className="text-sm font-semibold text-slate-900">Preset Sharing</div>
                     <div className="mt-1 text-xs text-slate-500">Manage who can see and reuse this voice preset.</div>
                   </div>
                   <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 group-open:bg-slate-900 group-open:text-white">
@@ -1201,7 +1201,7 @@ export default function VoicePage() {
                       disabled={presetAccessLoading || presetAccessSaving}
                       className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40"
                     >
-                      {presetAccessSaving ? 'Saving Access…' : 'Save Preset Access'}
+                      {presetAccessSaving ? 'Saving Sharing…' : 'Save Preset Sharing'}
                     </button>
                   </div>
                 </div>
@@ -1351,7 +1351,7 @@ export default function VoicePage() {
           <div className="rounded-2xl border border-slate-200 bg-slate-950 text-slate-100 p-5 shadow-sm">
             <div className="flex items-center gap-2 text-sm font-semibold mb-3">
               <Activity size={16} className="text-emerald-400" />
-              Runtime Events
+              Session Events
             </div>
             <div className="max-h-[520px] overflow-auto space-y-2 font-mono text-xs">
               {events.length ? events.map((event) => (

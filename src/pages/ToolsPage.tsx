@@ -1678,7 +1678,7 @@ export default function ToolsPage() {
                                 <details className="border border-slate-200 rounded-xl p-4 bg-white group">
                                   <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
                                     <div>
-                                      <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Access</div>
+                                      <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Sharing</div>
                                       <div className="text-sm text-slate-600 mt-1">Control who can view and manage this tool.</div>
                                     </div>
                                     <div className="flex items-center gap-3">
@@ -1740,7 +1740,7 @@ export default function ToolsPage() {
                                         disabled={resourceAccessSaving || resourceAccessLoading}
                                         className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-60"
                                       >
-                                        {resourceAccessSaving ? 'Saving Access…' : 'Save Access'}
+                                        {resourceAccessSaving ? 'Saving Sharing…' : 'Save Sharing'}
                                       </button>
                                     </div>
                                   </div>
@@ -2401,11 +2401,11 @@ export default function ToolsPage() {
                                                   </label>
                                                   <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
                                                       <input type="checkbox" checked={mcpPackageExposeTools} onChange={e => setMcpPackageExposeTools(e.target.checked)} />
-                                                      <span>Expose individual tools</span>
+                                                      <span>Publish individual tools</span>
                                                   </label>
                                                   <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
                                                       <input type="checkbox" checked={mcpPackageExposeBundle} onChange={e => setMcpPackageExposeBundle(e.target.checked)} disabled={!mcpPackageCreateBundle} />
-                                                      <span>Expose bundle for serving</span>
+                                                      <span>Publish bundle endpoint</span>
                                                   </label>
                                               </div>
 

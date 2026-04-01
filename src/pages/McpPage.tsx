@@ -777,13 +777,13 @@ export default function McpPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-black text-white">MCPs</h1>
-          <p className="text-slate-300 mt-1">Expose tools as stable MCP contracts, group them into bundles, and manage the endpoint lifecycle safely.</p>
+          <p className="text-slate-300 mt-1">Publish tools as stable MCP contracts, group them into bundles, and manage endpoints safely.</p>
         </div>
       </div>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-4 mt-6">
         {[
           { label: 'Bundles', value: mcpInsights.bundles, icon: Boxes },
-          { label: 'Exposed Tools', value: mcpInsights.exposedTools, icon: Activity },
+          { label: 'Published Tools', value: mcpInsights.exposedTools, icon: Activity },
           { label: 'Available Tools', value: mcpInsights.availableTools, icon: Plug },
           { label: 'Selected', value: mcpInsights.selected, icon: Check },
         ].map((item) => (
@@ -809,7 +809,7 @@ export default function McpPage() {
               <div className="flex items-center gap-2 text-slate-800 font-semibold">
                 <Activity size={18} /> Local MCP Runtimes ({localRuntimes.length})
               </div>
-              <div className="text-xs text-slate-500">Registry first. Open runtime details only when you need diagnostics, env keys, or bundle wiring.</div>
+              <div className="text-xs text-slate-500">Registry first. Open details only when you need diagnostics, env keys, or bundle wiring.</div>
             </div>
 
             {localRuntimes.length === 0 && (
@@ -842,9 +842,9 @@ export default function McpPage() {
                             </code>
                           </div>
                           <div className="rounded-lg border border-white/80 bg-white/80 p-3">
-                            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Platform Exposure</div>
+                            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Published Endpoint</div>
                             <div className="mt-2 text-slate-700">
-                              {primaryBundle ? `Primary bundle: ${primaryBundle.name}` : 'No bundle created yet'}
+                              {primaryBundle ? `Primary bundle: ${primaryBundle.name}` : 'No bundle published yet'}
                             </div>
                             {endpoint && (
                               <code className="mt-2 block whitespace-pre-wrap break-all text-slate-700">{endpoint}</code>
@@ -952,7 +952,7 @@ export default function McpPage() {
                           <span className="rounded-full bg-white/80 px-2 py-1 border border-indigo-100">{bundle.tool_count} tools</span>
                           <span>•</span>
                           <span className={`rounded-full px-2 py-1 border ${bundle.is_exposed ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
-                            {bundle.is_exposed ? 'Exposed' : 'Not Exposed'}
+                            {bundle.is_exposed ? 'Published' : 'Private'}
                           </span>
                           <span>•</span>
                           <code className="max-w-full truncate bg-white border border-indigo-200 px-2 py-0.5 rounded font-mono">{streamable}</code>
@@ -969,7 +969,7 @@ export default function McpPage() {
                           onClick={() => setConnectBundle(bundle)}
                           className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200"
                         >
-                          Connect
+                          Endpoints
                         </button>
                         <button
                           onClick={() => void openBundleTester(bundle)}
@@ -982,13 +982,13 @@ export default function McpPage() {
                           onClick={() => void openBundleAccess(bundle)}
                           className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white text-slate-700 border border-slate-200"
                         >
-                          Access
+                          Sharing
                         </button>
                         <button
                           onClick={() => toggleBundleExposure(bundle.id, !bundle.is_exposed)}
                           className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${bundle.is_exposed ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}
                         >
-                          {bundle.is_exposed ? 'Hide' : 'Expose'}
+                          {bundle.is_exposed ? 'Unpublish' : 'Publish'}
                         </button>
                         <button
                           onClick={() => void deleteBundle(bundle.id)}
@@ -1073,7 +1073,7 @@ export default function McpPage() {
                 <button onClick={clearSelection} className="px-3 py-2 rounded-lg text-xs font-bold border border-slate-200 text-slate-600 hover:bg-slate-50 transition-colors shadow-sm">Clear Selection</button>
               </div>
               <div className="flex-1 min-w-[120px]">
-                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 ml-1">Expose Prefix</label>
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 ml-1">Publish Prefix</label>
                 <input
                   className="w-full px-3 py-2 rounded-lg text-xs font-mono border border-slate-300 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all"
                   value={bulkPrefix}
@@ -1082,7 +1082,7 @@ export default function McpPage() {
                 />
               </div>
               <button onClick={bulkExpose} disabled={selectedIds.length === 0} className="px-4 py-2 rounded-lg text-xs font-bold bg-emerald-600 text-white disabled:opacity-50 shadow-lg shadow-emerald-100 hover:bg-emerald-700 transition-all whitespace-nowrap">
-                Expose names for selection
+                Publish names for selection
               </button>
             </div>
 
@@ -1179,9 +1179,9 @@ export default function McpPage() {
                 onChange={(e) => setToolExposureFilter(e.target.value as 'all' | 'exposed' | 'available')}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
               >
-                <option value="all">All exposure states</option>
-                <option value="exposed">Exposed only</option>
-                <option value="available">Not exposed yet</option>
+                <option value="all">All publish states</option>
+                <option value="exposed">Published only</option>
+                <option value="available">Not published yet</option>
               </select>
               <select
                 value={toolSelectionFilter}
@@ -1312,7 +1312,7 @@ export default function McpPage() {
         </div>
 
         <div className="bg-white rounded-xl border border-slate-200 p-6 space-y-6">
-          <div className="text-slate-800 font-semibold">MCP Controls</div>
+          <div className="text-slate-800 font-semibold">MCP Settings</div>
           <div>
             <div className="flex items-center gap-2 text-slate-800 font-semibold mb-2"><Key size={18} /> Auth (Optional)</div>
             <p className="text-xs text-slate-500 mb-3">If set, clients must send this token as Bearer or X-API-Key.</p>
@@ -1364,7 +1364,7 @@ export default function McpPage() {
           <details className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 group">
             <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
               <div>
-                <div className="text-slate-800 font-semibold">Connection & Validation</div>
+                <div className="text-slate-800 font-semibold">Endpoints & Validation</div>
                 <div className="text-xs text-slate-500 mt-1">Base endpoints and a quick MCP server validation path.</div>
               </div>
               <span className="text-xs font-semibold text-slate-600 group-open:hidden">Show</span>
@@ -1409,8 +1409,8 @@ export default function McpPage() {
           <div className="bg-white w-full max-w-2xl rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
             <div className="p-5 border-b border-slate-100 flex items-center justify-between">
               <div>
-                <div className="text-lg font-semibold text-slate-900">Connect to {connectBundle.name}</div>
-                <div className="text-xs text-slate-500">{connectBundle.tool_count} tools exposed in one MCP endpoint</div>
+                <div className="text-lg font-semibold text-slate-900">{connectBundle.name} Endpoints</div>
+                <div className="text-xs text-slate-500">{connectBundle.tool_count} tools published in one MCP endpoint</div>
               </div>
               <button onClick={() => setConnectBundle(null)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
             </div>
@@ -1462,7 +1462,7 @@ export default function McpPage() {
           <div className="bg-white w-full max-w-2xl rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
             <div className="p-5 border-b border-slate-100 flex items-center justify-between">
               <div>
-                <div className="text-lg font-semibold text-slate-900">Bundle Access</div>
+                <div className="text-lg font-semibold text-slate-900">Bundle Sharing</div>
                 <div className="text-xs text-slate-500">{bundleAccessState.bundle.name}</div>
               </div>
               <button onClick={() => setBundleAccessState(null)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>

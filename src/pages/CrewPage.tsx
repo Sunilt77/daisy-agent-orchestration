@@ -633,8 +633,8 @@ export default function CrewPage() {
       <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
           <div>
-            <h2 className="text-lg font-semibold text-slate-800">Crew Exposure</h2>
-            <p className="text-sm text-slate-500 mt-1">Expose this crew to MCP tool calls and the HTTP API without keeping the full connection block open all the time.</p>
+            <h2 className="text-lg font-semibold text-slate-800">Publishing</h2>
+            <p className="text-sm text-slate-500 mt-1">Publish this crew to MCP tool calls and the HTTP API without keeping the full endpoint block open all the time.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <label htmlFor="crewExposeToggle" className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
@@ -646,7 +646,7 @@ export default function CrewPage() {
                 onChange={(e) => handleExposeToggle(e.target.checked)}
                 disabled={isExposing}
               />
-              Expose crew via MCP/API
+              Publish crew via MCP/API
             </label>
             <button
               onClick={() => setShowExposureDetails((prev) => !prev)}
@@ -1158,7 +1158,7 @@ export default function CrewPage() {
             <div className="flex justify-between items-center p-6 border-b border-slate-100">
               <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
                 <Globe size={24} className="text-indigo-600" />
-                Connect to {crew.name}
+                Endpoint Details for {crew.name}
               </h3>
               <button onClick={() => setShowConnection(false)} className="text-slate-400 hover:text-slate-600">
                 <X size={24} />
