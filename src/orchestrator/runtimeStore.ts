@@ -194,29 +194,44 @@ export async function ensureAgentSession(agentId: number, sessionId?: string, us
   const prisma = getPrisma();
   const now = new Date();
   if (sessionId) {
-    const existing = await prisma.orchestratorAgentSession.findFirst({
-      where: { id: sessionId, agentId },
+    const existing = await prisma.orchestratorAgentSession.findUnique({
+      where: { id: sessionId },
       select: { id: true, userId: true },
     });
     if (existing) {
-      await prisma.orchestratorAgentSession.update({
-        where: { id: sessionId },
-        data: { updatedAt: now, lastSeenAt: now },
+      const scoped = await prisma.orchestratorAgentSession.findFirst({
+        where: { id: sessionId, agentId },
+        select: { id: true, userId: true },
       });
-      return { id: existing.id, user_id: existing.userId };
+      if (scoped) {
+        await prisma.orchestratorAgentSession.update({
+          where: { id: sessionId },
+          data: { updatedAt: now, lastSeenAt: now },
+        });
+        return { id: scoped.id, user_id: scoped.userId };
+      }
+      // The requested session id already belongs to another agent. Treat this as a
+      // request for a fresh conversation instead of trying to reuse the foreign id.
+      sessionId = undefined;
     }
-    const created = await prisma.orchestratorAgentSession.create({
-      data: {
-        id: sessionId,
-        agentId,
-        userId: userId ?? null,
-        createdAt: now,
-        updatedAt: now,
-        lastSeenAt: now,
-      },
-      select: { id: true, userId: true },
-    });
-    return { id: created.id, user_id: created.userId };
+    if (sessionId) {
+      try {
+        const created = await prisma.orchestratorAgentSession.create({
+          data: {
+            id: sessionId,
+            agentId,
+            userId: userId ?? null,
+            createdAt: now,
+            updatedAt: now,
+            lastSeenAt: now,
+          },
+          select: { id: true, userId: true },
+        });
+        return { id: created.id, user_id: created.userId };
+      } catch {
+        // Race or stale id collision. Fall through to a fresh session id.
+      }
+    }
   }
 
   if (userId) {

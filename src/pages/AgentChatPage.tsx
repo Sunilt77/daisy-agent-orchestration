@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
   MessageSquare, Plus, Send, Bot, User, Loader2, GitBranch, ExternalLink,
   Search, Sparkles, Activity, CheckCircle2, XCircle, Clock, AlertTriangle,
@@ -73,6 +73,8 @@ type FeedbackState = {
   rating?: 'up' | 'down';
   error?: string;
 };
+
+const SESSION_PAGE_SIZE = 12;
 
 async function safeJson(res: Response) {
   const text = await res.text();
@@ -341,6 +343,7 @@ export default function AgentChatPage() {
   const [stateReady, setStateReady] = useState(false);
   const [draftAttachments, setDraftAttachments] = useState<ChatAttachment[]>([]);
   const [feedbackByExecution, setFeedbackByExecution] = useState<Record<number, FeedbackState>>({});
+  const [sessionPage, setSessionPage] = useState(1);
   const loadedSessionKeyRef = useRef<string>('');
   const sendingRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -364,6 +367,7 @@ export default function AgentChatPage() {
     }
   }, [messages, sending]);
 
+  const deferredAgentSearch = useDeferredValue(agentSearch);
   const selectedAgent = useMemo(
     () => agents.find((a) => a.id === selectedAgentId) ?? null,
     [agents, selectedAgentId]
@@ -373,16 +377,29 @@ export default function AgentChatPage() {
     [agents, selectedAgentId]
   );
   const filteredAgents = useMemo(
-    () => agents.filter((a) => `${a.name} ${a.role || ''}`.toLowerCase().includes(agentSearch.trim().toLowerCase())),
-    [agents, agentSearch]
+    () => agents.filter((a) => `${a.name} ${a.role || ''}`.toLowerCase().includes(deferredAgentSearch.trim().toLowerCase())),
+    [agents, deferredAgentSearch]
   );
+  const visibleSessions = useMemo(
+    () => sessions.slice(0, sessionPage * SESSION_PAGE_SIZE),
+    [sessions, sessionPage]
+  );
+  const hasMoreSessions = visibleSessions.length < sessions.length;
+  const selectedSession = useMemo(
+    () => sessions.find((session) => session.id === selectedSessionId) ?? null,
+    [sessions, selectedSessionId]
+  );
+  const chatModeLabel = selectedSessionId ? 'Continuing selected chat' : 'Fresh chat ready';
 
   const loadAgents = async () => {
     const res = await fetch('/api/agents');
     const data = await safeJson(res);
     if (Array.isArray(data)) {
       setAgents(data);
-      if (!selectedAgentId && data.length) setSelectedAgentId(data[0].id);
+      setSelectedAgentId((current) => {
+        if (current && data.some((agent) => agent.id === current)) return current;
+        return data.length ? data[0].id : null;
+      });
     }
   };
 
@@ -446,21 +463,22 @@ export default function AgentChatPage() {
     setSelectedSessionId(null);
     setMessages([]);
     setDraftAttachments([]);
+    setSessionPage(1);
     loadedSessionKeyRef.current = '';
     setDelegateAgentIds((prev) => prev.filter((id) => id !== selectedAgentId));
     loadSessions(selectedAgentId);
   }, [selectedAgentId]);
 
   useEffect(() => {
-    if (!selectedAgentId || !sessions.length) return;
+    if (!selectedAgentId) return;
     if (sendingRef.current) return;
     if (!selectedSessionId) {
-      const latest = sessions[0];
-      if (!latest?.id) return;
-      const key = `${selectedAgentId}:${latest.id}`;
-      if (loadedSessionKeyRef.current === key) return;
-      loadedSessionKeyRef.current = key;
-      loadMessages(selectedAgentId, latest.id);
+      return;
+    }
+    if (!sessions.some((session) => session.id === selectedSessionId)) {
+      setSelectedSessionId(null);
+      setMessages([]);
+      loadedSessionKeyRef.current = '';
       return;
     }
     const key = `${selectedAgentId}:${selectedSessionId}`;
@@ -492,7 +510,9 @@ export default function AgentChatPage() {
     setSelectedSessionId(null);
     setMessages([]);
     setDraft('');
+    setDraftAttachments([]);
     setError('');
+    loadedSessionKeyRef.current = '';
   };
 
   const toggleDelegateAgent = (agentId: number) => {
@@ -802,32 +822,44 @@ export default function AgentChatPage() {
       <div className="grid grid-cols-12 gap-4 flex-1 min-h-0 overflow-hidden">
         {/* Sidebar */}
         <section className="col-span-12 lg:col-span-3 xl:col-span-3 panel-chrome bg-white/85 rounded-2xl border border-slate-200 p-4 flex flex-col min-h-0 overflow-hidden">
-          <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Agent</label>
-          <div className="relative mt-2">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input
-              value={agentSearch}
-              onChange={(e) => setAgentSearch(e.target.value)}
-              placeholder="Search agents..."
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 pl-8 text-sm"
-            />
-          </div>
-          <select
-            className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-            value={selectedAgentId ?? ''}
-            onChange={(e) => setSelectedAgentId(e.target.value ? Number(e.target.value) : null)}
-          >
-            {filteredAgents.map((a) => (
-              <option key={a.id} value={a.id}>{a.name}</option>
-            ))}
-          </select>
+          <div className="shrink-0">
+            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Agent Workspace</label>
+            <div className="relative mt-2">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                value={agentSearch}
+                onChange={(e) => setAgentSearch(e.target.value)}
+                placeholder="Search agents..."
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 pl-8 text-sm"
+              />
+            </div>
+            <select
+              className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              value={selectedAgentId ?? ''}
+              onChange={(e) => setSelectedAgentId(e.target.value ? Number(e.target.value) : null)}
+            >
+              {filteredAgents.map((a) => (
+                <option key={a.id} value={a.id}>{a.name}</option>
+              ))}
+            </select>
 
-          <button
-            className="mt-3 w-full flex items-center justify-center gap-2 rounded-lg bg-indigo-600 text-white text-sm px-3 py-2 hover:bg-indigo-700 transition-colors"
-            onClick={startNewChat}
-          >
-            <Plus size={14} /> New Chat
-          </button>
+            <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-slate-500">Current Mode</div>
+              <div className="mt-1 text-sm font-semibold text-slate-900">{chatModeLabel}</div>
+              <div className="mt-1 text-xs text-slate-500">
+                {selectedSession
+                  ? `${selectedSession.message_count || 0} messages in this thread`
+                  : 'Send a message to start a brand new conversation for this agent.'}
+              </div>
+            </div>
+
+            <button
+              className="mt-3 w-full flex items-center justify-center gap-2 rounded-lg bg-indigo-600 text-white text-sm px-3 py-2 hover:bg-indigo-700 transition-colors"
+              onClick={startNewChat}
+            >
+              <Plus size={14} /> New Chat
+            </button>
+          </div>
 
           {/* Supervisor mode */}
           <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 shrink-0">
@@ -871,11 +903,14 @@ export default function AgentChatPage() {
           </div>
 
           {/* Session history */}
-          <div className="mt-4 text-xs font-semibold text-slate-500 uppercase tracking-wider shrink-0">History</div>
+          <div className="mt-4 flex items-center justify-between gap-2 shrink-0">
+            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Recent Chats</div>
+            <div className="text-[11px] text-slate-400">{sessions.length} total</div>
+          </div>
           <div className="mt-2 space-y-1.5 flex-1 min-h-0 overflow-y-auto pr-0.5">
             {loading && <div className="text-xs text-slate-500 text-center py-4">Loading…</div>}
             {!loading && sessions.length === 0 && <div className="text-xs text-slate-500 text-center py-4">No saved chats yet.</div>}
-            {sessions.map((s) => (
+            {visibleSessions.map((s) => (
               <button
                 key={s.id}
                 onClick={() => selectedAgentId && loadMessages(selectedAgentId, s.id)}
@@ -885,9 +920,21 @@ export default function AgentChatPage() {
               >
                 <div className="text-xs font-semibold truncate">{s.user_id || s.id.slice(0, 12)}</div>
                 <div className="text-xs text-slate-500 truncate mt-0.5">{s.preview || 'No preview'}</div>
-                <div className="text-[10px] text-slate-400 mt-0.5">{s.message_count || 0} messages</div>
+                <div className="mt-0.5 flex items-center justify-between gap-2 text-[10px] text-slate-400">
+                  <span>{s.message_count || 0} messages</span>
+                  <span>{s.last_seen_at ? new Date(s.last_seen_at).toLocaleDateString() : ''}</span>
+                </div>
               </button>
             ))}
+            {!loading && hasMoreSessions && (
+              <button
+                type="button"
+                onClick={() => setSessionPage((prev) => prev + 1)}
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100"
+              >
+                Show More Chats
+              </button>
+            )}
           </div>
         </section>
 
@@ -901,7 +948,9 @@ export default function AgentChatPage() {
               </div>
               <div className="min-w-0">
                 <div className="text-sm font-bold text-slate-900 truncate">{selectedAgent?.name || 'Select an agent'}</div>
-                {selectedSessionId && <div className="text-[10px] text-slate-400 font-mono truncate">session: {selectedSessionId.slice(0, 20)}…</div>}
+                <div className="text-[10px] text-slate-400 font-mono truncate">
+                  {selectedSessionId ? `session: ${selectedSessionId.slice(0, 20)}…` : 'new chat'}
+                </div>
               </div>
               {supervisorMode && (
                 <div className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 font-bold flex items-center gap-1 shrink-0">
@@ -913,6 +962,10 @@ export default function AgentChatPage() {
                   <Loader2 size={12} className="animate-spin" /> Running…
                 </div>
               )}
+            </div>
+            <div className="hidden lg:flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] font-semibold text-slate-600">
+              <span className={`h-2 w-2 rounded-full ${selectedSessionId ? 'bg-indigo-500' : 'bg-emerald-500'}`} />
+              {selectedSessionId ? 'Loaded from history' : 'Fresh conversation'}
             </div>
             <div className="flex items-center gap-3 shrink-0">
               <div className="hidden md:flex items-center gap-1 text-xs text-slate-500">
