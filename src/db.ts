@@ -1275,4 +1275,61 @@ export function ensureAttachmentTables() {
   }
 }
 
+export function ensureLearningTables() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS user_agent_preferences (
+        user_id TEXT NOT NULL,
+        agent_id INTEGER NOT NULL,
+        preference_text TEXT NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, agent_id),
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS run_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        execution_id INTEGER NOT NULL,
+        agent_id INTEGER NOT NULL,
+        user_id TEXT,
+        session_id TEXT,
+        rating TEXT,
+        solved INTEGER,
+        feedback_text TEXT,
+        task_signature TEXT,
+        tool_sequence TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_learning_lessons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id INTEGER NOT NULL,
+        user_id TEXT,
+        lesson_kind TEXT NOT NULL,
+        task_signature TEXT,
+        guidance TEXT NOT NULL,
+        weight INTEGER DEFAULT 50,
+        source_feedback_id INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+        FOREIGN KEY (source_feedback_id) REFERENCES run_feedback(id) ON DELETE SET NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_run_feedback_execution_lookup
+        ON run_feedback(execution_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_run_feedback_agent_lookup
+        ON run_feedback(agent_id, user_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_agent_learning_lessons_lookup
+        ON agent_learning_lessons(agent_id, user_id, task_signature, lesson_kind, updated_at);
+    `);
+  } catch (e) {
+    console.error('Learning table migration error:', e);
+    throw e;
+  }
+}
+
 export default db;

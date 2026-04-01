@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import { createServer as createViteServer, ViteDevServer } from 'vite';
-import { ensureAttachmentTables, ensureVoiceTables, initDb } from './src/db';
+import { ensureAttachmentTables, ensureLearningTables, ensureVoiceTables, initDb } from './src/db';
 import db from './src/db';
 import { GoogleGenAI } from '@google/genai';
 import OpenAI from 'openai';
@@ -781,6 +781,11 @@ type SessionMessage = {
   ts?: string;
   attachments?: AttachmentRef[];
 };
+type FeedbackPayload = {
+  rating?: 'up' | 'down' | string;
+  solved?: boolean | null;
+  feedback?: string;
+};
 
 async function ensureAgentSession(agentId: number, sessionId?: string, userId?: string): Promise<AgentSessionRow> {
   return await ensureRuntimeAgentSession(agentId, sessionId, userId);
@@ -878,6 +883,164 @@ function getAttachmentById(attachmentId: string) {
     LIMIT 1
   `).get(attachmentId) as any;
   return row || null;
+}
+
+function normalizeTaskSignature(text: string) {
+  const tokens = String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token.length > 2)
+    .slice(0, 8);
+  return tokens.join('_');
+}
+
+async function getExecutionToolSequence(execId: number) {
+  const rows = await getPrisma().orchestratorToolExecution.findMany({
+    where: { agentExecutionId: execId, status: 'completed' },
+    orderBy: { id: 'asc' },
+    select: { toolName: true },
+  });
+  return rows
+    .map((row) => String(row.toolName || '').trim())
+    .filter(Boolean);
+}
+
+function getUserAgentPreference(userId: string | null | undefined, agentId: number) {
+  if (!userId) return '';
+  ensureLearningTables();
+  const row = db.prepare(`
+    SELECT preference_text
+    FROM user_agent_preferences
+    WHERE user_id = ? AND agent_id = ?
+    LIMIT 1
+  `).get(userId, agentId) as any;
+  return String(row?.preference_text || '').trim();
+}
+
+function saveUserAgentPreference(userId: string, agentId: number, preferenceText: string) {
+  ensureLearningTables();
+  const text = compactPromptText(preferenceText, 1200);
+  db.prepare(`
+    INSERT INTO user_agent_preferences (user_id, agent_id, preference_text, updated_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id, agent_id) DO UPDATE SET
+      preference_text = excluded.preference_text,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(userId, agentId, text);
+}
+
+function listRelevantLearningLessons(agentId: number, userId: string | null | undefined, taskDescription: string) {
+  ensureLearningTables();
+  const taskSignature = normalizeTaskSignature(taskDescription);
+  const rows = db.prepare(`
+    SELECT id, lesson_kind, task_signature, guidance, weight, updated_at
+    FROM agent_learning_lessons
+    WHERE agent_id = ?
+      AND (user_id IS NULL OR user_id = ?)
+      AND (
+        task_signature IS NULL OR task_signature = '' OR task_signature = ?
+      )
+    ORDER BY
+      CASE WHEN task_signature = ? THEN 0 ELSE 1 END,
+      weight DESC,
+      updated_at DESC
+    LIMIT 5
+  `).all(agentId, userId || null, taskSignature, taskSignature) as any[];
+  return rows.map((row) => ({
+    id: Number(row.id),
+    lesson_kind: String(row.lesson_kind || ''),
+    task_signature: String(row.task_signature || ''),
+    guidance: String(row.guidance || ''),
+    weight: Number(row.weight || 0),
+  }));
+}
+
+function buildLearningGuidance(agentId: number, userId: string | null | undefined, taskDescription: string) {
+  const preferenceText = getUserAgentPreference(userId, agentId);
+  const lessons = listRelevantLearningLessons(agentId, userId, taskDescription);
+  const sections: string[] = [];
+  if (preferenceText) {
+    sections.push(`User preferences:\n- ${compactPromptText(preferenceText, 500)}`);
+  }
+  if (lessons.length) {
+    sections.push([
+      'Learned execution guidance:',
+      ...lessons.map((lesson, index) => `- ${index + 1}. [${lesson.lesson_kind}] ${compactPromptText(lesson.guidance, 500)}`),
+      'Prefer the shortest validated path and do not repeat previously failed patterns without new input.',
+    ].join('\n'));
+  }
+  return sections.join('\n\n');
+}
+
+async function recordExecutionFeedback(exec: any, userId: string, payload: FeedbackPayload) {
+  ensureLearningTables();
+  const agentId = Number(exec?.agent_id || 0);
+  if (!Number.isFinite(agentId) || agentId <= 0) {
+    throw new Error('Execution is missing an agent id.');
+  }
+  const rating = payload.rating === 'down' ? 'down' : payload.rating === 'up' ? 'up' : null;
+  const solved = typeof payload.solved === 'boolean' ? payload.solved : null;
+  const feedbackText = compactPromptText(String(payload.feedback || '').trim(), 1200);
+  const taskSignature = normalizeTaskSignature(String(exec?.task || ''));
+  const toolSequence = await getExecutionToolSequence(Number(exec.id));
+
+  const result = db.prepare(`
+    INSERT INTO run_feedback (execution_id, agent_id, user_id, session_id, rating, solved, feedback_text, task_signature, tool_sequence)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    Number(exec.id),
+    agentId,
+    userId,
+    exec?.session_id ? String(exec.session_id) : null,
+    rating,
+    solved == null ? null : (solved ? 1 : 0),
+    feedbackText || null,
+    taskSignature || null,
+    toolSequence.length ? JSON.stringify(toolSequence) : null,
+  );
+  const feedbackId = Number(result.lastInsertRowid || 0);
+
+  if (feedbackText && /preference|prefer|always|tone|format|style/i.test(feedbackText)) {
+    saveUserAgentPreference(userId, agentId, feedbackText);
+  }
+
+  const lessonKind = (rating === 'down' || solved === false) ? 'failure_avoidance' : (rating === 'up' || solved === true) ? 'success_path' : '';
+  if (lessonKind) {
+    const sequenceText = toolSequence.length ? toolSequence.join(' -> ') : '';
+    const guidance = lessonKind === 'failure_avoidance'
+      ? compactPromptText(
+          feedbackText ||
+          `Avoid repeating the previous failed path${sequenceText ? ` (${sequenceText})` : ''} without gathering the missing input first.`,
+          700,
+        )
+      : compactPromptText(
+          feedbackText ||
+          (sequenceText
+            ? `For similar tasks, prefer this validated path: ${sequenceText}. Keep the answer concise and stop once the task is solved.`
+            : 'A direct concise answer solved a similar task. Prefer the shortest validated path.'),
+          700,
+        );
+    db.prepare(`
+      INSERT INTO agent_learning_lessons (agent_id, user_id, lesson_kind, task_signature, guidance, weight, source_feedback_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `).run(
+      agentId,
+      userId,
+      lessonKind,
+      taskSignature || null,
+      guidance,
+      lessonKind === 'failure_avoidance' ? 90 : 70,
+      feedbackId || null,
+    );
+  }
+
+  return {
+    id: feedbackId,
+    agent_id: agentId,
+    task_signature: taskSignature,
+    tool_sequence: toolSequence,
+  };
 }
 
 function getPublicBaseUrl() {
@@ -8131,7 +8294,8 @@ async function runAgent(
   const memoryContext = buildMemoryContext(sessionSummary, sessionConversation);
   const invocationAttachments = normalizeIncomingAttachments(invocation?.attachments);
   const attachmentContext = buildAttachmentContext(invocationAttachments);
-  const effectiveContext = [context, memoryContext, attachmentContext].filter(Boolean).join('\n\n');
+  const learningContext = buildLearningGuidance(agent.id, sessionUserId, String(task?.description || ''));
+  const effectiveContext = [context, memoryContext, attachmentContext, learningContext].filter(Boolean).join('\n\n');
   const toolsEnabled = agent.tools_enabled !== 0 && agent.tools_enabled !== false;
   const systemPrompt = (agent.system_prompt && String(agent.system_prompt).trim())
     ? String(agent.system_prompt).trim()
@@ -9724,6 +9888,27 @@ app.post('/api/agent-executions/:id/resume', async (req, res) => {
   });
   const result = await waitForJob(jobId, 120000);
   res.json({ success: true, resumed_from: execId, ...result });
+});
+
+app.post('/api/agent-executions/:id/feedback', requireUser, async (req, res) => {
+  try {
+    const execId = Number(req.params.id);
+    if (!Number.isFinite(execId)) return res.status(400).json({ error: 'Invalid execution id' });
+    const exec = await getRuntimeAgentExecution(execId);
+    if (!exec) return res.status(404).json({ error: 'Execution not found' });
+
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleAgentId(scope, Number(exec.agent_id));
+
+    const userId = String((req as any)?.user?.id || '').trim();
+    if (!userId) return res.status(401).json({ error: 'Authentication required' });
+
+    const payload = (req.body || {}) as FeedbackPayload;
+    const feedback = await recordExecutionFeedback(exec, userId, payload);
+    res.json({ success: true, feedback });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to save feedback' });
+  }
 });
 
 if (process.env.NODE_ENV === 'production') {

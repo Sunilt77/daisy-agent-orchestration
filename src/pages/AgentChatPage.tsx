@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   MessageSquare, Plus, Send, Bot, User, Loader2, GitBranch, ExternalLink,
   Search, Sparkles, Activity, CheckCircle2, XCircle, Clock, AlertTriangle,
-  ChevronDown, ChevronRight, Zap, Network, ArrowRight, Paperclip, X,
+  ChevronDown, ChevronRight, Zap, Network, ArrowRight, Paperclip, X, ThumbsUp, ThumbsDown,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { loadPersisted, savePersisted } from '../utils/persistence';
@@ -67,6 +67,11 @@ type MessageDebug = {
   status: string;
   usage: DebugUsage;
   timeline: DebugStep[];
+};
+type FeedbackState = {
+  status: 'saving' | 'saved' | 'error';
+  rating?: 'up' | 'down';
+  error?: string;
 };
 
 async function safeJson(res: Response) {
@@ -335,6 +340,7 @@ export default function AgentChatPage() {
   const [agentSearch, setAgentSearch] = useState('');
   const [stateReady, setStateReady] = useState(false);
   const [draftAttachments, setDraftAttachments] = useState<ChatAttachment[]>([]);
+  const [feedbackByExecution, setFeedbackByExecution] = useState<Record<number, FeedbackState>>({});
   const loadedSessionKeyRef = useRef<string>('');
   const sendingRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -734,6 +740,38 @@ export default function AgentChatPage() {
     }
   };
 
+  const submitExecutionFeedback = async (executionId: number, rating: 'up' | 'down') => {
+    setFeedbackByExecution((prev) => ({
+      ...prev,
+      [executionId]: { status: 'saving', rating },
+    }));
+    try {
+      const feedback = rating === 'down'
+        ? window.prompt('What should the agent do differently next time?', '')?.trim() || ''
+        : '';
+      const res = await fetch(`/api/agent-executions/${executionId}/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rating,
+          solved: rating === 'up',
+          feedback: feedback || undefined,
+        }),
+      });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data?.error || 'Failed to save feedback');
+      setFeedbackByExecution((prev) => ({
+        ...prev,
+        [executionId]: { status: 'saved', rating },
+      }));
+    } catch (e: any) {
+      setFeedbackByExecution((prev) => ({
+        ...prev,
+        [executionId]: { status: 'error', rating, error: e?.message || 'Failed to save feedback' },
+      }));
+    }
+  };
+
   return (
     <div className="space-y-4 h-[calc(100vh-6rem)] flex flex-col">
       {/* Hero header */}
@@ -903,6 +941,11 @@ export default function AgentChatPage() {
             )}
             {messages.map((m, idx) => (
               <div key={`${m.ts || 'm'}-${idx}`} className={`flex gap-3 ${m.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
+                {(() => {
+                  const executionId = Number(m.debug?.executionId || 0);
+                  const feedbackState = executionId > 0 ? feedbackByExecution[executionId] : undefined;
+                  return (
+                    <>
                 {/* Avatar */}
                 <div className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-white shadow-lg ${m.role === 'user' ? 'bg-indigo-600' : 'bg-slate-700'}`}>
                   {m.role === 'user' ? <User size={14} /> : <Bot size={14} />}
@@ -946,9 +989,48 @@ export default function AgentChatPage() {
                     {/* Execution link */}
                     {m.role === 'assistant' && m.debug?.executionId && (
                       <div className="mt-2 pt-2 border-t border-slate-100">
-                        <Link to={`/agent-executions/${m.debug.executionId}`} className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800">
-                          <ExternalLink size={11} /> Execution #{m.debug.executionId}
-                        </Link>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Link to={`/agent-executions/${m.debug.executionId}`} className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800">
+                            <ExternalLink size={11} /> Execution #{m.debug.executionId}
+                          </Link>
+                          <div className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-1.5 py-1">
+                            <button
+                              type="button"
+                              onClick={() => m.debug?.executionId && submitExecutionFeedback(m.debug.executionId, 'up')}
+                              disabled={!m.debug?.executionId || feedbackState?.status === 'saving'}
+                              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold transition-colors ${
+                                feedbackState?.rating === 'up' && feedbackState?.status === 'saved'
+                                  ? 'bg-emerald-100 text-emerald-700'
+                                  : 'text-slate-500 hover:bg-emerald-50 hover:text-emerald-700'
+                              }`}
+                              title="This solved the task"
+                            >
+                              <ThumbsUp size={11} /> Helpful
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => m.debug?.executionId && submitExecutionFeedback(m.debug.executionId, 'down')}
+                              disabled={!m.debug?.executionId || feedbackState?.status === 'saving'}
+                              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold transition-colors ${
+                                feedbackState?.rating === 'down' && feedbackState?.status === 'saved'
+                                  ? 'bg-amber-100 text-amber-700'
+                                  : 'text-slate-500 hover:bg-amber-50 hover:text-amber-700'
+                              }`}
+                              title="This should improve next time"
+                            >
+                              <ThumbsDown size={11} /> Improve
+                            </button>
+                          </div>
+                          {feedbackState?.status === 'saving' && (
+                            <span className="text-[11px] font-semibold text-slate-400">Saving feedback…</span>
+                          )}
+                          {feedbackState?.status === 'saved' && (
+                            <span className="text-[11px] font-semibold text-emerald-600">Feedback saved</span>
+                          )}
+                          {feedbackState?.status === 'error' && (
+                            <span className="text-[11px] font-semibold text-red-600">{feedbackState.error || 'Failed to save feedback'}</span>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1001,6 +1083,9 @@ export default function AgentChatPage() {
                     </details>
                   )}
                 </div>
+                    </>
+                  );
+                })()}
               </div>
             ))}
             {/* Auto-scroll anchor */}
