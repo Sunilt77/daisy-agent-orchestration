@@ -253,11 +253,12 @@ model KnowledgebaseSearch {
 }
 
 model OrchestratorProject {
-  id          Int      @id @default(autoincrement())
-  name        String
-  description String?
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id                Int      @id @default(autoincrement())
+  name              String
+  description       String?
+  platformProjectId String?  @map("platform_project_id")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
 
   agents    OrchestratorAgent[]
   crews     OrchestratorCrew[]

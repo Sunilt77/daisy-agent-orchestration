@@ -269,7 +269,17 @@ async function getTenantUsageMap(orgIds: string[], prisma: ReturnType<typeof get
 
   if (!orgIds.length) return map;
 
-  const linkRows = db.prepare('SELECT project_id, platform_project_id FROM project_links').all() as Array<{ project_id: number; platform_project_id: string }>;
+  const linkRows = db.prepare(`
+    SELECT id as project_id, platform_project_id
+    FROM projects
+    WHERE platform_project_id IS NOT NULL AND platform_project_id != ''
+    UNION
+    SELECT project_id, platform_project_id
+    FROM project_links
+    WHERE project_id NOT IN (
+      SELECT id FROM projects WHERE platform_project_id IS NOT NULL AND platform_project_id != ''
+    )
+  `).all() as Array<{ project_id: number; platform_project_id: string }>;
   const platformProjectIds = Array.from(new Set(linkRows.map((r) => String(r.platform_project_id)).filter(Boolean)));
   const platformProjects = platformProjectIds.length
     ? await prisma.project.findMany({ where: { id: { in: platformProjectIds } }, select: { id: true, orgId: true } })
@@ -1198,7 +1208,17 @@ export function registerPlatformRoutes(app: Express) {
       `).all() as any[];
       const mcpBundles = db.prepare('SELECT id, name, slug FROM mcp_bundles ORDER BY name ASC').all() as any[];
       const agents = db.prepare('SELECT id, name, project_id FROM agents ORDER BY name ASC').all() as any[];
-      const links = db.prepare('SELECT project_id, platform_project_id FROM project_links').all() as any[];
+      const links = db.prepare(`
+        SELECT id as project_id, platform_project_id
+        FROM projects
+        WHERE platform_project_id IS NOT NULL AND platform_project_id != ''
+        UNION
+        SELECT project_id, platform_project_id
+        FROM project_links
+        WHERE project_id NOT IN (
+          SELECT id FROM projects WHERE platform_project_id IS NOT NULL AND platform_project_id != ''
+        )
+      `).all() as any[];
       const projectMap = new Map<number, string>();
       for (const row of links) projectMap.set(Number(row.project_id), String(row.platform_project_id));
       const platformProjectIds = Array.from(new Set(Array.from(projectMap.values())));

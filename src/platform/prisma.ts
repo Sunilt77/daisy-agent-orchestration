@@ -31,6 +31,7 @@ async function ensureSchemaCompatibility(prisma: PrismaClient) {
     `ALTER TABLE IF EXISTS run_events ADD COLUMN IF NOT EXISTS attributes_jsonb JSONB`,
     `ALTER TABLE IF EXISTS orchestrator_settings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`,
     `ALTER TABLE IF EXISTS orchestrator_projects ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`,
+    `ALTER TABLE IF EXISTS orchestrator_projects ADD COLUMN IF NOT EXISTS platform_project_id TEXT`,
     `ALTER TABLE IF EXISTS orchestrator_project_links ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`,
     `ALTER TABLE IF EXISTS orchestrator_project_links ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`,
     `ALTER TABLE IF EXISTS orchestrator_agents ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`,
@@ -99,6 +100,13 @@ async function ensureSchemaCompatibility(prisma: PrismaClient) {
   for (const sql of statements) {
     await prisma.$executeRawUnsafe(sql);
   }
+  await prisma.$executeRawUnsafe(`
+    UPDATE orchestrator_projects p
+    SET platform_project_id = l.platform_project_id
+    FROM orchestrator_project_links l
+    WHERE l.project_id = p.id
+      AND (p.platform_project_id IS NULL OR p.platform_project_id = '')
+  `);
 }
 
 export function getPrisma() {

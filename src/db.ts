@@ -39,6 +39,7 @@ export function initDb() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       description TEXT,
+      platform_project_id TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -442,6 +443,11 @@ export function initDb() {
 
   // Migrations
   try {
+    const projectColumns = db.prepare("PRAGMA table_info(projects)").all() as any[];
+    const projectColumnNames = projectColumns.map(col => col.name);
+    if (!projectColumnNames.includes('platform_project_id')) {
+      db.exec("ALTER TABLE projects ADD COLUMN platform_project_id TEXT");
+    }
     const hasProjectLinks = (db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get('project_links') as any)?.name;
     if (!hasProjectLinks) {
       db.exec(`
@@ -454,6 +460,18 @@ export function initDb() {
         );
       `);
     }
+    db.exec(`
+      UPDATE projects
+      SET platform_project_id = (
+        SELECT platform_project_id
+        FROM project_links
+        WHERE project_links.project_id = projects.id
+      )
+      WHERE (platform_project_id IS NULL OR platform_project_id = '')
+        AND EXISTS (
+          SELECT 1 FROM project_links WHERE project_links.project_id = projects.id
+        );
+    `);
 
     // Helper to apply ALTER TABLE columns with debug logs
     const applyColumn = (sql: string) => {

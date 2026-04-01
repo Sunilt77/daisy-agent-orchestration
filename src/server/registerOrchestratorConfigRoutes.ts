@@ -19,11 +19,16 @@ export function registerOrchestratorConfigRoutes({
     try {
       const localProjectId = Number(req.params.id);
       if (!Number.isFinite(localProjectId)) return res.status(400).json({ error: 'Invalid project id' });
-      const row = await getPrisma().orchestratorProjectLink.findUnique({
+      const row = await getPrisma().orchestratorProject.findUnique({
+        where: { id: localProjectId },
+        select: { platformProjectId: true },
+      });
+      if (row?.platformProjectId) return res.json({ platformProjectId: row.platformProjectId });
+      const legacy = await getPrisma().orchestratorProjectLink.findUnique({
         where: { projectId: localProjectId },
         select: { platformProjectId: true },
       });
-      res.json({ platformProjectId: row?.platformProjectId ?? null });
+      res.json({ platformProjectId: legacy?.platformProjectId ?? null });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -50,6 +55,10 @@ export function registerOrchestratorConfigRoutes({
 
       const platformProjectId = req.body?.platformProjectId as unknown;
       if (platformProjectId == null || platformProjectId === '') {
+        await prisma.orchestratorProject.update({
+          where: { id: localProject.id },
+          data: { platformProjectId: null, updatedAt: new Date() },
+        });
         await prisma.orchestratorProjectLink.deleteMany({ where: { projectId: localProject.id } });
         await refreshPersistentMirror();
         return res.json({ platformProjectId: null });
@@ -59,6 +68,13 @@ export function registerOrchestratorConfigRoutes({
       const project = await getPrisma().project.findUnique({ where: { id: platformProjectId } });
       if (!project) return res.status(400).json({ error: 'Platform project not found' });
 
+      await prisma.orchestratorProject.update({
+        where: { id: localProject.id },
+        data: {
+          platformProjectId,
+          updatedAt: new Date(),
+        },
+      });
       await prisma.orchestratorProjectLink.upsert({
         where: { projectId: localProject.id },
         update: { platformProjectId, updatedAt: new Date() },

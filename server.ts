@@ -319,8 +319,10 @@ function requireMcpAuth(req: express.Request, res: express.Response): boolean {
 
 function getPlatformProjectIdForLocalProject(localProjectId: number | null | undefined): string | null {
   if (!localProjectId) return null;
-  const row = db.prepare('SELECT platform_project_id FROM project_links WHERE project_id = ?').get(localProjectId) as any;
-  return row?.platform_project_id ?? null;
+  const projectRow = db.prepare('SELECT platform_project_id FROM projects WHERE id = ?').get(localProjectId) as any;
+  if (projectRow?.platform_project_id) return String(projectRow.platform_project_id);
+  const legacyRow = db.prepare('SELECT platform_project_id FROM project_links WHERE project_id = ?').get(localProjectId) as any;
+  return legacyRow?.platform_project_id ? String(legacyRow.platform_project_id) : null;
 }
 
 type RuntimeAccessPolicy = {
@@ -3442,6 +3444,7 @@ app.get('/api/projects', async (req, res) => {
         id: p.id,
         name: p.name,
         description: p.description,
+        platform_project_id: (p as any).platformProjectId ?? null,
         created_at: p.createdAt,
         crews_count: crewIds.length,
         agents_count: agentIds.length,
@@ -3456,12 +3459,14 @@ app.get('/api/projects', async (req, res) => {
 
 app.get('/api/projects/platform-links', async (req, res) => {
   try {
-    const links = await getPrisma().orchestratorProjectLink.findMany({
-      select: { projectId: true, platformProjectId: true },
+    const projects = await getPrisma().orchestratorProject.findMany({
+      select: { id: true, platformProjectId: true },
     });
     const map: Record<number, string> = {};
-    for (const row of links) {
-      map[row.projectId] = row.platformProjectId;
+    for (const row of projects) {
+      if (row.platformProjectId) {
+        map[row.id] = row.platformProjectId;
+      }
     }
     res.json({ links: map });
   } catch (e: any) {
