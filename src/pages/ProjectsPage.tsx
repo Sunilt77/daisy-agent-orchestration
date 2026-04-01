@@ -186,12 +186,8 @@ export default function ProjectsPage() {
       <div className="swarm-hero p-6 mb-8">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-              <Folder size={12} />
-              Project Registry
-            </div>
             <h1 className="text-3xl font-black text-white">Projects</h1>
-            <p className="text-slate-300 mt-1">Group agents, crews, traces, and platform links into clear operational spaces.</p>
+            <p className="text-slate-300 mt-1">Group agents, crews, traces, and platform links into clear project spaces.</p>
           </div>
           <button
             onClick={() => setIsCreating((prev) => !prev)}
@@ -218,10 +214,7 @@ export default function ProjectsPage() {
 
       {isCreating && (
         <div className="mb-8 bg-white p-6 rounded-xl border border-slate-200 shadow-sm animate-in fade-in slide-in-from-top-4">
-          <div className="mb-4">
-            <h3 className="text-lg font-semibold">Create New Project</h3>
-            <p className="text-xs text-slate-500 mt-1">Set the identity first. Platform linking can stay a second step when the project is ready.</p>
-          </div>
+          <h3 className="text-lg font-semibold mb-4">Create New Project</h3>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">Project Name</label>
@@ -297,7 +290,7 @@ export default function ProjectsPage() {
             </div>
             
             <h3 className="text-xl font-semibold text-slate-900 mb-1">{project.name}</h3>
-            <p className="text-sm text-slate-500 mb-4 line-clamp-2 h-10">{project.description || "No description provided."}</p>
+            <p className="text-sm text-slate-500 mb-4 line-clamp-2 h-10">{project.description || "No description."}</p>
             
             <div className="flex items-center gap-4 text-sm text-slate-600 mb-4 bg-slate-50 p-3 rounded-lg">
                 <div className="flex items-center gap-1.5" title="Crews">
@@ -338,11 +331,6 @@ export default function ProjectsPage() {
                   <span className="text-slate-400">Not linked</span>
                 )}
               </div>
-            </div>
-
-            {/* In a real app, this would link to a filtered view of crews */}
-            <div className="text-xs text-slate-400 italic">
-                Manage crews in Dashboard
             </div>
           </div>
         )})}

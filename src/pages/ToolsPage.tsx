@@ -1394,10 +1394,6 @@ export default function ToolsPage() {
       <div className="swarm-hero p-6 mb-6">
       <div className="flex justify-between items-center">
         <div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-            <Sparkles size={12} />
-            Capability Layer
-          </div>
           <h1 className="text-3xl font-black text-white">Tools</h1>
           <p className="text-slate-300 mt-1">Design, connect, and operationalize the capabilities your agents can call.</p>
         </div>

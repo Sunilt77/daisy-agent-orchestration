@@ -696,10 +696,6 @@ export default function AgentChatPage() {
       <div className="swarm-hero p-6 shrink-0">
         <div className="flex items-center justify-between">
           <div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-              <Sparkles size={12} />
-              Conversation Runtime
-            </div>
             <h1 className="text-3xl font-black text-white">Agent Chat</h1>
             <p className="text-slate-300 mt-1 text-sm">Live conversations, delegated runs, and real-time delegation trees.</p>
           </div>

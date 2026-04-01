@@ -605,10 +605,6 @@ export default function WorkflowsPage() {
       <div className="swarm-hero p-6">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-              <Boxes size={12} />
-              Workflow Runtime
-            </div>
             <h1 className="text-3xl font-black text-white">Workflows</h1>
             <p className="text-slate-300 mt-1">Build drag-and-connect orchestration graphs for agents, crews, loops, tools, webhook triggers, and live workflow runs.</p>
           </div>

@@ -164,10 +164,6 @@ export default function ProvidersPage() {
       <div className="swarm-hero p-6 mb-8">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-              <Shield size={12} />
-              Model Runtime Registry
-            </div>
             <h1 className="text-3xl font-black text-white">LLM Providers</h1>
             <p className="text-slate-300 mt-1">Maintain the model backends your agents can route through, test them, and keep defaults explicit.</p>
             <p className="text-xs text-slate-400 mt-2">
@@ -202,10 +198,7 @@ export default function ProvidersPage() {
 
       {isCreating && (
         <div className="mb-8 bg-white p-6 rounded-xl border border-slate-200 shadow-sm animate-in fade-in slide-in-from-top-4">
-          <div className="mb-4">
-            <h3 className="text-lg font-semibold">{editingId ? 'Edit Provider' : 'Add New Provider'}</h3>
-            <p className="text-xs text-slate-500 mt-1">Keep the runtime identity and endpoint visible first. Testing stays in the same builder only when you need it.</p>
-          </div>
+          <h3 className="text-lg font-semibold mb-4">{editingId ? 'Edit Provider' : 'Add New Provider'}</h3>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>

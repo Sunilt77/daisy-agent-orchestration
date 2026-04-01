@@ -108,27 +108,9 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 </div>
               )}
             </div>
-            {!sidebarCollapsed && (
-              <div className="mt-5 rounded-2xl border border-slate-200/80 bg-white/70 px-4 py-3 network-grid">
-                <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.2em] text-slate-500">
-                  <span>Node Mesh</span>
-                  <span>Online</span>
-                </div>
-                <div className="mt-3 flex items-end gap-2">
-                  {[42, 68, 36, 80, 54, 74, 46].map((h, idx) => (
-                    <div key={idx} className="flex-1 rounded-full bg-gradient-to-t from-brand-500/70 via-cyan-400/55 to-emerald-300/45" style={{ height: `${h}px` }} />
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
 
           <nav className={`flex-1 min-h-0 overflow-y-auto ${sidebarCollapsed ? 'px-2' : 'px-4'} space-y-1 pb-2`}>
-            {!sidebarCollapsed && (
-              <div className="px-4 py-2 mb-2 text-[10px] font-bold text-slate-500 uppercase tracking-[0.24em]">
-                Command Surface
-              </div>
-            )}
             {navItems.map((item) => {
               const isActive = location.pathname === item.path;
               return (

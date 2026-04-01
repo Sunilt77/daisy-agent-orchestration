@@ -159,10 +159,6 @@ export default function AgentExecutionPage() {
           <Link to="/agents" className="text-indigo-600 hover:text-indigo-800 flex items-center gap-2 mb-4">
             <ArrowLeft size={16} /> Back to Agents
           </Link>
-          <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-            <Sparkles size={12} />
-            Execution View
-          </div>
           <h1 className="text-3xl font-black text-white">Execution #{execId}</h1>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
             <span className={`px-2 py-1 rounded-full ${statusPillClass(execution?.status)}`}>{execution?.status || 'unknown'}</span>

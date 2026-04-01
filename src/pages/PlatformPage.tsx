@@ -522,10 +522,6 @@ export default function PlatformPage() {
       <div className="swarm-hero p-6">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-              <Building2 size={12} />
-              Platform Governance
-            </div>
             <h1 className="text-3xl font-black text-white">Platform Administration</h1>
             <p className="text-slate-300 mt-1">Control tenants, users, plans, access policies, and usage ceilings from one command surface.</p>
           </div>

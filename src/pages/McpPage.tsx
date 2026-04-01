@@ -776,10 +776,6 @@ export default function McpPage() {
       <div className="swarm-hero p-6 mb-8">
       <div className="flex items-center justify-between">
         <div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-            <Sparkles size={12} />
-            MCP Surface
-          </div>
           <h1 className="text-3xl font-black text-white">MCPs</h1>
           <p className="text-slate-300 mt-1">Expose tools as stable MCP contracts, group them into bundles, and manage the endpoint lifecycle safely.</p>
         </div>
@@ -1316,10 +1312,7 @@ export default function McpPage() {
         </div>
 
         <div className="bg-white rounded-xl border border-slate-200 p-6 space-y-6">
-          <div>
-            <div className="text-slate-800 font-semibold mb-1">MCP Control Center</div>
-            <p className="text-xs text-slate-500">Keep auth and base endpoints handy here. Open deeper controls only when you are publishing or validating the surface.</p>
-          </div>
+          <div className="text-slate-800 font-semibold">MCP Controls</div>
           <div>
             <div className="flex items-center gap-2 text-slate-800 font-semibold mb-2"><Key size={18} /> Auth (Optional)</div>
             <p className="text-xs text-slate-500 mb-3">If set, clients must send this token as Bearer or X-API-Key.</p>

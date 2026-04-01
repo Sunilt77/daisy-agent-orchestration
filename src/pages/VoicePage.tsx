@@ -911,12 +911,8 @@ export default function VoicePage() {
       <div className="swarm-hero p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-              <Waves size={12} />
-              Voice Runtime
-            </div>
             <h1 className="text-3xl font-black text-white">Voice Console</h1>
-            <p className="text-slate-300 mt-1">Test ElevenLabs-backed STT/TTS sessions against your agents over a platform WebSocket, with live runtime events and replayable session details.</p>
+            <p className="text-slate-300 mt-1">Test live STT/TTS sessions against your agents and crews over the platform WebSocket.</p>
           </div>
           <div className="flex items-center gap-2">
             <button

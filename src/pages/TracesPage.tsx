@@ -505,18 +505,8 @@ export default function TracesPage() {
       <div className="swarm-hero p-6 mb-6">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-              <Activity size={12} />
-              Observability Fabric
-            </div>
             <h1 className="text-3xl font-black text-white">Traces</h1>
             <p className="text-slate-300 mt-1 max-w-3xl">{activeSummary.title}. {activeSummary.subtitle}</p>
-          </div>
-          <div className="hidden lg:flex min-w-[260px] flex-col rounded-3xl border border-white/10 bg-slate-950/30 p-4">
-            <div className="text-[11px] uppercase tracking-[0.24em] text-slate-400">Pulse Stream</div>
-            <div className="mt-3">
-              <SparkBars values={activeSummary.bars} />
-            </div>
           </div>
         </div>
         <div className="mt-6 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
