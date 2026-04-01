@@ -842,6 +842,7 @@ function buildAttachmentContext(attachments: AttachmentRef[]) {
   const lines = attachments.map((attachment, index) => {
     const parts = [
       `${index + 1}. ${attachment.name}`,
+      `attachment_id=${attachment.id}`,
       attachment.kind ? `type=${attachment.kind}` : '',
       attachment.mime_type ? `mime=${attachment.mime_type}` : '',
       attachment.size_bytes != null ? `size=${attachment.size_bytes} bytes` : '',
@@ -877,6 +878,62 @@ function getAttachmentById(attachmentId: string) {
     LIMIT 1
   `).get(attachmentId) as any;
   return row || null;
+}
+
+function isAttachmentIdKey(key: string) {
+  return /(^|_)(attachment_id|image_attachment_id|file_attachment_id)$/i.test(String(key || ''));
+}
+
+function attachmentFieldPrefix(key: string) {
+  const normalized = String(key || '').trim();
+  if (!normalized || normalized === 'attachment_id') return 'attachment';
+  return normalized.replace(/_id$/i, '');
+}
+
+function enrichArgsWithAttachments(input: any): any {
+  if (Array.isArray(input)) return input.map((item) => enrichArgsWithAttachments(item));
+  if (!input || typeof input !== 'object') return input;
+
+  const output: Record<string, any> = {};
+  for (const [key, rawValue] of Object.entries(input)) {
+    const value = enrichArgsWithAttachments(rawValue);
+    output[key] = value;
+
+    if (typeof value === 'string' && isAttachmentIdKey(key)) {
+      const row = getAttachmentById(value);
+      if (!row) continue;
+      const meta = normalizeAttachmentRow(row);
+      const prefix = attachmentFieldPrefix(key);
+      output[prefix] = meta;
+      output[`${prefix}_url`] = meta.url;
+      output[`${prefix}_name`] = meta.name;
+      output[`${prefix}_mime_type`] = meta.mime_type || null;
+      output[`${prefix}_kind`] = meta.kind;
+      if (meta.local_path) output[`${prefix}_local_path`] = meta.local_path;
+      if (prefix === 'attachment' && meta.kind === 'image' && !output.image_url) {
+        output.image_url = meta.url;
+      }
+      if (prefix === 'attachment' && meta.local_path && meta.kind === 'image' && !output.image_local_path) {
+        output.image_local_path = meta.local_path;
+      }
+    }
+  }
+  return output;
+}
+
+async function resolveAttachmentUploadValue(templateValue: any, args: any) {
+  if (typeof templateValue !== 'string') return null;
+  const match = templateValue.trim().match(/^\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}$/);
+  if (!match) return null;
+  const pathKey = match[1];
+  if (!/attachment/i.test(pathKey)) return null;
+  const resolved = getByPath(args, pathKey.startsWith('args.') ? pathKey.slice(5) : pathKey);
+  const attachmentId = typeof resolved === 'string'
+    ? resolved
+    : (resolved && typeof resolved === 'object' && typeof resolved.id === 'string' ? resolved.id : '');
+  if (!attachmentId) return null;
+  const row = getAttachmentById(attachmentId);
+  return row ? normalizeAttachmentRow(row) : null;
 }
 
 async function saveSessionSummary(sessionId: string, summary: string) {
@@ -7067,6 +7124,7 @@ async function runPythonTool(code: string, args: any): Promise<string> {
 }
 
 async function runHttpTool(config: any, args: any): Promise<string> {
+  args = enrichArgsWithAttachments(args);
   const method = String(config?.method || 'GET').toUpperCase();
   let url = String(config?.url || '');
   if (!url) throw new Error('HTTP tool URL is required.');
@@ -7135,6 +7193,19 @@ async function runHttpTool(config: any, args: any): Promise<string> {
   if (!['GET', 'HEAD'].includes(method) && formDataConfig && Object.keys(formDataConfig).length > 0 && config?.bodyMode === 'form-data') {
     const form = new FormData();
     for (const [k, v] of Object.entries(formDataConfig)) {
+      const attachment = await resolveAttachmentUploadValue(v, args || {});
+      if (attachment) {
+        if (attachment.local_path) {
+          const fileBuffer = await readFile(attachment.local_path);
+          const blob = new Blob([fileBuffer], { type: attachment.mime_type || 'application/octet-stream' });
+          form.append(k, blob, attachment.name || 'attachment.bin');
+          continue;
+        }
+        if (attachment.url) {
+          form.append(k, attachment.url);
+          continue;
+        }
+      }
       const value = typeof v === 'string' ? applyTemplate(v, args || {}) : String(v ?? '');
       form.append(k, value);
     }
@@ -7243,6 +7314,7 @@ async function runKnowledgeSearch(config: any, args: any): Promise<string> {
 }
 
 async function executeTool(toolName: string, args: any, mcpClients?: Map<string, Client>, toolRecord?: any, execContext?: ToolExecutionContext): Promise<string> {
+  args = enrichArgsWithAttachments(args);
   console.log(`Executing tool ${toolName} with args:`, args);
 
   if (mcpClients) {
