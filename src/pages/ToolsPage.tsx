@@ -221,6 +221,25 @@ function slugify(input: string) {
     .replace(/^_+|_+$/g, '');
 }
 
+function isBuiltInTool(tool?: Pick<Tool, 'type' | 'name'> | null) {
+  if (!tool) return false;
+  return tool.type === 'internal';
+}
+
+function getBuiltInToolHint(tool?: Pick<Tool, 'name' | 'type'> | null) {
+  if (!tool || tool.type !== 'internal') return '';
+  if (tool.name === 'generate_attachment_public_url') {
+    return 'Creates a temporary public link for an uploaded attachment so external MCP packages or APIs can fetch it.';
+  }
+  if (tool.name === 'curl_request') {
+    return 'Makes a direct HTTP request and returns status, headers, and body for quick inspection or orchestration checks.';
+  }
+  if (tool.name === 'delegate_to_agent') {
+    return 'Hands a subtask to another agent and returns the delegated child result to the current run.';
+  }
+  return 'Built-in platform tool maintained by the runtime.';
+}
+
 function parseSchemaInputValue(type: string | undefined, raw: string) {
   const value = raw.trim();
   if (value === '') return undefined;
@@ -1488,7 +1507,12 @@ export default function ToolsPage() {
                                   <div className="truncate">
                                       <h4 className={`font-medium truncate ${selectedToolId === tool.id ? 'text-indigo-900' : 'text-slate-700'}`}>{tool.name}</h4>
                                       <div className="flex items-center gap-1.5 mt-0.5">
-                                        <p className="text-xs text-slate-400 uppercase tracking-wide">{tool.type}</p>
+                                        <p className="text-xs text-slate-400 uppercase tracking-wide">{tool.type === 'internal' ? 'built-in' : tool.type}</p>
+                                        {isBuiltInTool(tool) && (
+                                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">
+                                            Built-in
+                                          </span>
+                                        )}
                                         {(tool.linkages?.agents_count || 0) > 0 && (
                                           <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700">
                                             A:{tool.linkages?.agents_count}
@@ -1551,9 +1575,16 @@ export default function ToolsPage() {
               ) : (
                   <div className="flex-1 flex flex-col overflow-hidden">
                       <div className="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
-                          <h2 className="font-semibold text-slate-800 flex items-center gap-2">
-                              {selectedToolId === 'new' ? 'Create New Tool' : 'Edit Tool'}
-                          </h2>
+                          <div className="flex items-center gap-3">
+                            <h2 className="font-semibold text-slate-800 flex items-center gap-2">
+                                {selectedToolId === 'new' ? 'Create New Tool' : 'Edit Tool'}
+                            </h2>
+                            {selectedTool && isBuiltInTool(selectedTool) && (
+                              <span className="rounded-full bg-amber-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-700">
+                                Built-in
+                              </span>
+                            )}
+                          </div>
                           {selectedToolId !== 'new' && (
                               <span className="text-xs font-mono text-slate-400 bg-slate-200 px-2 py-1 rounded">ID: {selectedToolId}</span>
                           )}
@@ -1609,6 +1640,19 @@ export default function ToolsPage() {
                                       placeholder="Explain exactly what this tool does so the LLM knows when to use it"
                                   />
                               </div>
+
+                              {selectedTool && isBuiltInTool(selectedTool) && (
+                                <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                                  <div className="flex items-center gap-2">
+                                    <Sparkles size={15} className="text-amber-600" />
+                                    <div className="text-sm font-semibold text-amber-900">Built-in Platform Tool</div>
+                                  </div>
+                                  <div className="mt-1 text-sm text-amber-800">{getBuiltInToolHint(selectedTool)}</div>
+                                  <div className="mt-2 text-xs text-amber-700">
+                                    These tools are maintained by the runtime. You can assign them to agents like other tools, but their execution behavior is provided by the platform.
+                                  </div>
+                                </div>
+                              )}
 
                               {selectedToolId !== 'new' && selectedTool && (
                                 <div className="bg-indigo-50/70 border border-indigo-100 rounded-xl p-4 space-y-4">
