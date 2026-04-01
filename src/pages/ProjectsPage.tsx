@@ -338,6 +338,13 @@ export default function ProjectsPage() {
         {projects.length === 0 && !isCreating && (
           <div className="col-span-full text-center py-12 bg-slate-50 rounded-xl border border-dashed border-slate-300">
             <p className="text-slate-500">No projects created yet.</p>
+            <button
+              onClick={() => setIsCreating(true)}
+              className="mt-4 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+            >
+              <Plus size={16} />
+              Create Project
+            </button>
           </div>
         )}
         <div className="col-span-full">

@@ -673,10 +673,10 @@ export default function Dashboard() {
       <div className="panel-chrome rounded-[2.5rem] p-8 mb-10 overflow-hidden relative border border-slate-200/90 bg-white/92">
         <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-brand-500/5 blur-[120px] rounded-full -mr-64 -mt-64" />
         
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-10 relative z-10">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-10 relative z-10">
           <div className="telemetry-tile p-6 relative overflow-hidden group border-white/10">
             <div className="absolute top-0 right-0 w-32 h-32 bg-violet-500/10 blur-3xl -mr-16 -mt-16 group-hover:bg-violet-500/20 transition-colors" />
-            <div className="text-[10px] text-violet-300 font-black uppercase tracking-[0.25em] mb-1">Swarm Efficiency</div>
+            <div className="text-[10px] text-violet-300 font-black uppercase tracking-[0.25em] mb-1">Success Rate</div>
             <div className="text-4xl font-black text-white">{opsPulse.successRate.toFixed(1)}%</div>
             <div className="mt-5 h-2.5 bg-white/10 rounded-full overflow-hidden border border-white/5 shadow-inner">
               <motion.div 
@@ -687,20 +687,8 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="telemetry-tile p-6 relative overflow-hidden group border-white/10">
-            <div className="absolute top-0 right-0 w-32 h-32 bg-cyan-500/10 blur-3xl -mr-16 -mt-16 group-hover:bg-cyan-500/20 transition-colors" />
-            <div className="text-[10px] text-cyan-300 font-black uppercase tracking-[0.25em] mb-1">Impact Velocity</div>
-            <div className="text-4xl font-black text-white">${dashboardInsights.totalCost.toFixed(2)}</div>
-            <div className="mt-5 h-2.5 bg-white/10 rounded-full overflow-hidden border border-white/5 shadow-inner">
-              <motion.div 
-                initial={{ width: 0 }}
-                animate={{ width: `${Math.min(100, Math.max(8, dashboardInsights.activeRunsNow * 10))}%` }}
-                className="h-full bg-linear-to-r from-cyan-600 to-emerald-500 rounded-full shadow-[0_0_15px_rgba(6,182,212,0.6)]" 
-              />
-            </div>
-          </div>
-          <div className="telemetry-tile p-6 relative overflow-hidden group border-white/10">
             <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-500/10 blur-3xl -mr-16 -mt-16 group-hover:bg-emerald-500/20 transition-colors" />
-            <div className="text-[10px] text-emerald-300 font-black uppercase tracking-[0.25em] mb-1">Cerebral Load</div>
+            <div className="text-[10px] text-emerald-300 font-black uppercase tracking-[0.25em] mb-1">Active Capacity</div>
             <div className="text-4xl font-black text-white">{dashboardInsights.utilization}%</div>
             <div className="mt-5 h-2.5 bg-white/10 rounded-full overflow-hidden border border-white/5 shadow-inner">
               <motion.div 
@@ -711,14 +699,14 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="telemetry-tile p-6 relative overflow-hidden group border-white/10">
-            <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/10 blur-3xl -mr-16 -mt-16 group-hover:bg-orange-500/20 transition-colors" />
-            <div className="text-[10px] text-orange-300 font-black uppercase tracking-[0.25em] mb-1">Neural Patterns</div>
-            <div className="text-4xl font-black text-white">{recentExecutions.length}</div>
+            <div className="absolute top-0 right-0 w-32 h-32 bg-cyan-500/10 blur-3xl -mr-16 -mt-16 group-hover:bg-cyan-500/20 transition-colors" />
+            <div className="text-[10px] text-cyan-300 font-black uppercase tracking-[0.25em] mb-1">Active Runs</div>
+            <div className="text-4xl font-black text-white">{dashboardInsights.activeRunsNow}</div>
             <div className="mt-5 h-2.5 bg-white/10 rounded-full overflow-hidden border border-white/5 shadow-inner">
               <motion.div 
                 initial={{ width: 0 }}
-                animate={{ width: `${Math.min(100, recentExecutions.length * 4)}%` }}
-                className="h-full bg-linear-to-r from-orange-600 to-amber-500 rounded-full shadow-[0_0_15px_rgba(245,158,11,0.6)]" 
+                animate={{ width: `${Math.min(100, Math.max(8, dashboardInsights.activeRunsNow * 12))}%` }}
+                className="h-full bg-linear-to-r from-cyan-600 to-blue-500 rounded-full shadow-[0_0_15px_rgba(6,182,212,0.6)]" 
               />
             </div>
           </div>
