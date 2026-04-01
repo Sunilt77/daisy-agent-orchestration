@@ -813,7 +813,7 @@ export default function McpPage() {
               <div className="flex items-center gap-2 text-slate-800 font-semibold">
                 <Activity size={18} /> Local MCP Runtimes ({localRuntimes.length})
               </div>
-              <div className="text-xs text-slate-500">Imported npm MCP packages that run on this server and can be exposed or attached to agents.</div>
+              <div className="text-xs text-slate-500">Registry first. Open runtime details only when you need diagnostics, env keys, or bundle wiring.</div>
             </div>
 
             {localRuntimes.length === 0 && (
@@ -857,52 +857,60 @@ export default function McpPage() {
                         </div>
                       </div>
                     </div>
-
-                    <div className="mt-4 grid grid-cols-1 xl:grid-cols-3 gap-3">
-                      <div className="rounded-xl border border-white/80 bg-white/80 p-3">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Env Keys</div>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {runtime.env_keys.length > 0 ? runtime.env_keys.map((key) => (
-                            <span key={key} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">{key}</span>
-                          )) : (
-                            <span className="text-xs text-slate-500">No env vars configured</span>
-                          )}
+                    <details className="mt-4 group rounded-xl border border-white/80 bg-white/70 open:bg-white/80">
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-3">
+                        <div>
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">Runtime Details</div>
+                          <div className="mt-1 text-xs text-slate-500">Env keys, bundles, attached agents, and the full runtime tool list.</div>
+                        </div>
+                        <span className="text-xs font-semibold text-emerald-700 group-open:hidden">Show details</span>
+                        <span className="text-xs font-semibold text-emerald-700 hidden group-open:inline">Hide details</span>
+                      </summary>
+                      <div className="grid grid-cols-1 gap-3 border-t border-white/90 p-3 xl:grid-cols-3">
+                        <div className="rounded-xl border border-white/80 bg-white/80 p-3">
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Env Keys</div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {runtime.env_keys.length > 0 ? runtime.env_keys.map((key) => (
+                              <span key={key} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">{key}</span>
+                            )) : (
+                              <span className="text-xs text-slate-500">No env vars configured</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="rounded-xl border border-white/80 bg-white/80 p-3">
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Bundles</div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {runtime.bundles.length > 0 ? runtime.bundles.map((bundle) => (
+                              <span key={bundle.id} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                                {bundle.name}{bundle.is_exposed ? ' · exposed' : ' · hidden'}
+                              </span>
+                            )) : (
+                              <span className="text-xs text-slate-500">Not bundled yet</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="rounded-xl border border-white/80 bg-white/80 p-3">
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Attached Agents</div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {runtime.agent_links.length > 0 ? runtime.agent_links.map((agent) => (
+                              <span key={agent.id} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">{agent.name}</span>
+                            )) : (
+                              <span className="text-xs text-slate-500">Not attached yet</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="xl:col-span-3 rounded-xl border border-white/80 bg-white/80 p-3">
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Runtime Tools</div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {runtime.tools.map((tool) => (
+                              <span key={tool.id} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                                {formatDisplayedMcpToolName(tool.exposed_name || tool.mcp_tool_name || tool.name)}
+                              </span>
+                            ))}
+                          </div>
                         </div>
                       </div>
-                      <div className="rounded-xl border border-white/80 bg-white/80 p-3">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Bundles</div>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {runtime.bundles.length > 0 ? runtime.bundles.map((bundle) => (
-                            <span key={bundle.id} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">
-                              {bundle.name}{bundle.is_exposed ? ' · exposed' : ' · hidden'}
-                            </span>
-                          )) : (
-                            <span className="text-xs text-slate-500">Not bundled yet</span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="rounded-xl border border-white/80 bg-white/80 p-3">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Attached Agents</div>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {runtime.agent_links.length > 0 ? runtime.agent_links.map((agent) => (
-                            <span key={agent.id} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">{agent.name}</span>
-                          )) : (
-                            <span className="text-xs text-slate-500">Not attached yet</span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="mt-4 rounded-xl border border-white/80 bg-white/80 p-3">
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Runtime Tools</div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {runtime.tools.map((tool) => (
-                          <span key={tool.id} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">
-                            {formatDisplayedMcpToolName(tool.exposed_name || tool.mcp_tool_name || tool.name)}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
+                    </details>
                   </div>
                 );
               })}
@@ -914,7 +922,7 @@ export default function McpPage() {
               <div className="flex items-center gap-2 text-slate-800 font-semibold">
                 <Plug size={18} /> MCP Bundles ({bundles.length})
               </div>
-              <div className="text-xs text-slate-500">Each bundle is one MCP endpoint with many tools.</div>
+              <div className="text-xs text-slate-500">Treat this like a published registry: inspect, connect, test, then open deeper details only when needed.</div>
             </div>
             <div className="relative mb-4">
               <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -994,39 +1002,50 @@ export default function McpPage() {
                         </button>
                       </div>
                     </div>
-                    <div className="mt-4 rounded-xl border border-white/70 bg-white/70 p-3">
-                      <div className="flex items-center justify-between gap-3">
+                    <details className="mt-4 group rounded-xl border border-white/70 bg-white/70 open:bg-white/85">
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-3">
                         <div>
                           <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">Included Tools</div>
                           <div className="text-xs text-slate-500 mt-1">
-                            {isExpanded ? 'All tool mappings in this MCP bundle.' : 'Showing a compact preview to keep the bundle list readable.'}
+                            {bundle.tools.length} exposed mappings inside this endpoint.
                           </div>
                         </div>
-                        {bundle.tools.length > 6 && (
-                          <button
-                            onClick={() => toggleBundleExpanded(bundle.id)}
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                          >
-                            {isExpanded ? 'Collapse tools' : `Show all ${bundle.tools.length}`}
-                          </button>
-                        )}
-                      </div>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {visibleTools.map((t) => (
-                        <span key={t.tool_id} className="text-[11px] px-2 py-1 rounded bg-white border border-slate-200 text-slate-700">
-                          {formatDisplayedMcpToolName(t.exposed_name || t.tool_name)}
+                        <span className="text-xs font-semibold text-indigo-700 group-open:hidden">
+                          {bundle.tools.length > 6 ? `Preview ${visibleTools.length} of ${bundle.tools.length}` : 'Show tools'}
                         </span>
-                        ))}
-                        {!isExpanded && hiddenCount > 0 && (
-                          <button
-                            onClick={() => toggleBundleExpanded(bundle.id)}
-                            className="text-[11px] px-2 py-1 rounded border border-dashed border-slate-300 text-slate-500 hover:border-slate-400 hover:text-slate-700"
-                          >
-                            +{hiddenCount} more
-                          </button>
+                        <span className="text-xs font-semibold text-indigo-700 hidden group-open:inline">Hide tools</span>
+                      </summary>
+                      <div className="border-t border-white/90 px-3 pb-3 pt-1">
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {(isExpanded ? bundle.tools : visibleTools).map((t) => (
+                            <span key={t.tool_id} className="text-[11px] px-2 py-1 rounded bg-white border border-slate-200 text-slate-700">
+                              {formatDisplayedMcpToolName(t.exposed_name || t.tool_name)}
+                            </span>
+                          ))}
+                          {!isExpanded && hiddenCount > 0 && (
+                            <button
+                              onClick={(e) => {
+                                e.preventDefault();
+                                toggleBundleExpanded(bundle.id);
+                              }}
+                              className="text-[11px] px-2 py-1 rounded border border-dashed border-slate-300 text-slate-500 hover:border-slate-400 hover:text-slate-700"
+                            >
+                              +{hiddenCount} more
+                            </button>
+                          )}
+                        </div>
+                        {bundle.tools.length > 6 && (
+                          <div className="mt-3">
+                            <button
+                              onClick={() => toggleBundleExpanded(bundle.id)}
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                            >
+                              {isExpanded ? 'Show compact preview' : `Expand full tool list (${bundle.tools.length})`}
+                            </button>
+                          </div>
                         )}
                       </div>
-                    </div>
+                    </details>
                   </div>
                 );
               })}
@@ -1043,11 +1062,14 @@ export default function McpPage() {
             </div>
           </div>
 
-          <div className="bg-white rounded-xl border border-slate-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div className="text-slate-800 font-semibold">Create Bundle From Selection</div>
-              <div className="text-xs text-slate-500">{selectedIds.length} selected</div>
-            </div>
+          <details className="bg-white rounded-xl border border-slate-200 p-6 group" open={selectedIds.length > 0}>
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 mb-4">
+              <div>
+                <div className="text-slate-800 font-semibold">Create Bundle From Selection</div>
+                <div className="text-xs text-slate-500 mt-1">Select tools first, then open this builder to package and expose them together.</div>
+              </div>
+              <div className="text-xs font-semibold text-indigo-700">{selectedIds.length} selected</div>
+            </summary>
 
             <div className="flex flex-wrap items-end gap-3 mb-6">
               <div className="flex gap-2">
@@ -1117,7 +1139,7 @@ export default function McpPage() {
               </button>
               {bundleStatus && <span className="text-xs text-slate-600">{bundleStatus}</span>}
             </div>
-          </div>
+          </details>
 
           <div className="bg-white rounded-xl border border-slate-200 p-6">
             <div className="flex items-center justify-between gap-3 mb-3">
@@ -1295,6 +1317,10 @@ export default function McpPage() {
 
         <div className="bg-white rounded-xl border border-slate-200 p-6 space-y-6">
           <div>
+            <div className="text-slate-800 font-semibold mb-1">MCP Control Center</div>
+            <p className="text-xs text-slate-500">Keep auth and base endpoints handy here. Open deeper controls only when you are publishing or validating the surface.</p>
+          </div>
+          <div>
             <div className="flex items-center gap-2 text-slate-800 font-semibold mb-2"><Key size={18} /> Auth (Optional)</div>
             <p className="text-xs text-slate-500 mb-3">If set, clients must send this token as Bearer or X-API-Key.</p>
             <div className="mb-2">
@@ -1342,34 +1368,46 @@ export default function McpPage() {
             {tokenSaved && <div className="mt-2 text-xs text-emerald-700">Saved</div>}
           </div>
 
-          <div>
-            <div className="text-slate-800 font-semibold mb-2">Base Endpoints</div>
-            <div className="text-xs text-slate-500 mb-2">Global Streamable</div>
-            <div className="flex items-center gap-2">
-              <code className="text-xs bg-slate-100 px-2 py-1 rounded w-full truncate">{streamableUrl}</code>
-              <button onClick={() => copy(streamableUrl)} className="text-slate-500 hover:text-slate-700">{copied === streamableUrl ? <Check size={14} /> : <Copy size={14} />}</button>
-            </div>
-            <div className="text-xs text-slate-500 mt-3 mb-2">Global SSE</div>
-            <div className="flex items-center gap-2">
-              <code className="text-xs bg-slate-100 px-2 py-1 rounded w-full truncate">{sseUrl}</code>
-              <button onClick={() => copy(sseUrl)} className="text-slate-500 hover:text-slate-700">{copied === sseUrl ? <Check size={14} /> : <Copy size={14} />}</button>
-            </div>
-          </div>
-
-          <div>
-            <button
-              onClick={runServerTest}
-              disabled={serverTestStatus === 'testing'}
-              className="inline-flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-lg bg-indigo-600 text-white disabled:opacity-60"
-            >
-              {serverTestStatus === 'testing' ? 'Testing...' : 'Test MCP Server'}
-            </button>
-            {serverTestMessage && (
-              <div className={`mt-2 text-xs ${serverTestStatus === 'ok' ? 'text-emerald-600' : 'text-red-600'}`}>
-                {serverTestMessage}
+          <details className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 group">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+              <div>
+                <div className="text-slate-800 font-semibold">Connection & Validation</div>
+                <div className="text-xs text-slate-500 mt-1">Base endpoints and a quick MCP server validation path.</div>
               </div>
-            )}
-          </div>
+              <span className="text-xs font-semibold text-slate-600 group-open:hidden">Show</span>
+              <span className="text-xs font-semibold text-slate-600 hidden group-open:inline">Hide</span>
+            </summary>
+            <div className="pt-4 space-y-5">
+              <div>
+                <div className="text-slate-800 font-semibold mb-2">Base Endpoints</div>
+                <div className="text-xs text-slate-500 mb-2">Global Streamable</div>
+                <div className="flex items-center gap-2">
+                  <code className="text-xs bg-slate-100 px-2 py-1 rounded w-full truncate">{streamableUrl}</code>
+                  <button onClick={() => copy(streamableUrl)} className="text-slate-500 hover:text-slate-700">{copied === streamableUrl ? <Check size={14} /> : <Copy size={14} />}</button>
+                </div>
+                <div className="text-xs text-slate-500 mt-3 mb-2">Global SSE</div>
+                <div className="flex items-center gap-2">
+                  <code className="text-xs bg-slate-100 px-2 py-1 rounded w-full truncate">{sseUrl}</code>
+                  <button onClick={() => copy(sseUrl)} className="text-slate-500 hover:text-slate-700">{copied === sseUrl ? <Check size={14} /> : <Copy size={14} />}</button>
+                </div>
+              </div>
+
+              <div>
+                <button
+                  onClick={runServerTest}
+                  disabled={serverTestStatus === 'testing'}
+                  className="inline-flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-lg bg-indigo-600 text-white disabled:opacity-60"
+                >
+                  {serverTestStatus === 'testing' ? 'Testing...' : 'Test MCP Server'}
+                </button>
+                {serverTestMessage && (
+                  <div className={`mt-2 text-xs ${serverTestStatus === 'ok' ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {serverTestMessage}
+                  </div>
+                )}
+              </div>
+            </div>
+          </details>
         </div>
       </div>
 
