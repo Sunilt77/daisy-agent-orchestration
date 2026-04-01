@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Mic, MicOff, PhoneCall, PhoneOff, Radio, Send, Volume2, Waves, Bot, Activity, Save } from 'lucide-react';
+import { Mic, MicOff, PhoneCall, PhoneOff, Radio, Send, Volume2, Waves, Bot, Activity, Save, Paperclip } from 'lucide-react';
 
 type VoiceTarget = {
   id: number;
@@ -19,6 +19,15 @@ type VoiceEvent = {
   type: string;
   payload: any;
   ts: string;
+};
+
+type SessionAttachment = {
+  id: string;
+  kind: 'image' | 'audio' | 'pdf' | 'file';
+  name: string;
+  mime_type?: string | null;
+  size_bytes?: number | null;
+  url: string;
 };
 
 type VoiceConfigPreset = {
@@ -170,6 +179,8 @@ export default function VoicePage() {
   const [presetVisibility, setPresetVisibility] = useState<'private' | 'org'>('private');
   const [presetSharedUserIdsText, setPresetSharedUserIdsText] = useState('');
   const [presetSharedOrgIdsText, setPresetSharedOrgIdsText] = useState('');
+  const [sessionAttachments, setSessionAttachments] = useState<SessionAttachment[]>([]);
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -186,6 +197,7 @@ export default function VoicePage() {
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
 
   const stopMicVisualization = () => {
     if (animationFrameRef.current != null && typeof window !== 'undefined') {
@@ -367,6 +379,30 @@ export default function VoicePage() {
     void loadTargets();
     void loadVoiceConfigs();
   }, []);
+
+  const uploadSessionAttachments = async (files: FileList | null) => {
+    if (!sessionId || !files?.length) return;
+    setUploadingAttachment(true);
+    setError('');
+    try {
+      const form = new FormData();
+      Array.from(files).forEach((file) => form.append('files', file));
+      const res = await fetch(`/api/voice/sessions/${sessionId}/attachments`, {
+        method: 'POST',
+        body: form,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(String(data?.error || 'Failed to upload attachments'));
+      const uploaded = Array.isArray(data?.attachments) ? data.attachments : [];
+      setSessionAttachments((prev) => [...prev, ...uploaded]);
+      setStatusNote(`Attached ${uploaded.length} file${uploaded.length === 1 ? '' : 's'} to this voice session.`);
+    } catch (e: any) {
+      setError(e?.message || 'Failed to upload attachments');
+    } finally {
+      setUploadingAttachment(false);
+      if (attachmentInputRef.current) attachmentInputRef.current.value = '';
+    }
+  };
 
   const availableTargets = useMemo(
     () => targets.filter((target) => target.type === targetType),
@@ -558,6 +594,7 @@ export default function VoicePage() {
         const message = JSON.parse(String(event.data || '{}'));
         pushEvent(message.type || 'message', message);
         if (message.type === 'session.started') setSessionId(String(message.sessionId || ''));
+        if (message.type === 'session.started') setSessionAttachments(Array.isArray(message.attachments) ? message.attachments : []);
         if (message.type === 'session.started') setStatusNote('Connected. Start speaking and committed speech will invoke the selected runtime automatically.');
         if (message.type === 'turn.state') {
           const next = String(message.state || 'idle');
@@ -635,6 +672,7 @@ export default function VoicePage() {
       audioContextRef.current = null;
       resetAudioStream();
       setStatusNote('');
+      setSessionAttachments([]);
       pushEvent('socket.closed', {});
     };
   };
@@ -945,9 +983,9 @@ export default function VoicePage() {
           <div className="mt-1 text-xs text-slate-400">Barge-in and VAD state are tracked live during the session.</div>
         </div>
         <div className="rounded-2xl border border-white/10 bg-slate-950/88 px-4 py-4 text-white shadow-[0_18px_65px_rgba(15,23,42,0.28)]">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Preset</div>
-          <div className="mt-2 text-lg font-semibold">{currentPreset?.name || 'Custom'}</div>
-          <div className="mt-1 text-xs text-slate-400">{currentPreset ? 'Saved runtime profile is active.' : 'Using unsaved runtime values.'}</div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Attachments</div>
+          <div className="mt-2 text-lg font-semibold">{sessionAttachments.length}</div>
+          <div className="mt-1 text-xs text-slate-400">{sessionAttachments.length ? 'Session files will be included with the next turn.' : 'Attach image or files after you connect.'}</div>
         </div>
       </div>
 
@@ -1237,6 +1275,13 @@ export default function VoicePage() {
 
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-4">
             <div className="text-sm font-semibold text-slate-900">Realtime Voice Preview</div>
+            <input
+              ref={attachmentInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => { void uploadSessionAttachments(e.target.files); }}
+            />
             <textarea
               className="min-h-[120px] w-full rounded-xl border border-slate-300 px-3 py-3 text-sm"
               value={textInput}
@@ -1262,9 +1307,29 @@ export default function VoicePage() {
                 {isRecording ? <MicOff size={14} /> : <Mic size={14} />}
                 {isRecording ? 'Stop Recording' : 'Record Audio'}
               </button>
+              <button
+                onClick={() => attachmentInputRef.current?.click()}
+                disabled={!isConnected || uploadingAttachment}
+                className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-semibold text-slate-700 inline-flex items-center gap-2 disabled:opacity-40"
+              >
+                <Paperclip size={14} />
+                {uploadingAttachment ? 'Uploading…' : 'Attach Image / File'}
+              </button>
             </div>
+            {sessionAttachments.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {sessionAttachments.map((attachment) => (
+                  <div key={attachment.id} className="inline-flex items-center gap-2 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-[11px] font-semibold text-cyan-800">
+                    <Paperclip size={11} />
+                    <a href={attachment.url} target="_blank" rel="noreferrer" className="max-w-[15rem] truncate hover:underline">
+                      {attachment.name}
+                    </a>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <div className="rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-xs text-cyan-900">
-              Mic audio streams live to ElevenLabs STT. Committed speech segments automatically invoke the selected agent or crew, and the current voice settings are reused for future sessions.
+              Mic audio streams live to ElevenLabs STT. Committed speech segments automatically invoke the selected agent or crew, and any attached files are included in the current session context.
             </div>
             <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
               <div className="flex items-center justify-between gap-3">

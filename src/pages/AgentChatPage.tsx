@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   MessageSquare, Plus, Send, Bot, User, Loader2, GitBranch, ExternalLink,
   Search, Sparkles, Activity, CheckCircle2, XCircle, Clock, AlertTriangle,
-  ChevronDown, ChevronRight, Zap, Network, ArrowRight,
+  ChevronDown, ChevronRight, Zap, Network, ArrowRight, Paperclip, X,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { loadPersisted, savePersisted } from '../utils/persistence';
@@ -43,7 +43,23 @@ type LiveDelegation = {
   delegates: DelegationStatus[];
   startedAt: number;
 };
-type ChatMessage = { role: 'user' | 'assistant'; content: string; ts?: string; debug?: MessageDebug; trace?: TraceEvent[]; delegation?: LiveDelegation };
+type ChatAttachment = {
+  id: string;
+  kind: 'image' | 'audio' | 'pdf' | 'file';
+  name: string;
+  mime_type?: string | null;
+  size_bytes?: number | null;
+  url: string;
+};
+type ChatMessage = {
+  role: 'user' | 'assistant';
+  content: string;
+  ts?: string;
+  debug?: MessageDebug;
+  trace?: TraceEvent[];
+  delegation?: LiveDelegation;
+  attachments?: ChatAttachment[];
+};
 type DebugUsage = { prompt_tokens?: number; completion_tokens?: number; cost?: number } | null;
 type DebugStep = { stage?: string; status?: string; duration_ms?: number; error?: string | null; at?: string };
 type MessageDebug = {
@@ -318,11 +334,13 @@ export default function AgentChatPage() {
   const [delegateAgentIds, setDelegateAgentIds] = useState<number[]>([]);
   const [agentSearch, setAgentSearch] = useState('');
   const [stateReady, setStateReady] = useState(false);
+  const [draftAttachments, setDraftAttachments] = useState<ChatAttachment[]>([]);
   const loadedSessionKeyRef = useRef<string>('');
   const sendingRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const traceEndRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     sendingRef.current = sending;
@@ -374,6 +392,7 @@ export default function AgentChatPage() {
         setDelegateAgentIds(persisted.delegateAgentIds.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id) && id > 0));
       }
       if (typeof persisted.draft === 'string') setDraft(persisted.draft);
+      if (Array.isArray(persisted.draftAttachments)) setDraftAttachments(persisted.draftAttachments);
     }
     setStateReady(true);
   }, []);
@@ -381,9 +400,9 @@ export default function AgentChatPage() {
   useEffect(() => {
     if (!stateReady) return;
     savePersisted(AGENT_CHAT_UI_KEY, {
-      selectedAgentId, selectedSessionId, debugMode, showToolTrace, supervisorMode, delegateAgentIds, draft,
+      selectedAgentId, selectedSessionId, debugMode, showToolTrace, supervisorMode, delegateAgentIds, draft, draftAttachments,
     });
-  }, [stateReady, selectedAgentId, selectedSessionId, debugMode, showToolTrace, supervisorMode, delegateAgentIds, draft]);
+  }, [stateReady, selectedAgentId, selectedSessionId, debugMode, showToolTrace, supervisorMode, delegateAgentIds, draft, draftAttachments]);
 
   const loadSessions = async (agentId: number, silent = false) => {
     if (!silent) setLoading(true);
@@ -420,6 +439,7 @@ export default function AgentChatPage() {
     if (!selectedAgentId) return;
     setSelectedSessionId(null);
     setMessages([]);
+    setDraftAttachments([]);
     loadedSessionKeyRef.current = '';
     setDelegateAgentIds((prev) => prev.filter((id) => id !== selectedAgentId));
     loadSessions(selectedAgentId);
@@ -473,15 +493,39 @@ export default function AgentChatPage() {
     setDelegateAgentIds((prev) => prev.includes(agentId) ? prev.filter((id) => id !== agentId) : [...prev, agentId]);
   };
 
+  const uploadDraftAttachments = async (files: FileList | null) => {
+    if (!selectedAgentId || !files?.length) return;
+    setError('');
+    try {
+      const form = new FormData();
+      Array.from(files).forEach((file) => form.append('files', file));
+      const res = await fetch(`/api/agents/${selectedAgentId}/attachments`, {
+        method: 'POST',
+        body: form,
+      });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data?.error || 'Failed to upload attachments');
+      const uploaded = Array.isArray(data?.attachments) ? data.attachments : [];
+      setDraftAttachments((prev) => [...prev, ...uploaded]);
+    } catch (e: any) {
+      setError(e?.message || 'Failed to upload attachments');
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   const sendMessage = async () => {
     const agentId = selectedAgentId;
     const text = draft.trim();
-    if (!agentId || !text || sending) return;
+    if (!agentId || (!text && !draftAttachments.length) || sending) return;
+    const outgoingText = text || 'Please use the attached file(s) as part of this request.';
     const now = new Date().toISOString();
+    const outgoingAttachments = [...draftAttachments];
     setDraft('');
+    setDraftAttachments([]);
     setSending(true);
     setError('');
-    setMessages((prev) => [...prev, { role: 'user', content: text, ts: now }]);
+    setMessages((prev) => [...prev, { role: 'user', content: outgoingText, ts: now, attachments: outgoingAttachments }]);
     const assistantTs = new Date().toISOString();
     setMessages((prev) => [...prev, { role: 'assistant', content: 'Working on it…', ts: assistantTs, trace: [] }]);
 
@@ -491,7 +535,7 @@ export default function AgentChatPage() {
         const kickoffRes = await fetch(`/api/agents/${agentId}/delegate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ task: text, delegate_agent_ids: delegateAgentIds, synthesize: true, wait: false }),
+          body: JSON.stringify({ task: outgoingText, delegate_agent_ids: delegateAgentIds, synthesize: true, wait: false, attachments: outgoingAttachments }),
         });
         const kickoffData = await safeJson(kickoffRes) as any;
         if (!kickoffRes.ok) throw new Error(kickoffData?.error || `Supervisor launch failed (HTTP ${kickoffRes.status})`);
@@ -564,7 +608,7 @@ export default function AgentChatPage() {
         const fallbackRes = await fetch(`/api/agents/${agentId}/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text, session_id: selectedSessionId || undefined }),
+          body: JSON.stringify({ message: outgoingText, session_id: selectedSessionId || undefined, attachments: outgoingAttachments }),
         });
         const raw = await fallbackRes.text();
         let data: any = null;
@@ -588,7 +632,7 @@ export default function AgentChatPage() {
       const res = await fetch(`/api/agents/${agentId}/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, session_id: selectedSessionId || undefined }),
+        body: JSON.stringify({ message: outgoingText, session_id: selectedSessionId || undefined, attachments: outgoingAttachments }),
       });
       if (res.status === 404) { await runLegacyChat(); await loadSessions(agentId); return; }
       if (!res.ok) { const data = await safeJson(res); throw new Error(data?.error || `Chat failed (HTTP ${res.status})`); }
@@ -878,6 +922,26 @@ export default function AgentChatPage() {
                       : 'bg-white text-slate-800 border border-slate-200 rounded-tl-sm'
                   }`}>
                     <div className="whitespace-pre-wrap break-words">{m.content}</div>
+                    {Array.isArray(m.attachments) && m.attachments.length > 0 && (
+                      <div className={`mt-3 flex flex-wrap gap-2 ${m.role === 'user' ? 'justify-end' : ''}`}>
+                        {m.attachments.map((attachment) => (
+                          <a
+                            key={attachment.id}
+                            href={attachment.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-semibold ${
+                              m.role === 'user'
+                                ? 'border-white/30 bg-white/10 text-white'
+                                : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                            }`}
+                          >
+                            <Paperclip size={11} />
+                            <span className="max-w-[16rem] truncate">{attachment.name}</span>
+                          </a>
+                        ))}
+                      </div>
+                    )}
 
                     {/* Execution link */}
                     {m.role === 'assistant' && m.debug?.executionId && (
@@ -951,6 +1015,30 @@ export default function AgentChatPage() {
                 {error}
               </div>
             )}
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => { void uploadDraftAttachments(e.target.files); }}
+            />
+            {draftAttachments.length > 0 && (
+              <div className="mb-3 flex flex-wrap gap-2">
+                {draftAttachments.map((attachment) => (
+                  <div key={attachment.id} className="inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-[11px] font-semibold text-indigo-700">
+                    <Paperclip size={11} />
+                    <span className="max-w-[16rem] truncate">{attachment.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => setDraftAttachments((prev) => prev.filter((item) => item.id !== attachment.id))}
+                      className="text-indigo-500 hover:text-indigo-700"
+                    >
+                      <X size={11} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="flex items-end gap-3">
               <div className="flex-1 relative">
                 <textarea
@@ -972,8 +1060,17 @@ export default function AgentChatPage() {
                 )}
               </div>
               <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={!selectedAgentId || sending}
+                className="h-14 w-14 shrink-0 rounded-2xl border border-slate-300 bg-white text-slate-600 disabled:opacity-50 flex items-center justify-center hover:border-indigo-300 hover:text-indigo-600 transition-all"
+                title="Attach image or file"
+              >
+                <Paperclip size={18} />
+              </button>
+              <button
                 onClick={sendMessage}
-                disabled={!draft.trim() || !selectedAgentId || sending || (supervisorMode && !delegateAgentIds.length)}
+                disabled={(!draft.trim() && !draftAttachments.length) || !selectedAgentId || sending || (supervisorMode && !delegateAgentIds.length)}
                 className="h-14 px-5 rounded-2xl bg-indigo-600 text-white text-sm disabled:opacity-50 flex flex-col items-center justify-center gap-1 hover:bg-indigo-700 active:scale-95 transition-all shadow-lg shadow-indigo-200 font-bold"
               >
                 {sending ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}

@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import { createServer as createViteServer, ViteDevServer } from 'vite';
-import { ensureVoiceTables, initDb } from './src/db';
+import { ensureAttachmentTables, ensureVoiceTables, initDb } from './src/db';
 import db from './src/db';
 import { GoogleGenAI } from '@google/genai';
 import OpenAI from 'openai';
@@ -24,6 +24,7 @@ import { closePrisma, ensurePrismaReady, getPrisma } from './src/platform/prisma
 import { closeRedis, initRedis, isRedisConnected } from './src/infra/redis';
 import { getSqlitePath } from './src/db';
 import { startSqliteGcsSyncLoop, syncSqliteToGcs } from './src/infra/sqliteGcs';
+import { isAttachmentStorageConfigured, uploadAttachmentBuffer } from './src/infra/attachmentsStorage';
 import { randomTraceIdHex32, uuid } from './src/platform/crypto';
 import { verifyProjectApiKey } from './src/platform/apiKeys';
 import { syncPersistentMirrorFromPostgres } from './src/orchestrator/sqliteMirror';
@@ -55,6 +56,7 @@ import {
 import { spawn } from 'child_process';
 import rateLimit from 'express-rate-limit';
 import { randomUUID } from 'node:crypto';
+import { readFile, unlink } from 'node:fs/promises';
 import * as z from 'zod/v4';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -762,12 +764,28 @@ async function delegateToAgentTool(args: any, ctx?: ToolExecutionContext): Promi
 }
 
 type AgentSessionRow = { id: string; user_id: string | null };
+type AttachmentRef = {
+  id: string;
+  kind: 'image' | 'audio' | 'pdf' | 'file';
+  name: string;
+  mime_type?: string | null;
+  size_bytes?: number | null;
+  url: string;
+  storage_key?: string;
+  created_at?: string;
+};
+type SessionMessage = {
+  role: string;
+  content: string;
+  ts?: string;
+  attachments?: AttachmentRef[];
+};
 
 async function ensureAgentSession(agentId: number, sessionId?: string, userId?: string): Promise<AgentSessionRow> {
   return await ensureRuntimeAgentSession(agentId, sessionId, userId);
 }
 
-async function loadSessionConversation(sessionId: string): Promise<Array<{ role: string; content: string; ts?: string }>> {
+async function loadSessionConversation(sessionId: string): Promise<SessionMessage[]> {
   return await loadRuntimeSessionConversation(sessionId);
 }
 
@@ -775,8 +793,75 @@ async function loadSessionSummary(sessionId: string): Promise<string> {
   return await loadRuntimeSessionSummary(sessionId);
 }
 
-async function saveSessionConversation(sessionId: string, messages: Array<{ role: string; content: string; ts?: string }>) {
+async function saveSessionConversation(sessionId: string, messages: SessionMessage[]) {
   await saveRuntimeSessionConversation(sessionId, messages);
+}
+
+function inferAttachmentKind(mimeType?: string | null): AttachmentRef['kind'] {
+  const normalized = String(mimeType || '').toLowerCase();
+  if (normalized.startsWith('image/')) return 'image';
+  if (normalized.startsWith('audio/')) return 'audio';
+  if (normalized === 'application/pdf') return 'pdf';
+  return 'file';
+}
+
+function normalizeAttachmentRow(row: any): AttachmentRef {
+  return {
+    id: String(row.id || ''),
+    kind: inferAttachmentKind(row.mime_type || row.kind),
+    name: String(row.original_name || row.name || 'attachment'),
+    mime_type: row.mime_type || null,
+    size_bytes: row.size_bytes != null ? Number(row.size_bytes) : null,
+    url: String(row.file_url || row.url || ''),
+    storage_key: row.storage_key || undefined,
+    created_at: row.created_at || undefined,
+  };
+}
+
+function normalizeIncomingAttachments(value: any): AttachmentRef[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => ({
+      id: String(item?.id || '').trim(),
+      kind: inferAttachmentKind(item?.mime_type || item?.kind),
+      name: String(item?.name || item?.original_name || 'attachment').trim(),
+      mime_type: item?.mime_type ? String(item.mime_type) : null,
+      size_bytes: Number.isFinite(Number(item?.size_bytes)) ? Number(item.size_bytes) : null,
+      url: String(item?.url || item?.file_url || '').trim(),
+      storage_key: item?.storage_key ? String(item.storage_key) : undefined,
+      created_at: item?.created_at ? String(item.created_at) : undefined,
+    }))
+    .filter((item) => item.id && item.url);
+}
+
+function buildAttachmentContext(attachments: AttachmentRef[]) {
+  if (!attachments.length) return '';
+  const lines = attachments.map((attachment, index) => {
+    const parts = [
+      `${index + 1}. ${attachment.name}`,
+      attachment.kind ? `type=${attachment.kind}` : '',
+      attachment.mime_type ? `mime=${attachment.mime_type}` : '',
+      attachment.size_bytes != null ? `size=${attachment.size_bytes} bytes` : '',
+      attachment.url ? `url=${attachment.url}` : '',
+    ].filter(Boolean);
+    return parts.join(' | ');
+  });
+  return [
+    'User attachments:',
+    ...lines,
+    'Use these URLs directly when a tool requires an asset URL or file reference.',
+  ].join('\n');
+}
+
+function getAttachmentsForScope(scopeType: string, scopeId: string) {
+  ensureAttachmentTables();
+  const rows = db.prepare(`
+    SELECT id, kind, original_name, mime_type, size_bytes, storage_key, file_url, created_at
+    FROM attachments
+    WHERE scope_type = ? AND scope_id = ?
+    ORDER BY created_at ASC, id ASC
+  `).all(scopeType, scopeId) as any[];
+  return rows.map(normalizeAttachmentRow);
 }
 
 async function saveSessionSummary(sessionId: string, summary: string) {
@@ -824,6 +909,7 @@ type VoiceSocketContext = {
   browserEchoCancellation?: boolean;
   browserAutoGainControl?: boolean;
   pushToTalk?: boolean;
+  attachments?: AttachmentRef[];
   sttSocket?: WebSocket | null;
   lastVoiceProgressAt?: number;
   lastVoiceProgressText?: string;
@@ -1165,6 +1251,69 @@ function getVoiceSession(sessionId: string) {
   return db.prepare('SELECT * FROM voice_sessions WHERE id = ?').get(sessionId) as VoiceSessionRow | undefined;
 }
 
+async function persistUploadedAttachment(params: {
+  file: any;
+  scopeType?: string | null;
+  scopeId?: string | null;
+  agentId?: number | null;
+  crewId?: number | null;
+  uploaderUserId?: string | null;
+  uploaderOrgId?: string | null;
+}) {
+  ensureAttachmentTables();
+  if (!isAttachmentStorageConfigured()) {
+    throw new Error('Attachment storage is not configured. Set GCS_ATTACHMENTS_BUCKET before uploading files.');
+  }
+
+  const file = params.file;
+  if (!file?.path) throw new Error('Uploaded file payload is missing a temporary path.');
+
+  const attachmentId = randomUUID();
+  try {
+    const fileBuffer = await readFile(file.path);
+    const stored = await uploadAttachmentBuffer({
+      attachmentId,
+      buffer: fileBuffer,
+      originalName: String(file.originalname || 'upload.bin'),
+      mimeType: file.mimetype ? String(file.mimetype) : undefined,
+    });
+    const kind = inferAttachmentKind(file.mimetype);
+    db.prepare(`
+      INSERT INTO attachments (
+        id, scope_type, scope_id, agent_id, crew_id, uploader_user_id, uploader_org_id,
+        kind, original_name, mime_type, size_bytes, storage_provider, storage_key, file_url, metadata
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      attachmentId,
+      params.scopeType || null,
+      params.scopeId || null,
+      params.agentId ?? null,
+      params.crewId ?? null,
+      params.uploaderUserId || null,
+      params.uploaderOrgId || null,
+      kind,
+      String(file.originalname || 'upload.bin'),
+      file.mimetype ? String(file.mimetype) : null,
+      Number.isFinite(Number(file.size)) ? Number(file.size) : null,
+      stored.provider,
+      stored.storageKey,
+      stored.fileUrl,
+      JSON.stringify({
+        field_name: file.fieldname || null,
+      }),
+    );
+
+    const row = db.prepare(`
+      SELECT id, kind, original_name, mime_type, size_bytes, storage_key, file_url, created_at
+      FROM attachments
+      WHERE id = ?
+    `).get(attachmentId) as any;
+    return normalizeAttachmentRow(row);
+  } finally {
+    await unlink(file.path).catch(() => undefined);
+  }
+}
+
 async function transcribeVoiceAudio(buffer: Buffer, mimeType: string, sttModelId: string) {
   const apiKey = getVoiceCredentialApiKey();
   if (!apiKey) throw new Error('ElevenLabs voice credential is not configured.');
@@ -1431,6 +1580,9 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
   current.isExecuting = true;
   current.lastCommittedTranscript = transcript;
   try {
+    const currentAttachments = getAttachmentsForScope('voice_session', current.sessionId);
+    current.attachments = currentAttachments;
+    const attachmentContext = buildAttachmentContext(currentAttachments);
     setVoiceTurnState(ws, current, 'thinking', { transcript });
     updateVoiceSession(current.sessionId, { status: 'processing', transcript });
     appendVoiceSessionEvent(current.sessionId, 'stt.final', { text: transcript });
@@ -1447,8 +1599,9 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
 
     if (current.targetType === 'crew') {
       const crewId = current.targetId;
+      const crewInput = [transcript, attachmentContext].filter(Boolean).join('\n\n');
       const info = db.prepare('INSERT INTO crew_executions (crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?)')
-        .run(crewId, 'pending', JSON.stringify([]), transcript || '', null);
+        .run(crewId, 'pending', JSON.stringify([]), crewInput || '', null);
       executionId = Number(info.lastInsertRowid);
       db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
         .run(executionId, 'thought', JSON.stringify({ agent: 'system', message: 'Voice-triggered crew run queued.' }));
@@ -1457,7 +1610,7 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
       await enqueueJob('run_crew', {
         crewId,
         executionId,
-        initialInput: transcript || '',
+        initialInput: crewInput || '',
         initiatedBy: 'voice_console',
       });
 
@@ -1611,6 +1764,7 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
 
         const userPrompt = [
           memoryContext ? `Conversation memory:\n${memoryContext}` : '',
+          attachmentContext ? `${attachmentContext}` : '',
           `User said:\n${transcript}`,
         ].filter(Boolean).join('\n\n');
 
@@ -1665,7 +1819,12 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
         if (!reply) reply = 'I did not generate a response.';
         const nextConversation = [
           ...sessionConversation,
-          { role: 'user', content: transcript, ts: new Date().toISOString() },
+          {
+            role: 'user',
+            content: transcript,
+            ts: new Date().toISOString(),
+            ...(currentAttachments.length ? { attachments: currentAttachments } : {}),
+          },
           { role: 'assistant', content: reply, ts: new Date().toISOString() },
         ].slice(-12);
         await saveSessionConversation(agentSession.id, nextConversation);
@@ -1691,6 +1850,8 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
             initiatedBy: 'voice_console',
             sessionId: agentSession.id,
             userId: agentSession.user_id ?? `voice_${current.sessionId}`,
+            userMessage: transcript,
+            attachments: currentAttachments,
           }
         );
         reply = String(result?.text || '').trim();
@@ -4801,6 +4962,42 @@ app.get('/api/agents/:id/sessions/:sessionId/messages', requireUser, async (req,
     res.json({ session_id: sessionId, messages });
 });
 
+app.post('/api/agents/:id/attachments', requireUser, async (req, res, next) => {
+  try {
+    const agentId = Number(req.params.id);
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleAgentId(scope, agentId);
+    const multer = (await import('multer')).default;
+    const upload = multer({
+      dest: '/tmp/',
+      limits: {
+        files: 6,
+        fileSize: 25 * 1024 * 1024,
+      },
+    });
+
+    upload.array('files', 6)(req, res, async (err) => {
+      if (err) return next(err);
+      try {
+        const files = Array.isArray((req as any).files) ? (req as any).files : [];
+        if (!files.length) return res.status(400).json({ error: 'No files uploaded' });
+        const attachments = await Promise.all(files.map((file: any) => persistUploadedAttachment({
+          file,
+          scopeType: 'agent_chat_upload',
+          agentId,
+          uploaderUserId: req.user?.id ?? null,
+          uploaderOrgId: req.user?.orgId ?? null,
+        })));
+        res.json({ attachments });
+      } catch (error) {
+        next(error);
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/executions/agents', async (req, res) => {
     try {
         const prisma = getPrisma();
@@ -4929,11 +5126,15 @@ app.post('/api/agents/:id/delegate', localRunLimiter, async (req, res) => {
     res.status(202).json({ parent_execution_id: parentExecutionId, status: 'running' });
 });
 
-app.post('/api/agents/:id/chat', localRunLimiter, async (req, res) => {
+app.post('/api/agents/:id/chat', requireUser, localRunLimiter, async (req, res) => {
     const agentId = Number(req.params.id);
-    const { message, session_id, user_id } = req.body || {};
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleAgentId(scope, agentId);
+    const { message, session_id, user_id, attachments } = req.body || {};
+    const normalizedAttachments = normalizeIncomingAttachments(attachments);
     const task = typeof message === 'string' ? message.trim() : '';
-    if (!task) return res.status(400).json({ error: 'message is required' });
+    const effectiveTask = task || (normalizedAttachments.length ? 'Please use the attached file(s) as part of this request.' : '');
+    if (!effectiveTask) return res.status(400).json({ error: 'message is required' });
 
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any;
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
@@ -4941,9 +5142,11 @@ app.post('/api/agents/:id/chat', localRunLimiter, async (req, res) => {
     try {
       const jobId = await enqueueJob('run_agent', {
         agentId: agent.id,
-        task,
+        task: effectiveTask,
         session_id,
         user_id,
+        userMessage: effectiveTask,
+        attachments: normalizedAttachments,
         initiatedBy: 'agent_chat_ui',
       });
       const result = await waitForJob(jobId, 120000);
@@ -4960,11 +5163,15 @@ app.post('/api/agents/:id/chat', localRunLimiter, async (req, res) => {
     }
 });
 
-app.post('/api/agents/:id/chat/stream', localRunLimiter, async (req, res) => {
+app.post('/api/agents/:id/chat/stream', requireUser, localRunLimiter, async (req, res) => {
     const agentId = Number(req.params.id);
-    const { message, session_id, user_id } = req.body || {};
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleAgentId(scope, agentId);
+    const { message, session_id, user_id, attachments } = req.body || {};
+    const normalizedAttachments = normalizeIncomingAttachments(attachments);
     const task = typeof message === 'string' ? message.trim() : '';
-    if (!task) return res.status(400).json({ error: 'message is required' });
+    const effectiveTask = task || (normalizedAttachments.length ? 'Please use the attached file(s) as part of this request.' : '');
+    if (!effectiveTask) return res.status(400).json({ error: 'message is required' });
 
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any;
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
@@ -4997,13 +5204,15 @@ app.post('/api/agents/:id/chat/stream', localRunLimiter, async (req, res) => {
 
       const result = await runAgent(
         agent,
-        { description: task, expected_output: 'The best possible answer.' },
+        { description: effectiveTask, expected_output: 'The best possible answer.' },
         '',
         (log) => sendSse('log', log),
         {
           initiatedBy: 'agent_chat_ui_stream',
           sessionId: session.id,
           userId: session.user_id ?? user_id,
+          userMessage: effectiveTask,
+          attachments: normalizedAttachments,
         }
       );
 
@@ -5302,14 +5511,74 @@ app.put('/api/voice/agents/:id/profile', requireUser, async (req, res) => {
   res.json(getAgentVoiceProfile(agentId));
 });
 
-app.get('/api/voice/sessions/:id', (req, res) => {
+app.post('/api/voice/sessions/:id/attachments', requireUser, async (req, res, next) => {
+  try {
+    const sessionId = String(req.params.id || '');
+    const session = getVoiceSession(sessionId);
+    if (!session) return res.status(404).json({ error: 'Voice session not found' });
+
+    const scope = await resolveOrchestratorAccessScope(req);
+    const sessionMeta = safeJsonParse(session.meta, {} as any);
+    const targetType = String(sessionMeta?.target_type || 'agent');
+    const targetId = Number(sessionMeta?.target_id || 0);
+    if (targetType === 'crew' && Number.isFinite(targetId) && targetId > 0) {
+      requireVisibleCrewId(scope, targetId);
+    } else {
+      requireVisibleAgentId(scope, Number(session.agent_id || 0));
+    }
+
+    const multer = (await import('multer')).default;
+    const upload = multer({
+      dest: '/tmp/',
+      limits: {
+        files: 6,
+        fileSize: 25 * 1024 * 1024,
+      },
+    });
+
+    upload.array('files', 6)(req, res, async (err) => {
+      if (err) return next(err);
+      try {
+        const files = Array.isArray((req as any).files) ? (req as any).files : [];
+        if (!files.length) return res.status(400).json({ error: 'No files uploaded' });
+        const attachments = await Promise.all(files.map((file: any) => persistUploadedAttachment({
+          file,
+          scopeType: 'voice_session',
+          scopeId: sessionId,
+          agentId: Number(session.agent_id || 0) || null,
+          crewId: targetType === 'crew' && Number.isFinite(targetId) && targetId > 0 ? targetId : null,
+          uploaderUserId: req.user?.id ?? null,
+          uploaderOrgId: req.user?.orgId ?? null,
+        })));
+        appendVoiceSessionEvent(sessionId, 'attachments.updated', { attachments });
+        res.json({ attachments });
+      } catch (error) {
+        next(error);
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/voice/sessions/:id', requireUser, async (req, res) => {
   const sessionId = String(req.params.id || '');
   const session = getVoiceSession(sessionId);
   if (!session) return res.status(404).json({ error: 'Voice session not found' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  const sessionMeta = safeJsonParse(session.meta, {} as any);
+  const targetType = String(sessionMeta?.target_type || 'agent');
+  const targetId = Number(sessionMeta?.target_id || 0);
+  if (targetType === 'crew' && Number.isFinite(targetId) && targetId > 0) {
+    requireVisibleCrewId(scope, targetId);
+  } else {
+    requireVisibleAgentId(scope, Number(session.agent_id || 0));
+  }
   const events = db.prepare('SELECT id, type, payload, created_at FROM voice_session_events WHERE session_id = ? ORDER BY id ASC').all(sessionId) as any[];
   res.json({
     ...session,
     meta: safeJsonParse(session.meta, {}),
+    attachments: getAttachmentsForScope('voice_session', sessionId),
     events: events.map((row) => ({
       id: row.id,
       type: row.type,
@@ -7423,7 +7692,7 @@ async function runDelegatedAgentExecution(options: {
 
 async function processJob(job: { id: number; type: string; payload: any }) {
   if (job.type === 'run_agent') {
-    const { agentId, task, session_id, user_id, initiatedBy, retryOfExecutionId, parentExecutionId, delegationTitle } = job.payload || {};
+    const { agentId, task, session_id, user_id, initiatedBy, retryOfExecutionId, parentExecutionId, delegationTitle, userMessage, attachments } = job.payload || {};
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any;
     if (!agent) throw new Error('Agent not found');
     const logs: any[] = [];
@@ -7444,6 +7713,8 @@ async function processJob(job: { id: number; type: string; payload: any }) {
           initiatedBy: initiatedBy || 'queued_agent_run',
           sessionId: session.id,
           userId: session.user_id ?? user_id,
+          userMessage: typeof userMessage === 'string' ? userMessage : String(task || ''),
+          attachments: normalizeIncomingAttachments(attachments),
         }, {
           retryOfExecutionId: retryOfExecutionId ?? null,
           parentExecutionId: null,
@@ -7538,7 +7809,13 @@ interface RunResult {
     };
 }
 
-type RunInvocation = { initiatedBy: string; sessionId?: string; userId?: string };
+type RunInvocation = {
+  initiatedBy: string;
+  sessionId?: string;
+  userId?: string;
+  userMessage?: string;
+  attachments?: AttachmentRef[];
+};
 type RunMeta = { retryOfExecutionId?: number | null; parentExecutionId?: number | null; executionKind?: string; delegationTitle?: string | null; delegationDepth?: number | null };
 type ToolExecutionContext = {
   agent?: any;
@@ -7616,7 +7893,9 @@ async function runAgent(
   const sessionConversation = sessionId ? await loadSessionConversation(sessionId) : [];
   const sessionSummary = sessionId ? await loadSessionSummary(sessionId) : '';
   const memoryContext = buildMemoryContext(sessionSummary, sessionConversation);
-  const effectiveContext = [context, memoryContext].filter(Boolean).join('\n\n');
+  const invocationAttachments = normalizeIncomingAttachments(invocation?.attachments);
+  const attachmentContext = buildAttachmentContext(invocationAttachments);
+  const effectiveContext = [context, memoryContext, attachmentContext].filter(Boolean).join('\n\n');
   const toolsEnabled = agent.tools_enabled !== 0 && agent.tools_enabled !== false;
   const systemPrompt = (agent.system_prompt && String(agent.system_prompt).trim())
     ? String(agent.system_prompt).trim()
@@ -8424,7 +8703,12 @@ async function runAgent(
         if (sessionId) {
           const nowIso = new Date().toISOString();
           const messages = Array.isArray(sessionConversation) ? [...sessionConversation] : [];
-          messages.push({ role: 'user', content: String(task.description), ts: nowIso });
+          messages.push({
+            role: 'user',
+            content: String(invocation?.userMessage || task.description),
+            ts: nowIso,
+            ...(invocationAttachments.length ? { attachments: invocationAttachments } : {}),
+          });
           const assistantText = finalOutput || runError?.message || 'Error';
           messages.push({ role: 'assistant', content: String(assistantText), ts: nowIso });
           const effectiveWindow = Math.max(2, Number(memoryWindow) || 12);
@@ -9446,6 +9730,7 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
       browserEchoCancellation: initialBrowserEchoCancellation,
       browserAutoGainControl: initialBrowserAutoGainControl,
       pushToTalk: initialPushToTalk,
+      attachments: [],
       sttSocket: null,
       lastVoiceProgressAt: 0,
       lastVoiceProgressText: '',
@@ -9483,6 +9768,7 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
         browserAutoGainControl: context.browserAutoGainControl,
         pushToTalk: context.pushToTalk,
       },
+      attachments: context.attachments || [],
     });
 
     ws.on('message', async (raw) => {

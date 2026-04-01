@@ -265,7 +265,10 @@ export async function loadSessionSummary(sessionId: string) {
   return row?.value ? String(row.value) : '';
 }
 
-export async function saveSessionConversation(sessionId: string, messages: Array<{ role: string; content: string; ts?: string }>) {
+export async function saveSessionConversation(
+  sessionId: string,
+  messages: Array<{ role: string; content: string; ts?: string; attachments?: Array<Record<string, any>> }>
+) {
   await getPrisma().orchestratorAgentSessionMemory.upsert({
     where: { sessionId_key: { sessionId, key: 'conversation' } },
     update: { value: JSON.stringify(messages), updatedAt: new Date() },

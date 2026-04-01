@@ -1213,4 +1213,46 @@ export function ensureVoiceTables() {
   }
 }
 
+export function ensureAttachmentTables() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS attachments (
+        id TEXT PRIMARY KEY,
+        scope_type TEXT,
+        scope_id TEXT,
+        agent_id INTEGER,
+        crew_id INTEGER,
+        uploader_user_id TEXT,
+        uploader_org_id TEXT,
+        kind TEXT DEFAULT 'file',
+        original_name TEXT NOT NULL,
+        mime_type TEXT,
+        size_bytes INTEGER,
+        storage_provider TEXT DEFAULT 'gcs',
+        storage_key TEXT NOT NULL,
+        file_url TEXT NOT NULL,
+        metadata TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+        FOREIGN KEY (crew_id) REFERENCES crews(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_attachments_scope_lookup
+        ON attachments(scope_type, scope_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_attachments_agent_lookup
+        ON attachments(agent_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_attachments_crew_lookup
+        ON attachments(crew_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_attachments_uploader_lookup
+        ON attachments(uploader_user_id, uploader_org_id, created_at);
+    `);
+  } catch (e) {
+    console.error('Attachment table migration error:', e);
+    throw e;
+  }
+}
+
 export default db;
