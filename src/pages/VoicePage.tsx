@@ -93,10 +93,103 @@ export default function VoicePage() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const mediaSourceRef = useRef<MediaSource | null>(null);
+  const sourceBufferRef = useRef<SourceBuffer | null>(null);
+  const audioQueueRef = useRef<Uint8Array[]>([]);
+  const audioObjectUrlRef = useRef<string>('');
+  const fallbackAudioChunksRef = useRef<string[]>([]);
+  const fallbackMimeTypeRef = useRef<string>('audio/mpeg');
+  const pendingAudioEndRef = useRef(false);
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+
+  const resetAudioStream = () => {
+    audioQueueRef.current = [];
+    fallbackAudioChunksRef.current = [];
+    pendingAudioEndRef.current = false;
+    sourceBufferRef.current = null;
+    mediaSourceRef.current = null;
+    if (audioObjectUrlRef.current) {
+      URL.revokeObjectURL(audioObjectUrlRef.current);
+      audioObjectUrlRef.current = '';
+    }
+  };
+
+  const flushAudioQueue = () => {
+    const sourceBuffer = sourceBufferRef.current;
+    if (!sourceBuffer || sourceBuffer.updating || !audioQueueRef.current.length) return;
+    const chunk = audioQueueRef.current.shift();
+    if (!chunk) return;
+    sourceBuffer.appendBuffer(chunk);
+  };
+
+  const maybeEndAudioStream = () => {
+    const mediaSource = mediaSourceRef.current;
+    const sourceBuffer = sourceBufferRef.current;
+    if (!pendingAudioEndRef.current || !mediaSource || !sourceBuffer) return;
+    if (sourceBuffer.updating || audioQueueRef.current.length) return;
+    if (mediaSource.readyState === 'open') {
+      try {
+        mediaSource.endOfStream();
+      } catch {}
+    }
+    pendingAudioEndRef.current = false;
+  };
+
+  const startIncomingAudioStream = (mimeType: string) => {
+    resetAudioStream();
+    fallbackMimeTypeRef.current = mimeType || 'audio/mpeg';
+    if (typeof window === 'undefined' || typeof MediaSource === 'undefined' || !audioRef.current) {
+      return;
+    }
+    if (!MediaSource.isTypeSupported(fallbackMimeTypeRef.current)) {
+      return;
+    }
+    const mediaSource = new MediaSource();
+    mediaSourceRef.current = mediaSource;
+    audioObjectUrlRef.current = URL.createObjectURL(mediaSource);
+    audioRef.current.src = audioObjectUrlRef.current;
+    mediaSource.addEventListener('sourceopen', () => {
+      try {
+        if (!mediaSourceRef.current) return;
+        const sourceBuffer = mediaSource.addSourceBuffer(fallbackMimeTypeRef.current);
+        sourceBuffer.mode = 'sequence';
+        sourceBufferRef.current = sourceBuffer;
+        sourceBuffer.addEventListener('updateend', () => {
+          flushAudioQueue();
+          maybeEndAudioStream();
+        });
+        flushAudioQueue();
+        audioRef.current?.play().catch(() => undefined);
+      } catch {
+        sourceBufferRef.current = null;
+      }
+    }, { once: true });
+  };
+
+  const appendIncomingAudioChunk = (base64: string) => {
+    if (!base64) return;
+    if (sourceBufferRef.current && typeof window !== 'undefined') {
+      const binary = window.atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      audioQueueRef.current.push(bytes);
+      flushAudioQueue();
+      return;
+    }
+    fallbackAudioChunksRef.current.push(base64);
+  };
+
+  const finishIncomingAudioStream = () => {
+    if (!sourceBufferRef.current && fallbackAudioChunksRef.current.length) {
+      setLastAudioSrc(`data:${fallbackMimeTypeRef.current};base64,${fallbackAudioChunksRef.current.join('')}`);
+      return;
+    }
+    pendingAudioEndRef.current = true;
+    maybeEndAudioStream();
+  };
 
   const loadTargets = async () => {
     try {
@@ -309,6 +402,24 @@ export default function VoicePage() {
             ...prev,
           ].slice(0, 20));
         }
+        if (message.type === 'tts.start') {
+          startIncomingAudioStream(String(message.mimeType || 'audio/mpeg'));
+        }
+        if (message.type === 'tts.chunk' && message.audio) {
+          appendIncomingAudioChunk(String(message.audio || ''));
+        }
+        if (message.type === 'tts.complete') {
+          finishIncomingAudioStream();
+        }
+        if (message.type === 'voice.progress.audio.start') {
+          startIncomingAudioStream(String(message.mimeType || 'audio/mpeg'));
+        }
+        if (message.type === 'voice.progress.audio.chunk' && message.audio) {
+          appendIncomingAudioChunk(String(message.audio || ''));
+        }
+        if (message.type === 'voice.progress.audio.complete') {
+          finishIncomingAudioStream();
+        }
         if (message.type === 'tts.audio' && message.audio) {
           const mimeType = String(message.mimeType || 'audio/mpeg');
           setLastAudioSrc(`data:${mimeType};base64,${message.audio}`);
@@ -332,6 +443,7 @@ export default function VoicePage() {
       sourceRef.current?.disconnect();
       audioContextRef.current?.close().catch(() => undefined);
       audioContextRef.current = null;
+      resetAudioStream();
       setStatusNote('');
       pushEvent('socket.closed', {});
     };
@@ -343,6 +455,7 @@ export default function VoicePage() {
     wsRef.current = null;
     setIsConnected(false);
     setIsRecording(false);
+    resetAudioStream();
   };
 
   const sendText = () => {
@@ -524,6 +637,10 @@ export default function VoicePage() {
     if (!lastAudioSrc || !audioRef.current) return;
     audioRef.current.play().catch(() => undefined);
   }, [lastAudioSrc]);
+
+  useEffect(() => () => {
+    resetAudioStream();
+  }, []);
 
   return (
     <div className="space-y-6">

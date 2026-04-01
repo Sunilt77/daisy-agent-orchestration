@@ -1132,10 +1132,16 @@ async function transcribeVoiceAudio(buffer: Buffer, mimeType: string, sttModelId
   return String(data?.text || data?.transcript || '').trim();
 }
 
-async function synthesizeVoiceAudio(text: string, voiceId: string, ttsModelId: string, outputFormat: string) {
+async function streamSynthesizeVoiceAudio(
+  text: string,
+  voiceId: string,
+  ttsModelId: string,
+  outputFormat: string,
+  onChunk: (chunk: Buffer) => void | Promise<void>,
+) {
   const apiKey = getVoiceCredentialApiKey();
   if (!apiKey) throw new Error('ElevenLabs voice credential is not configured.');
-  const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`, {
+  const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream`, {
     method: 'POST',
     headers: {
       'xi-api-key': apiKey,
@@ -1152,8 +1158,22 @@ async function synthesizeVoiceAudio(text: string, voiceId: string, ttsModelId: s
     const detail = await res.text().catch(() => '');
     throw new Error(`ElevenLabs TTS failed (${res.status}): ${detail || 'Unknown error'}`);
   }
-  const arrayBuffer = await res.arrayBuffer();
-  return Buffer.from(arrayBuffer);
+  if (!res.body) throw new Error('ElevenLabs TTS returned no response body');
+  const reader = res.body.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value?.length) continue;
+    await onChunk(Buffer.from(value));
+  }
+}
+
+async function synthesizeVoiceAudio(text: string, voiceId: string, ttsModelId: string, outputFormat: string) {
+  const chunks: Buffer[] = [];
+  await streamSynthesizeVoiceAudio(text, voiceId, ttsModelId, outputFormat, (chunk) => {
+    chunks.push(chunk);
+  });
+  return Buffer.concat(chunks);
 }
 
 function sendVoiceSocketEvent(ws: WebSocket, type: string, payload: any = {}) {
@@ -1221,19 +1241,35 @@ async function emitVoiceProgress(ws: WebSocket, ctx: VoiceSocketContext, summary
   sendVoiceSocketEvent(ws, 'voice.progress', { sessionId: ctx.sessionId, text, ...(extra || {}) });
 
   if (!ctx.autoTts) return;
-  synthesizeVoiceAudio(text, ctx.voiceId, ctx.ttsModelId, ctx.outputFormat)
-    .then((audio) => {
+  sendVoiceSocketEvent(ws, 'voice.progress.audio.start', {
+    sessionId: ctx.sessionId,
+    text,
+    mimeType: ctx.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
+    outputFormat: ctx.outputFormat,
+  });
+  let totalBytes = 0;
+  streamSynthesizeVoiceAudio(text, ctx.voiceId, ctx.ttsModelId, ctx.outputFormat, (chunk) => {
+    totalBytes += chunk.length;
+    sendVoiceSocketEvent(ws, 'voice.progress.audio.chunk', {
+      sessionId: ctx.sessionId,
+      text,
+      audio: chunk.toString('base64'),
+      mimeType: ctx.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
+      outputFormat: ctx.outputFormat,
+    });
+  })
+    .then(() => {
       appendVoiceSessionEvent(ctx.sessionId, 'voice.progress.audio', {
         text,
-        bytes: audio.length,
+        bytes: totalBytes,
         output_format: ctx.outputFormat,
       });
-      sendVoiceSocketEvent(ws, 'voice.progress.audio', {
+      sendVoiceSocketEvent(ws, 'voice.progress.audio.complete', {
         sessionId: ctx.sessionId,
         text,
-        audio: audio.toString('base64'),
         mimeType: ctx.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
         outputFormat: ctx.outputFormat,
+        bytes: totalBytes,
       });
     })
     .catch((error) => {
@@ -1350,16 +1386,30 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
 
     if (reply && current.autoTts) {
       sendVoiceSocketEvent(ws, 'tts.processing', { sessionId: current.sessionId });
-      const audio = await synthesizeVoiceAudio(reply, current.voiceId, current.ttsModelId, current.outputFormat);
-      appendVoiceSessionEvent(current.sessionId, 'tts.audio', {
-        bytes: audio.length,
-        output_format: current.outputFormat,
-      });
-      sendVoiceSocketEvent(ws, 'tts.audio', {
+      sendVoiceSocketEvent(ws, 'tts.start', {
         sessionId: current.sessionId,
-        audio: audio.toString('base64'),
         mimeType: current.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
         outputFormat: current.outputFormat,
+      });
+      let totalBytes = 0;
+      await streamSynthesizeVoiceAudio(reply, current.voiceId, current.ttsModelId, current.outputFormat, (chunk) => {
+        totalBytes += chunk.length;
+        sendVoiceSocketEvent(ws, 'tts.chunk', {
+          sessionId: current.sessionId,
+          audio: chunk.toString('base64'),
+          mimeType: current.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
+          outputFormat: current.outputFormat,
+        });
+      });
+      appendVoiceSessionEvent(current.sessionId, 'tts.audio', {
+        bytes: totalBytes,
+        output_format: current.outputFormat,
+      });
+      sendVoiceSocketEvent(ws, 'tts.complete', {
+        sessionId: current.sessionId,
+        mimeType: current.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
+        outputFormat: current.outputFormat,
+        bytes: totalBytes,
       });
     }
 
