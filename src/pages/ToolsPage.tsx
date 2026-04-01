@@ -119,6 +119,20 @@ interface McpInputSchema {
   additionalProperties?: boolean;
 }
 
+interface ResourceAccessPayload {
+  owner?: {
+    owner_user_id?: string;
+    owner_org_id?: string | null;
+    visibility?: 'private' | 'org';
+  } | null;
+  shares?: Array<{
+    id: number;
+    shared_with_user_id?: string | null;
+    shared_with_org_id?: string | null;
+    created_at?: string;
+  }>;
+}
+
 type HttpArgType = 'string' | 'number' | 'boolean' | 'object' | 'array';
 
 function tokenizeCurl(input: string): string[] {
@@ -450,6 +464,13 @@ export default function ToolsPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [saveNotice, setSaveNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [stateReady, setStateReady] = useState(false);
+  const [resourceAccess, setResourceAccess] = useState<ResourceAccessPayload | null>(null);
+  const [resourceAccessLoading, setResourceAccessLoading] = useState(false);
+  const [resourceAccessSaving, setResourceAccessSaving] = useState(false);
+  const [resourceAccessError, setResourceAccessError] = useState<string | null>(null);
+  const [resourceVisibility, setResourceVisibility] = useState<'private' | 'org'>('private');
+  const [sharedUserIdsText, setSharedUserIdsText] = useState('');
+  const [sharedOrgIdsText, setSharedOrgIdsText] = useState('');
 
   useEffect(() => {
     const persisted = loadPersisted<any>(TOOLS_UI_KEY, {});
@@ -636,6 +657,43 @@ export default function ToolsPage() {
     if (typeof selectedToolId !== 'number') return null;
     return tools.find((t) => t.id === selectedToolId) || null;
   }, [tools, selectedToolId]);
+
+  useEffect(() => {
+    const toolId = typeof selectedToolId === 'number' ? selectedToolId : null;
+    if (!toolId) {
+      setResourceAccess(null);
+      setResourceAccessError(null);
+      setResourceVisibility('private');
+      setSharedUserIdsText('');
+      setSharedOrgIdsText('');
+      return;
+    }
+    let canceled = false;
+    const loadResourceAccess = async () => {
+      setResourceAccessLoading(true);
+      setResourceAccessError(null);
+      try {
+        const res = await fetch(`/api/resource-access/tool/${toolId}`);
+        const data = await safeJson(res) as ResourceAccessPayload | { error?: string } | null;
+        if (!res.ok) throw new Error((data as any)?.error || 'Failed to load access');
+        if (canceled) return;
+        const next = (data || {}) as ResourceAccessPayload;
+        setResourceAccess(next);
+        setResourceVisibility(next.owner?.visibility === 'org' ? 'org' : 'private');
+        setSharedUserIdsText((next.shares || []).map((row) => String(row.shared_with_user_id || '').trim()).filter(Boolean).join(', '));
+        setSharedOrgIdsText((next.shares || []).map((row) => String(row.shared_with_org_id || '').trim()).filter(Boolean).join(', '));
+      } catch (e: any) {
+        if (!canceled) {
+          setResourceAccess(null);
+          setResourceAccessError(e.message || 'Failed to load access');
+        }
+      } finally {
+        if (!canceled) setResourceAccessLoading(false);
+      }
+    };
+    void loadResourceAccess();
+    return () => { canceled = true; };
+  }, [selectedToolId]);
 
   useEffect(() => {
     const toolId = typeof selectedToolId === 'number' ? selectedToolId : null;
@@ -1170,6 +1228,36 @@ export default function ToolsPage() {
     }
   };
 
+  const saveResourceAccess = async () => {
+    const toolId = typeof selectedToolId === 'number' ? selectedToolId : null;
+    if (!toolId) return;
+    setResourceAccessSaving(true);
+    setResourceAccessError(null);
+    try {
+      const shared_user_ids = sharedUserIdsText.split(',').map((value) => value.trim()).filter(Boolean);
+      const shared_org_ids = sharedOrgIdsText.split(',').map((value) => value.trim()).filter(Boolean);
+      const res = await fetch(`/api/resource-access/tool/${toolId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          visibility: resourceVisibility,
+          shared_user_ids,
+          shared_org_ids,
+        }),
+      });
+      const data = await safeJson(res) as ResourceAccessPayload | { error?: string } | null;
+      if (!res.ok) throw new Error((data as any)?.error || 'Failed to save access');
+      const next = (data || {}) as ResourceAccessPayload;
+      setResourceAccess(next);
+      setSaveNotice({ type: 'success', message: 'Tool access updated.' });
+      setTimeout(() => setSaveNotice(null), 2500);
+    } catch (e: any) {
+      setResourceAccessError(e.message || 'Failed to save access');
+    } finally {
+      setResourceAccessSaving(false);
+    }
+  };
+
   const importMcpConfig = async () => {
     setMcpImportError(null);
     setMcpImportSuccess(null);
@@ -1578,6 +1666,72 @@ export default function ToolsPage() {
                                         Linked resources that would be affected
                                       </div>
                                     </div>
+                                  </div>
+                                </div>
+                              )}
+
+                              {selectedToolId !== 'new' && selectedTool && (
+                                <div className="border border-slate-200 rounded-xl p-4 bg-white space-y-4">
+                                  <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                      <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Access</div>
+                                      <div className="text-sm text-slate-600 mt-1">Control who can view and manage this tool.</div>
+                                    </div>
+                                    {resourceAccessLoading && <div className="text-xs text-slate-500">Loading…</div>}
+                                  </div>
+                                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                      <div className="text-[11px] text-slate-500">Owner User</div>
+                                      <div className="text-sm font-semibold text-slate-900 mt-1">{resourceAccess?.owner?.owner_user_id || 'Unknown'}</div>
+                                    </div>
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                      <div className="text-[11px] text-slate-500">Owner Org</div>
+                                      <div className="text-sm font-semibold text-slate-900 mt-1">{resourceAccess?.owner?.owner_org_id || 'None'}</div>
+                                    </div>
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                      <div className="text-[11px] text-slate-500">Visibility</div>
+                                      <select
+                                        value={resourceVisibility}
+                                        onChange={(e) => setResourceVisibility(e.target.value === 'org' ? 'org' : 'private')}
+                                        className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                                      >
+                                        <option value="private">Private</option>
+                                        <option value="org">Organization</option>
+                                      </select>
+                                    </div>
+                                  </div>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div>
+                                      <label className="block text-sm font-medium text-slate-700 mb-1">Shared User IDs</label>
+                                      <textarea
+                                        value={sharedUserIdsText}
+                                        onChange={(e) => setSharedUserIdsText(e.target.value)}
+                                        placeholder="user_123, user_456"
+                                        className="w-full min-h-[84px] rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                                      />
+                                      <div className="text-[11px] text-slate-500 mt-1">Comma-separated user ids with direct access.</div>
+                                    </div>
+                                    <div>
+                                      <label className="block text-sm font-medium text-slate-700 mb-1">Shared Org IDs</label>
+                                      <textarea
+                                        value={sharedOrgIdsText}
+                                        onChange={(e) => setSharedOrgIdsText(e.target.value)}
+                                        placeholder="org_123, org_456"
+                                        className="w-full min-h-[84px] rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                                      />
+                                      <div className="text-[11px] text-slate-500 mt-1">Comma-separated org ids that should see this tool.</div>
+                                    </div>
+                                  </div>
+                                  {resourceAccessError && <div className="text-sm text-red-600">{resourceAccessError}</div>}
+                                  <div className="flex justify-end">
+                                    <button
+                                      type="button"
+                                      onClick={() => void saveResourceAccess()}
+                                      disabled={resourceAccessSaving || resourceAccessLoading}
+                                      className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-60"
+                                    >
+                                      {resourceAccessSaving ? 'Saving Access…' : 'Save Access'}
+                                    </button>
                                   </div>
                                 </div>
                               )}

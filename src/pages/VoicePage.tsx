@@ -35,6 +35,20 @@ type VoiceConfigPreset = {
   notes?: string;
 };
 
+type ResourceAccessPayload = {
+  owner?: {
+    owner_user_id?: string;
+    owner_org_id?: string | null;
+    visibility?: 'private' | 'org';
+  } | null;
+  shares?: Array<{
+    id: number;
+    shared_with_user_id?: string | null;
+    shared_with_org_id?: string | null;
+    created_at?: string;
+  }>;
+};
+
 function toBase64(buffer: ArrayBuffer) {
   let binary = '';
   const bytes = new Uint8Array(buffer);
@@ -69,6 +83,13 @@ export default function VoicePage() {
   const [lastAudioSrc, setLastAudioSrc] = useState('');
   const [error, setError] = useState('');
   const [statusNote, setStatusNote] = useState('');
+  const [presetAccess, setPresetAccess] = useState<ResourceAccessPayload | null>(null);
+  const [presetAccessLoading, setPresetAccessLoading] = useState(false);
+  const [presetAccessSaving, setPresetAccessSaving] = useState(false);
+  const [presetAccessError, setPresetAccessError] = useState('');
+  const [presetVisibility, setPresetVisibility] = useState<'private' | 'org'>('private');
+  const [presetSharedUserIdsText, setPresetSharedUserIdsText] = useState('');
+  const [presetSharedOrgIdsText, setPresetSharedOrgIdsText] = useState('');
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -202,6 +223,42 @@ export default function VoicePage() {
     setLanguageCode(String(preset.language_code || 'en'));
     setAutoTts(Boolean(preset.auto_tts ?? true));
   };
+
+  useEffect(() => {
+    if (!selectedVoiceConfigId) {
+      setPresetAccess(null);
+      setPresetAccessError('');
+      setPresetVisibility('private');
+      setPresetSharedUserIdsText('');
+      setPresetSharedOrgIdsText('');
+      return;
+    }
+    let canceled = false;
+    const loadPresetAccess = async () => {
+      setPresetAccessLoading(true);
+      setPresetAccessError('');
+      try {
+        const res = await fetch(`/api/resource-access/voice_config/${selectedVoiceConfigId}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(String(data?.error || 'Failed to load preset access'));
+        if (canceled) return;
+        const payload = data as ResourceAccessPayload;
+        setPresetAccess(payload);
+        setPresetVisibility(payload.owner?.visibility === 'org' ? 'org' : 'private');
+        setPresetSharedUserIdsText((payload.shares || []).map((row) => String(row.shared_with_user_id || '').trim()).filter(Boolean).join(', '));
+        setPresetSharedOrgIdsText((payload.shares || []).map((row) => String(row.shared_with_org_id || '').trim()).filter(Boolean).join(', '));
+      } catch (e: any) {
+        if (!canceled) {
+          setPresetAccess(null);
+          setPresetAccessError(e.message || 'Failed to load preset access');
+        }
+      } finally {
+        if (!canceled) setPresetAccessLoading(false);
+      }
+    };
+    void loadPresetAccess();
+    return () => { canceled = true; };
+  }, [selectedVoiceConfigId]);
 
   const pushEvent = (type: string, payload: any) => {
     setEvents((prev) => [
@@ -378,6 +435,32 @@ export default function VoicePage() {
     await fetch(`/api/voice/configs/${selectedVoiceConfigId}`, { method: 'DELETE' });
     setSelectedVoiceConfigId('');
     await loadVoiceConfigs();
+  };
+
+  const saveSelectedPresetAccess = async () => {
+    if (!selectedVoiceConfigId) return;
+    setPresetAccessSaving(true);
+    setPresetAccessError('');
+    try {
+      const res = await fetch(`/api/resource-access/voice_config/${selectedVoiceConfigId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          visibility: presetVisibility,
+          shared_user_ids: presetSharedUserIdsText.split(',').map((value) => value.trim()).filter(Boolean),
+          shared_org_ids: presetSharedOrgIdsText.split(',').map((value) => value.trim()).filter(Boolean),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(String(data?.error || 'Failed to save preset access'));
+      const payload = data as ResourceAccessPayload;
+      setPresetAccess(payload);
+      setStatusNote('Voice preset access updated.');
+    } catch (e: any) {
+      setPresetAccessError(e.message || 'Failed to save preset access');
+    } finally {
+      setPresetAccessSaving(false);
+    }
   };
 
   const startRecording = async () => {
@@ -562,6 +645,69 @@ export default function VoicePage() {
                 Delete Preset
               </button>
             </div>
+
+            {selectedVoiceConfigId ? (
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">Preset Access</div>
+                    <div className="text-xs text-slate-500 mt-1">Manage who can see and reuse this voice preset.</div>
+                  </div>
+                  {presetAccessLoading ? <div className="text-xs text-slate-500">Loading…</div> : null}
+                </div>
+                <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                    <div className="text-[11px] text-slate-500">Owner User</div>
+                    <div className="text-sm font-semibold text-slate-900 mt-1">{presetAccess?.owner?.owner_user_id || 'Unknown'}</div>
+                  </div>
+                  <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                    <div className="text-[11px] text-slate-500">Owner Org</div>
+                    <div className="text-sm font-semibold text-slate-900 mt-1">{presetAccess?.owner?.owner_org_id || 'None'}</div>
+                  </div>
+                  <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                    <div className="text-[11px] text-slate-500">Visibility</div>
+                    <select
+                      value={presetVisibility}
+                      onChange={(e) => setPresetVisibility(e.target.value === 'org' ? 'org' : 'private')}
+                      className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+                    >
+                      <option value="private">Private</option>
+                      <option value="org">Organization</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Shared User IDs</label>
+                    <textarea
+                      value={presetSharedUserIdsText}
+                      onChange={(e) => setPresetSharedUserIdsText(e.target.value)}
+                      placeholder="user_123, user_456"
+                      className="min-h-[88px] w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Shared Org IDs</label>
+                    <textarea
+                      value={presetSharedOrgIdsText}
+                      onChange={(e) => setPresetSharedOrgIdsText(e.target.value)}
+                      placeholder="org_123, org_456"
+                      className="min-h-[88px] w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </div>
+                </div>
+                {presetAccessError ? <div className="mt-3 text-sm text-red-600">{presetAccessError}</div> : null}
+                <div className="mt-4 flex justify-end">
+                  <button
+                    onClick={saveSelectedPresetAccess}
+                    disabled={presetAccessLoading || presetAccessSaving}
+                    className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40"
+                  >
+                    {presetAccessSaving ? 'Saving Access…' : 'Save Preset Access'}
+                  </button>
+                </div>
+              </div>
+            ) : null}
 
             <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
               <div className="font-semibold text-slate-900">{selectedTarget?.name || `No ${targetType} selected`}</div>

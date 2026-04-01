@@ -15,21 +15,21 @@ spec:
           env:
             - name: NODE_ENV
               value: "production"
-            - name: SQLITE_PATH
-              value: "/tmp/orchestrator/orchestrator.db"
-            - name: GCS_SQLITE_BUCKET
-              value: "REPLACE_SQLITE_BUCKET"
-            - name: GCS_SQLITE_PREFIX
-              value: "state"
-            - name: GCS_SYNC_INTERVAL_MS
-              value: "30000"
-            - name: REDIS_URL
-              value: "redis://REDIS_HOST:6379"
-            - name: DATABASE_URL
-              value: "REPLACE_DATABASE_URL"
-            - name: APP_SECRET
-              value: "REPLACE_APP_SECRET"
-            - name: GEMINI_API_KEY
-              value: "REPLACE_GEMINI_API_KEY"
+            # - name: SQLITE_PATH
+            #   value: "/tmp/orchestrator/orchestrator.db"
+            # - name: GCS_SQLITE_BUCKET
+            #   value: "REPLACE_SQLITE_BUCKET"
+            # - name: GCS_SQLITE_PREFIX
+            #   value: "state"
+            # - name: GCS_SYNC_INTERVAL_MS
+            #   value: "30000"
+            # - name: REDIS_URL
+            #   value: "redis://REDIS_HOST:6379"
+            # - name: DATABASE_URL
+            #   value: "REPLACE_DATABASE_URL"
+            # - name: APP_SECRET
+            #   value: "REPLACE_APP_SECRET"
+            # - name: GEMINI_API_KEY
+            #   value: "REPLACE_GEMINI_API_KEY"
       containerConcurrency: 80
       timeoutSeconds: 300

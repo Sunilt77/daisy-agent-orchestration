@@ -119,6 +119,29 @@ interface LocalMcpRuntime {
   }>;
 }
 
+interface ResourceAccessPayload {
+  owner?: {
+    owner_user_id?: string;
+    owner_org_id?: string | null;
+    visibility?: 'private' | 'org';
+  } | null;
+  shares?: Array<{
+    id: number;
+    shared_with_user_id?: string | null;
+    shared_with_org_id?: string | null;
+    created_at?: string;
+  }>;
+}
+
+async function safeJson(res: Response) {
+  try {
+    const text = await res.text();
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+
 function slugify(input: string) {
   return input.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_').replace(/_+/g, '_');
 }
@@ -223,6 +246,16 @@ export default function McpPage() {
   const [bundleTestError, setBundleTestError] = useState<string>('');
   const [bundleTestResult, setBundleTestResult] = useState<string>('');
   const [bundleTestRunning, setBundleTestRunning] = useState(false);
+  const [bundleAccessState, setBundleAccessState] = useState<null | {
+    bundle: McpBundle;
+    data: ResourceAccessPayload | null;
+    loading: boolean;
+    saving: boolean;
+    error: string;
+    visibility: 'private' | 'org';
+    sharedUserIdsText: string;
+    sharedOrgIdsText: string;
+  }>(null);
 
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
   const streamableUrl = `${origin}/mcp`;
@@ -255,6 +288,73 @@ export default function McpPage() {
       setSelectedIds([]);
     } catch (e: any) {
       setLoadError(e.message || 'Failed to load MCP data');
+    }
+  };
+
+  const openBundleAccess = async (bundle: McpBundle) => {
+    setBundleAccessState({
+      bundle,
+      data: null,
+      loading: true,
+      saving: false,
+      error: '',
+      visibility: 'private',
+      sharedUserIdsText: '',
+      sharedOrgIdsText: '',
+    });
+    try {
+      const res = await fetch(`/api/resource-access/mcp_bundle/${bundle.id}`);
+      const data = await safeJson(res) as ResourceAccessPayload | { error?: string } | null;
+      if (!res.ok) throw new Error((data as any)?.error || 'Failed to load access');
+      const payload = (data || {}) as ResourceAccessPayload;
+      setBundleAccessState({
+        bundle,
+        data: payload,
+        loading: false,
+        saving: false,
+        error: '',
+        visibility: payload.owner?.visibility === 'org' ? 'org' : 'private',
+        sharedUserIdsText: (payload.shares || []).map((row) => String(row.shared_with_user_id || '').trim()).filter(Boolean).join(', '),
+        sharedOrgIdsText: (payload.shares || []).map((row) => String(row.shared_with_org_id || '').trim()).filter(Boolean).join(', '),
+      });
+    } catch (e: any) {
+      setBundleAccessState({
+        bundle,
+        data: null,
+        loading: false,
+        saving: false,
+        error: e.message || 'Failed to load access',
+        visibility: 'private',
+        sharedUserIdsText: '',
+        sharedOrgIdsText: '',
+      });
+    }
+  };
+
+  const saveBundleAccess = async () => {
+    if (!bundleAccessState) return;
+    setBundleAccessState((prev) => prev ? { ...prev, saving: true, error: '' } : prev);
+    try {
+      const res = await fetch(`/api/resource-access/mcp_bundle/${bundleAccessState.bundle.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          visibility: bundleAccessState.visibility,
+          shared_user_ids: bundleAccessState.sharedUserIdsText.split(',').map((value) => value.trim()).filter(Boolean),
+          shared_org_ids: bundleAccessState.sharedOrgIdsText.split(',').map((value) => value.trim()).filter(Boolean),
+        }),
+      });
+      const data = await safeJson(res) as ResourceAccessPayload | { error?: string } | null;
+      if (!res.ok) throw new Error((data as any)?.error || 'Failed to save access');
+      const payload = (data || {}) as ResourceAccessPayload;
+      setBundleAccessState((prev) => prev ? {
+        ...prev,
+        data: payload,
+        saving: false,
+        error: '',
+      } : prev);
+    } catch (e: any) {
+      setBundleAccessState((prev) => prev ? { ...prev, saving: false, error: e.message || 'Failed to save access' } : prev);
     }
   };
 
@@ -875,6 +975,12 @@ export default function McpPage() {
                           {bundleTestLoading && bundleTestLoadingId === bundle.id ? 'Loading...' : 'Test Tools'}
                         </button>
                         <button
+                          onClick={() => void openBundleAccess(bundle)}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white text-slate-700 border border-slate-200"
+                        >
+                          Access
+                        </button>
+                        <button
                           onClick={() => toggleBundleExposure(bundle.id, !bundle.is_exposed)}
                           className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${bundle.is_exposed ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}
                         >
@@ -1315,6 +1421,75 @@ export default function McpPage() {
                   </>
                 );
               })()}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {bundleAccessState && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-white w-full max-w-2xl rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
+            <div className="p-5 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <div className="text-lg font-semibold text-slate-900">Bundle Access</div>
+                <div className="text-xs text-slate-500">{bundleAccessState.bundle.name}</div>
+              </div>
+              <button onClick={() => setBundleAccessState(null)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="text-[11px] text-slate-500">Owner User</div>
+                  <div className="text-sm font-semibold text-slate-900 mt-1">{bundleAccessState.data?.owner?.owner_user_id || 'Unknown'}</div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="text-[11px] text-slate-500">Owner Org</div>
+                  <div className="text-sm font-semibold text-slate-900 mt-1">{bundleAccessState.data?.owner?.owner_org_id || 'None'}</div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="text-[11px] text-slate-500">Visibility</div>
+                  <select
+                    value={bundleAccessState.visibility}
+                    onChange={(e) => setBundleAccessState((prev) => prev ? { ...prev, visibility: e.target.value === 'org' ? 'org' : 'private' } : prev)}
+                    className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="private">Private</option>
+                    <option value="org">Organization</option>
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Shared User IDs</label>
+                  <textarea
+                    value={bundleAccessState.sharedUserIdsText}
+                    onChange={(e) => setBundleAccessState((prev) => prev ? { ...prev, sharedUserIdsText: e.target.value } : prev)}
+                    placeholder="user_123, user_456"
+                    className="w-full min-h-[84px] rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Shared Org IDs</label>
+                  <textarea
+                    value={bundleAccessState.sharedOrgIdsText}
+                    onChange={(e) => setBundleAccessState((prev) => prev ? { ...prev, sharedOrgIdsText: e.target.value } : prev)}
+                    placeholder="org_123, org_456"
+                    className="w-full min-h-[84px] rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
+              {bundleAccessState.loading && <div className="text-sm text-slate-500">Loading access…</div>}
+              {bundleAccessState.error && <div className="text-sm text-red-600">{bundleAccessState.error}</div>}
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setBundleAccessState(null)} className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50">Close</button>
+                <button
+                  onClick={() => void saveBundleAccess()}
+                  disabled={bundleAccessState.loading || bundleAccessState.saving}
+                  className="px-4 py-2 rounded-lg bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-60"
+                >
+                  {bundleAccessState.saving ? 'Saving…' : 'Save Access'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
