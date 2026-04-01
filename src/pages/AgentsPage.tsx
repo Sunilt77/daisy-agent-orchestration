@@ -2036,6 +2036,9 @@ type AgentOptionalConfig =
                   <p className="mt-2 text-sm leading-6 text-slate-600">
                     Name, role, goal, provider, and project are the core. Use backstory only when it improves judgment or tone. Supervisor agents should stay operational and delegation-focused, not fictional.
                   </p>
+                  <p className="mt-2 text-xs uppercase tracking-[0.18em] text-slate-400">
+                    Keep the primary setup visible. Open voice, MCP, and exposure only when that agent actually needs them.
+                  </p>
                 </div>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 lg:w-[480px]">
                   {[
@@ -2484,156 +2487,132 @@ type AgentOptionalConfig =
             )}
 
             {showAgentConfig('voice') && (
-            <div className="border border-emerald-100 rounded-xl p-4 bg-emerald-50/40 space-y-3">
-              <div className="flex items-center justify-between">
-                <label className="flex items-center gap-2 text-sm font-medium text-emerald-950">
-                  <AudioLines size={16} className="text-emerald-600" />
-                  Voice Runtime
+            <details className="border border-emerald-100 rounded-xl p-4 bg-emerald-50/40 space-y-3 group">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                <div>
+                  <label className="flex items-center gap-2 text-sm font-medium text-emerald-950">
+                    <AudioLines size={16} className="text-emerald-600" />
+                    Voice Runtime
+                  </label>
+                  <p className="text-xs text-emerald-900/75 mt-1">
+                    Save ElevenLabs voice defaults on the agent so browser voice sessions, websocket consumers, and test consoles all inherit the same runtime profile.
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Link to="/voice" className="text-xs text-emerald-700 hover:text-emerald-900 font-medium">
+                    Open Voice Console
+                  </Link>
+                  <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700 group-open:bg-emerald-700 group-open:text-white">
+                    Expand
+                  </span>
+                </div>
+              </summary>
+              <div className="pt-3 space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 items-end">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Voice Config Preset</label>
+                    <select
+                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white"
+                      value={formData.voice_preset_id}
+                      onChange={e => applyVoicePreset(e.target.value)}
+                    >
+                      <option value="">Custom runtime values</option>
+                      {voiceConfigs.map((preset) => (
+                        <option key={preset.id} value={preset.id}>{preset.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <button type="button" onClick={saveCurrentVoicePreset} className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm font-medium text-slate-700 hover:bg-slate-50">
+                    Save As Preset
+                  </button>
+                  <button type="button" onClick={updateSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                    Update Preset
+                  </button>
+                  <button type="button" onClick={deleteSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-2 rounded-lg border border-red-200 bg-red-50 text-sm font-medium text-red-700 hover:bg-red-100 disabled:opacity-40">
+                    Delete Preset
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Voice ID</label>
+                    <input className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_id} onChange={e => setFormData({ ...formData, voice_id: e.target.value })} placeholder="JBFqnCBsd6RMkjVDRZzb" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">TTS Model</label>
+                    <input className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.tts_model_id} onChange={e => setFormData({ ...formData, tts_model_id: e.target.value })} placeholder="eleven_multilingual_v2" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">STT Model</label>
+                    <input className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.stt_model_id} onChange={e => setFormData({ ...formData, stt_model_id: e.target.value })} placeholder="scribe_v2_realtime" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Output Format</label>
+                    <input className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_output_format} onChange={e => setFormData({ ...formData, voice_output_format: e.target.value })} placeholder="mp3_44100_128" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Sample Rate</label>
+                    <input type="number" min="8000" step="1000" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white" value={formData.voice_sample_rate} onChange={e => setFormData({ ...formData, voice_sample_rate: e.target.value })} placeholder="16000" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Language</label>
+                    <input className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_language_code} onChange={e => setFormData({ ...formData, voice_language_code: e.target.value })} placeholder="en" />
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500"
+                    checked={formData.voice_auto_tts}
+                    onChange={e => setFormData({ ...formData, voice_auto_tts: e.target.checked })}
+                  />
+                  <span className="text-sm text-slate-700">Auto-play TTS replies for this agent</span>
                 </label>
-                <Link to="/voice" className="text-xs text-emerald-700 hover:text-emerald-900 font-medium">
-                  Open Voice Console
-                </Link>
-              </div>
-              <p className="text-xs text-emerald-900/75">
-                Save ElevenLabs voice defaults on the agent so browser voice sessions, websocket consumers, and test consoles all inherit the same runtime profile.
-              </p>
-              <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 items-end">
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Voice Config Preset</label>
-                  <select
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white"
-                    value={formData.voice_preset_id}
-                    onChange={e => applyVoicePreset(e.target.value)}
-                  >
-                    <option value="">Custom runtime values</option>
-                    {voiceConfigs.map((preset) => (
-                      <option key={preset.id} value={preset.id}>{preset.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <button type="button" onClick={saveCurrentVoicePreset} className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm font-medium text-slate-700 hover:bg-slate-50">
-                  Save As Preset
-                </button>
-                <button type="button" onClick={updateSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
-                  Update Preset
-                </button>
-                <button type="button" onClick={deleteSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-2 rounded-lg border border-red-200 bg-red-50 text-sm font-medium text-red-700 hover:bg-red-100 disabled:opacity-40">
-                  Delete Preset
-                </button>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Voice ID</label>
-                  <input
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm"
-                    value={formData.voice_id}
-                    onChange={e => setFormData({ ...formData, voice_id: e.target.value })}
-                    placeholder="JBFqnCBsd6RMkjVDRZzb"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">TTS Model</label>
-                  <input
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm"
-                    value={formData.tts_model_id}
-                    onChange={e => setFormData({ ...formData, tts_model_id: e.target.value })}
-                    placeholder="eleven_multilingual_v2"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">STT Model</label>
-                  <input
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm"
-                    value={formData.stt_model_id}
-                    onChange={e => setFormData({ ...formData, stt_model_id: e.target.value })}
-                    placeholder="scribe_v2_realtime"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Output Format</label>
-                  <input
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm"
-                    value={formData.voice_output_format}
-                    onChange={e => setFormData({ ...formData, voice_output_format: e.target.value })}
-                    placeholder="mp3_44100_128"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Sample Rate</label>
-                  <input
-                    type="number"
-                    min="8000"
-                    step="1000"
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white"
-                    value={formData.voice_sample_rate}
-                    onChange={e => setFormData({ ...formData, voice_sample_rate: e.target.value })}
-                    placeholder="16000"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Language</label>
-                  <input
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm"
-                    value={formData.voice_language_code}
-                    onChange={e => setFormData({ ...formData, voice_language_code: e.target.value })}
-                    placeholder="en"
-                  />
-                </div>
-              </div>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500"
-                  checked={formData.voice_auto_tts}
-                  onChange={e => setFormData({ ...formData, voice_auto_tts: e.target.checked })}
-                />
-                <span className="text-sm text-slate-700">Auto-play TTS replies for this agent</span>
-              </label>
-              <div className="rounded-xl border border-emerald-100 bg-white/80 p-4 space-y-3">
-                <div>
-                  <div className="text-sm font-medium text-slate-900">Turn Detection And Disturbance Control</div>
-                  <div className="text-xs text-slate-500 mt-1">These defaults are reused by the Voice Console and websocket consumers to ignore short disturbances and commit speech turns faster.</div>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                  <label className="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_vad_enabled} onChange={e => setFormData({ ...formData, voice_vad_enabled: e.target.checked })} />
-                    VAD auto-commit
-                  </label>
-                  <label className="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_browser_noise_suppression} onChange={e => setFormData({ ...formData, voice_browser_noise_suppression: e.target.checked })} />
-                    Browser noise suppression
-                  </label>
-                  <label className="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_browser_echo_cancellation} onChange={e => setFormData({ ...formData, voice_browser_echo_cancellation: e.target.checked })} />
-                    Echo cancellation
-                  </label>
-                  <label className="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_browser_auto_gain_control} onChange={e => setFormData({ ...formData, voice_browser_auto_gain_control: e.target.checked })} />
-                    Auto gain control
-                  </label>
+                <div className="rounded-xl border border-emerald-100 bg-white/80 p-4 space-y-3">
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Silence Threshold (sec)</label>
-                    <input type="number" min="0.2" max="3" step="0.1" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_vad_silence_threshold_secs} onChange={e => setFormData({ ...formData, voice_vad_silence_threshold_secs: e.target.value })} />
+                    <div className="text-sm font-medium text-slate-900">Turn Detection And Disturbance Control</div>
+                    <div className="text-xs text-slate-500 mt-1">These defaults are reused by the Voice Console and websocket consumers to ignore short disturbances and commit speech turns faster.</div>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">VAD Threshold</label>
-                    <input type="number" min="0.1" max="0.95" step="0.05" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_vad_threshold} onChange={e => setFormData({ ...formData, voice_vad_threshold: e.target.value })} />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Min Speech (ms)</label>
-                    <input type="number" min="50" max="2000" step="10" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_min_speech_duration_ms} onChange={e => setFormData({ ...formData, voice_min_speech_duration_ms: e.target.value })} />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Min Silence (ms)</label>
-                    <input type="number" min="50" max="3000" step="10" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_min_silence_duration_ms} onChange={e => setFormData({ ...formData, voice_min_silence_duration_ms: e.target.value })} />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Recompute Window</label>
-                    <input type="number" min="0" max="50" step="1" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_max_tokens_to_recompute} onChange={e => setFormData({ ...formData, voice_max_tokens_to_recompute: e.target.value })} />
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                    <label className="flex items-center gap-2 text-sm text-slate-700">
+                      <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_vad_enabled} onChange={e => setFormData({ ...formData, voice_vad_enabled: e.target.checked })} />
+                      VAD auto-commit
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-slate-700">
+                      <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_browser_noise_suppression} onChange={e => setFormData({ ...formData, voice_browser_noise_suppression: e.target.checked })} />
+                      Browser noise suppression
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-slate-700">
+                      <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_browser_echo_cancellation} onChange={e => setFormData({ ...formData, voice_browser_echo_cancellation: e.target.checked })} />
+                      Echo cancellation
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-slate-700">
+                      <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_browser_auto_gain_control} onChange={e => setFormData({ ...formData, voice_browser_auto_gain_control: e.target.checked })} />
+                      Auto gain control
+                    </label>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Silence Threshold (sec)</label>
+                      <input type="number" min="0.2" max="3" step="0.1" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_vad_silence_threshold_secs} onChange={e => setFormData({ ...formData, voice_vad_silence_threshold_secs: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">VAD Threshold</label>
+                      <input type="number" min="0.1" max="0.95" step="0.05" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_vad_threshold} onChange={e => setFormData({ ...formData, voice_vad_threshold: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Min Speech (ms)</label>
+                      <input type="number" min="50" max="2000" step="10" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_min_speech_duration_ms} onChange={e => setFormData({ ...formData, voice_min_speech_duration_ms: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Min Silence (ms)</label>
+                      <input type="number" min="50" max="3000" step="10" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_min_silence_duration_ms} onChange={e => setFormData({ ...formData, voice_min_silence_duration_ms: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Recompute Window</label>
+                      <input type="number" min="0" max="50" step="1" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_max_tokens_to_recompute} onChange={e => setFormData({ ...formData, voice_max_tokens_to_recompute: e.target.value })} />
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
+            </details>
             )}
 
             {showAgentConfig('project') && (
@@ -2698,104 +2677,124 @@ type AgentOptionalConfig =
             )}
 
             {showAgentConfig('mcp') && (
-            <div className="border border-indigo-100 rounded-xl p-4 bg-indigo-50/40 space-y-3">
-              <div className="flex items-center justify-between">
-                <label className="block text-sm font-medium text-indigo-900">Direct MCP Connections</label>
-                <a href="/mcps" className="text-xs text-indigo-700 hover:text-indigo-900 font-medium">Manage MCPs</a>
+            <details className="border border-indigo-100 rounded-xl p-4 bg-indigo-50/40 space-y-3 group">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-indigo-900">Direct MCP Connections</label>
+                  <p className="text-xs text-indigo-800/80 mt-1">
+                    Attach MCP exposed tools and bundles directly to this agent without creating intermediate MCP tool entries.
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <a href="/mcps" className="text-xs text-indigo-700 hover:text-indigo-900 font-medium">Manage MCPs</a>
+                  <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-700 group-open:bg-indigo-700 group-open:text-white">
+                    Expand
+                  </span>
+                </div>
+              </summary>
+              <div className="pt-3 space-y-3">
+                <div>
+                  <div className="text-xs font-semibold text-indigo-900 mb-1.5">Exposed MCP Tools</div>
+                  {mcpExposedTools.length === 0 ? (
+                    <div className="text-xs text-slate-500 bg-white border border-indigo-100 rounded-lg px-3 py-2">
+                      No MCP tools exposed yet.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {mcpExposedTools.map((row) => {
+                        const selected = formData.mcp_tool_ids.includes(Number(row.tool_id));
+                        return (
+                          <button
+                            key={`mcp-tool-${row.tool_id}`}
+                            type="button"
+                            onClick={() => toggleMcpTool(Number(row.tool_id))}
+                            className={`text-left rounded-lg border px-3 py-2 text-sm transition-colors ${
+                              selected
+                                ? 'bg-indigo-100 border-indigo-300 text-indigo-900'
+                                : 'bg-white border-indigo-100 text-slate-700 hover:bg-indigo-50'
+                            }`}
+                          >
+                            <div className="font-medium">{row.tool_name}</div>
+                            <div className="text-[11px] opacity-80">/{row.exposed_name}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <div className="text-xs font-semibold text-indigo-900 mb-1.5">MCP Bundles</div>
+                  {mcpBundles.length === 0 ? (
+                    <div className="text-xs text-slate-500 bg-white border border-indigo-100 rounded-lg px-3 py-2">
+                      No MCP bundles available.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {mcpBundles.map((b) => {
+                        const selected = formData.mcp_bundle_ids.includes(Number(b.id));
+                        return (
+                          <button
+                            key={`mcp-bundle-${b.id}`}
+                            type="button"
+                            onClick={() => toggleMcpBundle(Number(b.id))}
+                            className={`text-left rounded-lg border px-3 py-2 text-sm transition-colors ${
+                              selected
+                                ? 'bg-indigo-100 border-indigo-300 text-indigo-900'
+                                : 'bg-white border-indigo-100 text-slate-700 hover:bg-indigo-50'
+                            }`}
+                          >
+                            <div className="font-medium">{b.name}</div>
+                            <div className="text-[11px] opacity-80">bundle/{b.slug}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               </div>
-              <p className="text-xs text-indigo-800/80">
-                Attach MCP exposed tools/bundles directly to this agent without creating intermediate MCP tool entries.
-              </p>
-              <div>
-                <div className="text-xs font-semibold text-indigo-900 mb-1.5">Exposed MCP Tools</div>
-                {mcpExposedTools.length === 0 ? (
-                  <div className="text-xs text-slate-500 bg-white border border-indigo-100 rounded-lg px-3 py-2">
-                    No MCP tools exposed yet.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {mcpExposedTools.map((row) => {
-                      const selected = formData.mcp_tool_ids.includes(Number(row.tool_id));
-                      return (
-                        <button
-                          key={`mcp-tool-${row.tool_id}`}
-                          type="button"
-                          onClick={() => toggleMcpTool(Number(row.tool_id))}
-                          className={`text-left rounded-lg border px-3 py-2 text-sm transition-colors ${
-                            selected
-                              ? 'bg-indigo-100 border-indigo-300 text-indigo-900'
-                              : 'bg-white border-indigo-100 text-slate-700 hover:bg-indigo-50'
-                          }`}
-                        >
-                          <div className="font-medium">{row.tool_name}</div>
-                          <div className="text-[11px] opacity-80">/{row.exposed_name}</div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-              <div>
-                <div className="text-xs font-semibold text-indigo-900 mb-1.5">MCP Bundles</div>
-                {mcpBundles.length === 0 ? (
-                  <div className="text-xs text-slate-500 bg-white border border-indigo-100 rounded-lg px-3 py-2">
-                    No MCP bundles available.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {mcpBundles.map((b) => {
-                      const selected = formData.mcp_bundle_ids.includes(Number(b.id));
-                      return (
-                        <button
-                          key={`mcp-bundle-${b.id}`}
-                          type="button"
-                          onClick={() => toggleMcpBundle(Number(b.id))}
-                          className={`text-left rounded-lg border px-3 py-2 text-sm transition-colors ${
-                            selected
-                              ? 'bg-indigo-100 border-indigo-300 text-indigo-900'
-                              : 'bg-white border-indigo-100 text-slate-700 hover:bg-indigo-50'
-                          }`}
-                        >
-                          <div className="font-medium">{b.name}</div>
-                          <div className="text-[11px] opacity-80">bundle/{b.slug}</div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
+            </details>
             )}
 
             {showAgentConfig('exposure') && (
-            <div className="space-y-4">
-                <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                        type="checkbox"
-                        className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
-                        checked={formData.is_exposed}
-                        onChange={e => setFormData({...formData, is_exposed: e.target.checked})}
-                    />
-                    <span className="text-sm font-medium text-slate-700">Expose as API / MCP Tool</span>
-                </label>
-                <p className="text-xs text-slate-500 mt-1 ml-6">
-                    If checked, this agent can be called directly via the API or used as a tool in the Model Context Protocol.
-                </p>
-                {formData.is_exposed && editingId && (
-                  <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 space-y-3">
-                    <div className="text-sm font-semibold text-cyan-900 flex items-center gap-2">
-                      <Radio size={16} />
-                      Voice WebSocket
-                    </div>
-                    <div className="text-xs text-cyan-900/80">
-                      External realtime voice clients can connect directly to this exposed agent using the websocket endpoint below.
-                    </div>
-                    <div className="rounded-lg border border-cyan-100 bg-white px-3 py-2 font-mono text-xs break-all">
-                      {appOrigin.replace(/^http/, 'ws')}/ws/voice?targetType=agent&targetId={editingId}
-                    </div>
+            <details className="space-y-4 group">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div>
+                    <div className="text-sm font-medium text-slate-700">Exposure And Endpoints</div>
+                    <div className="text-xs text-slate-500 mt-1">Publish this agent for API, MCP, and voice websocket consumers.</div>
                   </div>
-                )}
-            </div>
+                  <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 group-open:bg-slate-900 group-open:text-white">
+                    Expand
+                  </span>
+                </summary>
+                <div className="space-y-4 pt-2">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                          type="checkbox"
+                          className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                          checked={formData.is_exposed}
+                          onChange={e => setFormData({...formData, is_exposed: e.target.checked})}
+                      />
+                      <span className="text-sm font-medium text-slate-700">Expose as API / MCP Tool</span>
+                  </label>
+                  <p className="text-xs text-slate-500 mt-1 ml-6">
+                      If checked, this agent can be called directly via the API or used as a tool in the Model Context Protocol.
+                  </p>
+                  {formData.is_exposed && editingId && (
+                    <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 space-y-3">
+                      <div className="text-sm font-semibold text-cyan-900 flex items-center gap-2">
+                        <Radio size={16} />
+                        Voice WebSocket
+                      </div>
+                      <div className="text-xs text-cyan-900/80">
+                        External realtime voice clients can connect directly to this exposed agent using the websocket endpoint below.
+                      </div>
+                      <div className="rounded-lg border border-cyan-100 bg-white px-3 py-2 font-mono text-xs break-all">
+                        {appOrigin.replace(/^http/, 'ws')}/ws/voice?targetType=agent&targetId={editingId}
+                      </div>
+                    </div>
+                  )}
+                </div>
+            </details>
             )}
             
             <div className="pt-6 border-t border-slate-100 bg-transparent flex justify-end gap-3 rounded-lg">
