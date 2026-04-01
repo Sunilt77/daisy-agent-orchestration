@@ -161,6 +161,8 @@ export default function VoicePage() {
   const [error, setError] = useState('');
   const [statusNote, setStatusNote] = useState('');
   const [turnState, setTurnState] = useState<'idle' | 'listening' | 'thinking' | 'speaking'>('idle');
+  const [micLevel, setMicLevel] = useState(0);
+  const [speechLikelihood, setSpeechLikelihood] = useState<'idle' | 'background' | 'speech'>('idle');
   const [presetAccess, setPresetAccess] = useState<ResourceAccessPayload | null>(null);
   const [presetAccessLoading, setPresetAccessLoading] = useState(false);
   const [presetAccessSaving, setPresetAccessSaving] = useState(false);
@@ -182,6 +184,18 @@ export default function VoicePage() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+
+  const stopMicVisualization = () => {
+    if (animationFrameRef.current != null && typeof window !== 'undefined') {
+      window.cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    analyserRef.current = null;
+    setMicLevel(0);
+    setSpeechLikelihood('idle');
+  };
 
   const resetAudioStream = () => {
     audioQueueRef.current = [];
@@ -608,6 +622,7 @@ export default function VoicePage() {
     ws.onclose = () => {
       setIsConnected(false);
       setIsRecording(false);
+      stopMicVisualization();
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
       processorRef.current?.disconnect();
@@ -626,6 +641,7 @@ export default function VoicePage() {
     wsRef.current = null;
     setIsConnected(false);
     setIsRecording(false);
+    stopMicVisualization();
     resetAudioStream();
   };
 
@@ -793,10 +809,14 @@ export default function VoicePage() {
     const audioContext = new AudioContext({ sampleRate });
     const source = audioContext.createMediaStreamSource(stream);
     const processor = audioContext.createScriptProcessor(4096, 1, 1);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.82;
     streamRef.current = stream;
     audioContextRef.current = audioContext;
     sourceRef.current = source;
     processorRef.current = processor;
+    analyserRef.current = analyser;
 
     wsRef.current.send(JSON.stringify({
       type: 'session.update',
@@ -833,13 +853,33 @@ export default function VoicePage() {
       }));
     };
 
+    const levelBuffer = new Uint8Array(analyser.frequencyBinCount);
+    const updateMicLevel = () => {
+      if (!analyserRef.current) return;
+      analyserRef.current.getByteTimeDomainData(levelBuffer);
+      let sumSquares = 0;
+      for (let i = 0; i < levelBuffer.length; i += 1) {
+        const normalized = (levelBuffer[i] - 128) / 128;
+        sumSquares += normalized * normalized;
+      }
+      const rms = Math.sqrt(sumSquares / levelBuffer.length);
+      const level = Math.min(1, rms * 8);
+      setMicLevel(level);
+      const thresholdFloor = Math.max(0.08, Math.min(0.6, vadThreshold * 0.35));
+      setSpeechLikelihood(level > thresholdFloor ? 'speech' : level > 0.025 ? 'background' : 'idle');
+      animationFrameRef.current = window.requestAnimationFrame(updateMicLevel);
+    };
+
+    source.connect(analyser);
     source.connect(processor);
     processor.connect(audioContext.destination);
+    animationFrameRef.current = window.requestAnimationFrame(updateMicLevel);
     setIsRecording(true);
     setStatusNote('Listening live. ElevenLabs committed speech segments will invoke the selected runtime automatically.');
   };
 
   const stopRecording = () => {
+    stopMicVisualization();
     processorRef.current?.disconnect();
     sourceRef.current?.disconnect();
     audioContextRef.current?.close().catch(() => undefined);
@@ -859,6 +899,7 @@ export default function VoicePage() {
 
   useEffect(() => () => {
     resetAudioStream();
+    stopMicVisualization();
   }, []);
 
   return (
@@ -1164,6 +1205,40 @@ export default function VoicePage() {
             </div>
             <div className="rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-xs text-cyan-900">
               Mic audio streams live to ElevenLabs STT. Committed speech segments automatically invoke the selected agent or crew, and the current voice settings are reused for future sessions.
+            </div>
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Mic Activity</div>
+                  <div className="mt-1 text-sm font-medium text-slate-900">
+                    {speechLikelihood === 'speech' ? 'Speech likely' : speechLikelihood === 'background' ? 'Background noise only' : 'Waiting for input'}
+                  </div>
+                </div>
+                <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                  speechLikelihood === 'speech'
+                    ? 'bg-emerald-100 text-emerald-700'
+                    : speechLikelihood === 'background'
+                      ? 'bg-amber-100 text-amber-700'
+                      : 'bg-slate-200 text-slate-600'
+                }`}>
+                  {Math.round(micLevel * 100)}%
+                </span>
+              </div>
+              <div className="mt-3 h-3 overflow-hidden rounded-full bg-slate-200">
+                <div
+                  className={`h-full rounded-full transition-all duration-100 ${
+                    speechLikelihood === 'speech'
+                      ? 'bg-emerald-500'
+                      : speechLikelihood === 'background'
+                        ? 'bg-amber-400'
+                        : 'bg-slate-400'
+                  }`}
+                  style={{ width: `${Math.max(4, Math.round(micLevel * 100))}%` }}
+                />
+              </div>
+              <div className="mt-2 text-xs text-slate-500">
+                Use this while tuning VAD. If the bar stays active during room noise, increase `VAD Threshold`, `Min Speech`, or `Min Silence`.
+              </div>
             </div>
             {statusNote ? <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">{statusNote}</div> : null}
             {error ? <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div> : null}
