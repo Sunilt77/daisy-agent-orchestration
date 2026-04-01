@@ -880,6 +880,48 @@ function getAttachmentById(attachmentId: string) {
   return row || null;
 }
 
+function getPublicBaseUrl() {
+  const configured = String(
+    process.env.PUBLIC_BASE_URL ||
+    process.env.APP_BASE_URL ||
+    process.env.ORCHESTRATOR_PUBLIC_URL ||
+    ''
+  ).trim();
+  return configured.replace(/\/+$/g, '');
+}
+
+function createAttachmentPublicLink(attachmentId: string, expiresInSeconds = 3600) {
+  ensureAttachmentTables();
+  const attachment = getAttachmentById(attachmentId);
+  if (!attachment) throw new Error(`Attachment not found: ${attachmentId}`);
+  const token = randomUUID();
+  const ttlSeconds = Math.max(60, Math.min(24 * 60 * 60, Math.round(Number(expiresInSeconds) || 3600)));
+  const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+  db.prepare(`
+    INSERT INTO attachment_public_links (attachment_id, token, expires_at)
+    VALUES (?, ?, ?)
+  `).run(attachmentId, token, expiresAt);
+  const baseUrl = getPublicBaseUrl();
+  const path = `/api/public/attachments/${token}`;
+  return {
+    attachment_id: attachmentId,
+    token,
+    expires_at: expiresAt,
+    public_url: baseUrl ? `${baseUrl}${path}` : path,
+  };
+}
+
+function getAttachmentPublicLink(token: string) {
+  ensureAttachmentTables();
+  const row = db.prepare(`
+    SELECT id, attachment_id, token, expires_at, created_at
+    FROM attachment_public_links
+    WHERE token = ?
+    LIMIT 1
+  `).get(token) as any;
+  return row || null;
+}
+
 function isAttachmentIdKey(key: string) {
   return /(^|_)(attachment_id|image_attachment_id|file_attachment_id)$/i.test(String(key || ''));
 }
@@ -934,6 +976,56 @@ async function resolveAttachmentUploadValue(templateValue: any, args: any) {
   if (!attachmentId) return null;
   const row = getAttachmentById(attachmentId);
   return row ? normalizeAttachmentRow(row) : null;
+}
+
+async function curlRequestTool(args: any) {
+  const method = String(args?.method || 'GET').toUpperCase();
+  const url = String(args?.url || '').trim();
+  if (!url) throw new Error('curl_request requires url.');
+  const headers = args?.headers && typeof args.headers === 'object' ? { ...args.headers } : {};
+  const timeoutMs = Math.max(1000, Math.min(120000, Number(args?.timeout_ms || 30000)));
+  const followRedirects = args?.follow_redirects !== false;
+  const bodyInput = args?.body;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method,
+      headers,
+      redirect: followRedirects ? 'follow' : 'manual',
+      body: ['GET', 'HEAD'].includes(method) ? undefined : (
+        typeof bodyInput === 'string'
+          ? bodyInput
+          : (bodyInput == null ? undefined : JSON.stringify(bodyInput))
+      ),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    return JSON.stringify({
+      ok: res.ok,
+      status: res.status,
+      status_text: res.statusText,
+      url: res.url,
+      headers: Object.fromEntries(res.headers.entries()),
+      body: text,
+    }, null, 2);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function generateAttachmentPublicUrlTool(args: any) {
+  const attachmentId = String(args?.attachment_id || '').trim();
+  if (!attachmentId) throw new Error('generate_attachment_public_url requires attachment_id.');
+  const expiresInSeconds = Number(args?.expires_in_seconds || 3600);
+  const link = createAttachmentPublicLink(attachmentId, expiresInSeconds);
+  const attachment = normalizeAttachmentRow(getAttachmentById(attachmentId));
+  return JSON.stringify({
+    ...link,
+    name: attachment.name,
+    mime_type: attachment.mime_type || null,
+    kind: attachment.kind,
+  }, null, 2);
 }
 
 async function saveSessionSummary(sessionId: string, summary: string) {
@@ -5061,6 +5153,30 @@ app.get('/api/attachments/:id/content', requireUser, async (req, res) => {
   return res.sendFile(String(row.local_path));
 });
 
+app.get('/api/public/attachments/:token', async (req, res) => {
+  const token = String(req.params.token || '').trim();
+  if (!token) return res.status(400).json({ error: 'Attachment token is required' });
+  const link = getAttachmentPublicLink(token);
+  if (!link) return res.status(404).json({ error: 'Attachment link not found' });
+  const expiresAtMs = Date.parse(String(link.expires_at || ''));
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+    return res.status(410).json({ error: 'Attachment link expired' });
+  }
+  const row = getAttachmentById(String(link.attachment_id || ''));
+  if (!row) return res.status(404).json({ error: 'Attachment not found' });
+
+  res.setHeader('Cache-Control', 'private, max-age=60');
+  if (row.local_path) {
+    res.setHeader('Content-Type', String(row.mime_type || 'application/octet-stream'));
+    res.setHeader('Content-Disposition', `inline; filename="${String(row.original_name || 'attachment')}"`);
+    return res.sendFile(String(row.local_path));
+  }
+  if (row.file_url) {
+    return res.redirect(String(row.file_url));
+  }
+  return res.status(404).json({ error: 'Attachment content is unavailable' });
+});
+
 app.post('/api/agents/:id/attachments', requireUser, async (req, res, next) => {
   try {
     const agentId = Number(req.params.id);
@@ -7407,6 +7523,12 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
       if (fnName === 'deploy_tool_script') {
         const result = await internalTools.deployToolScript(args);
         return JSON.stringify(result, null, 2);
+      }
+      if (fnName === 'generate_attachment_public_url') {
+        return await generateAttachmentPublicUrlTool(args);
+      }
+      if (fnName === 'curl_request') {
+        return await curlRequestTool(args);
       }
       if (fnName === 'delegate_to_agent') {
         return await delegateToAgentTool(args, execContext);
@@ -10092,80 +10214,145 @@ async function startServer() {
 
   async function ensureBuiltInInternalTools() {
     const prisma = getPrisma();
-    const name = 'delegate_to_agent';
-    const description = 'Delegate a subtask to another agent so it can use its own tools and MCP bundles, then return the child result to the current agent.';
-    const category = 'Orchestration';
-    const type = 'internal';
-    const config = {
-      method: 'delegate_to_agent',
-      requiredArgs: ['target_agent_name', 'task'],
-      argSchema: {
-        target_agent_name: 'string',
-        target_agent_id: 'number',
-        task: 'string',
-        context: 'string',
-        expected_output: 'string',
-        title: 'string',
-        share_session: 'boolean',
+    const builtIns = [
+      {
+        name: 'delegate_to_agent',
+        description: 'Delegate a subtask to another agent so it can use its own tools and MCP bundles, then return the child result to the current agent.',
+        category: 'Orchestration',
+        type: 'internal',
+        config: {
+          method: 'delegate_to_agent',
+          requiredArgs: ['target_agent_name', 'task'],
+          argSchema: {
+            target_agent_name: 'string',
+            target_agent_id: 'number',
+            task: 'string',
+            context: 'string',
+            expected_output: 'string',
+            title: 'string',
+            share_session: 'boolean',
+          },
+          argDescriptions: {
+            target_agent_name: 'Name of the target specialist agent to delegate to.',
+            target_agent_id: 'Numeric id of the target specialist agent if you prefer an exact reference.',
+            task: 'The delegated task for the target agent to perform.',
+            context: 'Optional extra context or notes for the delegated agent.',
+            expected_output: 'Optional guidance about what the delegated agent should return.',
+            title: 'Optional title for the delegation trace entry.',
+            share_session: 'Set false to avoid sharing the current session memory with the delegated agent.',
+          },
+        },
       },
-      argDescriptions: {
-        target_agent_name: 'Name of the target specialist agent to delegate to.',
-        target_agent_id: 'Numeric id of the target specialist agent if you prefer an exact reference.',
-        task: 'The delegated task for the target agent to perform.',
-        context: 'Optional extra context or notes for the delegated agent.',
-        expected_output: 'Optional guidance about what the delegated agent should return.',
-        title: 'Optional title for the delegation trace entry.',
-        share_session: 'Set false to avoid sharing the current session memory with the delegated agent.',
+      {
+        name: 'generate_attachment_public_url',
+        description: 'Create a temporary public URL for an uploaded attachment so external tools and MCP packages can fetch it.',
+        category: 'Attachments',
+        type: 'internal',
+        config: {
+          method: 'generate_attachment_public_url',
+          requiredArgs: ['attachment_id'],
+          argSchema: {
+            attachment_id: 'string',
+            expires_in_seconds: 'number',
+          },
+          argDescriptions: {
+            attachment_id: 'The uploaded platform attachment id to expose temporarily.',
+            expires_in_seconds: 'How long the public link should remain valid. Defaults to 3600 seconds.',
+          },
+        },
       },
-    };
-    const serializedConfig = JSON.stringify(config);
-    const existing = await prisma.orchestratorTool.findFirst({
-      where: { name },
-      select: { id: true, version: true, description: true, category: true, type: true, config: true },
-    });
-    if (!existing) {
-      const created = await prisma.orchestratorTool.create({
-        data: { name, description, category, type, config: serializedConfig, version: 1 },
+      {
+        name: 'curl_request',
+        description: 'Make a direct HTTP request similar to curl and return status, headers, and body.',
+        category: 'HTTP',
+        type: 'internal',
+        config: {
+          method: 'curl_request',
+          requiredArgs: ['url'],
+          argSchema: {
+            url: 'string',
+            method: 'string',
+            headers: 'object',
+            body: 'string|object',
+            timeout_ms: 'number',
+            follow_redirects: 'boolean',
+          },
+          argDescriptions: {
+            url: 'The absolute URL to request.',
+            method: 'HTTP method such as GET, POST, PUT, PATCH, or DELETE.',
+            headers: 'Optional request headers.',
+            body: 'Optional request body for non-GET methods.',
+            timeout_ms: 'Optional timeout in milliseconds. Defaults to 30000.',
+            follow_redirects: 'Set false to inspect redirect responses instead of following them.',
+          },
+        },
+      },
+    ];
+
+    for (const builtIn of builtIns) {
+      const serializedConfig = JSON.stringify(builtIn.config);
+      const existing = await prisma.orchestratorTool.findFirst({
+        where: { name: builtIn.name },
+        select: { id: true, version: true, description: true, category: true, type: true, config: true },
+      });
+      if (!existing) {
+        const created = await prisma.orchestratorTool.create({
+          data: {
+            name: builtIn.name,
+            description: builtIn.description,
+            category: builtIn.category,
+            type: builtIn.type,
+            config: serializedConfig,
+            version: 1,
+          },
+        });
+        await prisma.orchestratorToolVersion.create({
+          data: {
+            toolId: created.id,
+            versionNumber: 1,
+            name: builtIn.name,
+            description: builtIn.description,
+            category: builtIn.category,
+            type: builtIn.type,
+            config: serializedConfig,
+            changeKind: 'create',
+          },
+        });
+        continue;
+      }
+      if (
+        existing.description === builtIn.description &&
+        existing.category === builtIn.category &&
+        existing.type === builtIn.type &&
+        String(existing.config || '') === serializedConfig
+      ) {
+        continue;
+      }
+      const nextVersion = Number(existing.version || 1) + 1;
+      await prisma.orchestratorTool.update({
+        where: { id: existing.id },
+        data: {
+          description: builtIn.description,
+          category: builtIn.category,
+          type: builtIn.type,
+          config: serializedConfig,
+          version: nextVersion,
+          updatedAt: new Date(),
+        },
       });
       await prisma.orchestratorToolVersion.create({
         data: {
-          toolId: created.id,
-          versionNumber: 1,
-          name,
-          description,
-          category,
-          type,
+          toolId: existing.id,
+          versionNumber: nextVersion,
+          name: builtIn.name,
+          description: builtIn.description,
+          category: builtIn.category,
+          type: builtIn.type,
           config: serializedConfig,
-          changeKind: 'create',
+          changeKind: 'update',
         },
       });
-      return;
     }
-    if (
-      existing.description === description &&
-      existing.category === category &&
-      existing.type === type &&
-      String(existing.config || '') === serializedConfig
-    ) {
-      return;
-    }
-    const nextVersion = Number(existing.version || 1) + 1;
-    await prisma.orchestratorTool.update({
-      where: { id: existing.id },
-      data: { description, category, type, config: serializedConfig, version: nextVersion, updatedAt: new Date() },
-    });
-    await prisma.orchestratorToolVersion.create({
-      data: {
-        toolId: existing.id,
-        versionNumber: nextVersion,
-        name,
-        description,
-        category,
-        type,
-        config: serializedConfig,
-        changeKind: 'update',
-      },
-    });
   }
 
   function ensureDefaultPricing() {

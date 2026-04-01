@@ -1249,6 +1249,21 @@ export function ensureAttachmentTables() {
 
       CREATE INDEX IF NOT EXISTS idx_attachments_uploader_lookup
         ON attachments(uploader_user_id, uploader_org_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS attachment_public_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        attachment_id TEXT NOT NULL,
+        token TEXT NOT NULL UNIQUE,
+        expires_at DATETIME NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (attachment_id) REFERENCES attachments(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_attachment_public_links_attachment_lookup
+        ON attachment_public_links(attachment_id, expires_at);
+
+      CREATE INDEX IF NOT EXISTS idx_attachment_public_links_token_lookup
+        ON attachment_public_links(token, expires_at);
     `);
     const attachmentColumns = db.prepare("PRAGMA table_info(attachments)").all() as Array<{ name: string }>;
     if (!attachmentColumns.some((column) => column.name === 'local_path')) {
