@@ -134,6 +134,8 @@ export default function Dashboard() {
   const [agentStopMessage, setAgentStopMessage] = useState<string>('');
   const [stoppingAgentIds, setStoppingAgentIds] = useState<number[]>([]);
   const dashboardDarkPanel = 'bg-linear-to-br from-slate-950 via-slate-900 to-slate-900 border-slate-800/80 shadow-[0_24px_70px_rgba(2,6,23,0.35)]';
+  const dashboardOperatorPanel = `panel-chrome rounded-[2rem] border p-6 ${dashboardDarkPanel}`;
+  const dashboardOperatorCard = 'rounded-2xl border border-white/10 bg-white/[0.06] p-4';
   
   const navigate = useNavigate();
 
@@ -904,22 +906,29 @@ export default function Dashboard() {
       </div>
 
       <div className="mb-10 grid grid-cols-1 xl:grid-cols-2 gap-6">
-        <div className="panel-chrome rounded-2xl p-6">
-          <h2 className="text-lg font-bold text-slate-800 mb-3 flex items-center gap-2">
-            <Sparkles size={18} className="text-brand-600" />
-            Crew Blueprints
-          </h2>
-          <p className="text-sm text-slate-500 mb-4">Launch proven crew patterns in one click.</p>
+        <div className={dashboardOperatorPanel}>
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <Sparkles size={18} className="text-cyan-300" />
+                Command Blueprints
+              </h2>
+              <p className="text-sm text-slate-400 mt-1">Launch proven crew patterns without leaving the operator surface.</p>
+            </div>
+            <div className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-cyan-200">
+              Quick Start
+            </div>
+          </div>
           <div className="space-y-3">
             {templates.map((tpl) => (
-              <div key={tpl.id} className="border border-slate-200 rounded-xl p-3 bg-white/70 flex items-start justify-between gap-3">
+              <div key={tpl.id} className="flex items-start justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.06] p-4">
                 <div>
-                  <div className="font-semibold text-slate-800">{tpl.name}</div>
-                  <div className="text-xs text-slate-500 mt-1">{tpl.description}</div>
+                  <div className="font-semibold text-white">{tpl.name}</div>
+                  <div className="text-xs text-slate-400 mt-1">{tpl.description}</div>
                 </div>
                 <button
                   onClick={() => createCrewFromTemplate(tpl.id)}
-                  className="px-3 py-2 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
+                  className="px-3 py-2 text-xs font-semibold rounded-xl bg-cyan-500 text-slate-950 hover:bg-cyan-400"
                 >
                   Use Template
                 </button>
@@ -929,31 +938,39 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="panel-chrome rounded-2xl p-6">
-          <h2 className="text-lg font-bold text-slate-800 mb-3 flex items-center gap-2">
-            <Activity size={18} className="text-red-500" />
-            Failure Analytics
-          </h2>
+        <div className={dashboardOperatorPanel}>
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <Activity size={18} className="text-orange-300" />
+                Failure Analytics
+              </h2>
+              <p className="text-sm text-slate-400 mt-1">Watch the highest-friction tools and timeout hotspots before they spread.</p>
+            </div>
+            <div className="rounded-full border border-orange-400/20 bg-orange-400/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-orange-200">
+              Risk Watch
+            </div>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <div className="text-xs uppercase tracking-wider text-slate-500 mb-2">Top Failing Tools</div>
+              <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">Top Failing Tools</div>
               <div className="space-y-2">
                 {failureAnalytics.topFailingTools.slice(0, 5).map((row: any) => (
-                  <div key={row.tool_name} className="flex items-center justify-between text-sm border border-slate-100 rounded-lg px-3 py-2">
-                    <span className="text-slate-700">{row.tool_name}</span>
-                    <span className="font-mono text-red-600">{row.failures}</span>
+                  <div key={row.tool_name} className="flex items-center justify-between text-sm rounded-xl border border-white/10 bg-white/[0.06] px-3 py-2">
+                    <span className="text-slate-200">{row.tool_name}</span>
+                    <span className="font-mono text-red-300">{row.failures}</span>
                   </div>
                 ))}
                 {failureAnalytics.topFailingTools.length === 0 && <div className="text-xs text-slate-500">No failures detected.</div>}
               </div>
             </div>
             <div>
-              <div className="text-xs uppercase tracking-wider text-slate-500 mb-2">Timeout Hotspots</div>
+              <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">Timeout Hotspots</div>
               <div className="space-y-2">
                 {failureAnalytics.timeoutHotspots.slice(0, 5).map((row: any) => (
-                  <div key={row.agent_name} className="flex items-center justify-between text-sm border border-slate-100 rounded-lg px-3 py-2">
-                    <span className="text-slate-700">{row.agent_name}</span>
-                    <span className="font-mono text-amber-600">{row.timeout_failures}</span>
+                  <div key={row.agent_name} className="flex items-center justify-between text-sm rounded-xl border border-white/10 bg-white/[0.06] px-3 py-2">
+                    <span className="text-slate-200">{row.agent_name}</span>
+                    <span className="font-mono text-amber-300">{row.timeout_failures}</span>
                   </div>
                 ))}
                 {failureAnalytics.timeoutHotspots.length === 0 && <div className="text-xs text-slate-500">No timeout hotspots yet.</div>}
@@ -969,63 +986,63 @@ export default function Dashboard() {
         transition={{ duration: 0.5, delay: 0.05, ease: 'easeOut' }}
         className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-12"
       >
-        <div className="panel-chrome rounded-2xl p-6 xl:col-span-2">
+        <div className={`${dashboardOperatorPanel} xl:col-span-2`}>
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-              <Gauge size={18} className="text-brand-600" />
+            <h2 className="text-lg font-bold text-white flex items-center gap-2">
+              <Gauge size={18} className="text-cyan-300" />
               Ops Pulse
             </h2>
-            <span className="text-xs uppercase tracking-[0.2em] text-slate-500">Real-Time</span>
+            <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Real-Time</span>
           </div>
           <div className="space-y-4">
             <div>
-              <div className="flex justify-between text-xs text-slate-600 mb-1">
+              <div className="flex justify-between text-xs text-slate-300 mb-1">
                 <span>Agent Utilization</span>
                 <span>{dashboardInsights.utilization}%</span>
               </div>
-              <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
+              <div className="h-2 rounded-full bg-white/10 overflow-hidden">
                 <div className="h-full rounded-full bg-linear-to-r from-brand-500 to-brand-700" style={{ width: `${dashboardInsights.utilization}%` }} />
               </div>
             </div>
             <div>
-              <div className="flex justify-between text-xs text-slate-600 mb-1">
+              <div className="flex justify-between text-xs text-slate-300 mb-1">
                 <span>Crew Exposure Coverage</span>
                 <span>{crews.length ? Math.round((dashboardInsights.exposedCrews / crews.length) * 100) : 0}%</span>
               </div>
-              <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
+              <div className="h-2 rounded-full bg-white/10 overflow-hidden">
                 <div className="h-full rounded-full bg-linear-to-r from-accent-500 to-accent-700" style={{ width: `${crews.length ? Math.round((dashboardInsights.exposedCrews / crews.length) * 100) : 0}%` }} />
               </div>
             </div>
             <div className="grid grid-cols-2 gap-4 pt-2">
-              <div className="bg-white/75 border border-slate-200 rounded-xl p-3">
-                <div className="text-xs text-slate-500 mb-1 flex items-center gap-1"><Clock3 size={12} /> Avg Recency</div>
-                <div className="text-lg font-bold text-slate-900">{dashboardInsights.avgLatency}s</div>
+              <div className={dashboardOperatorCard}>
+                <div className="text-xs text-slate-400 mb-1 flex items-center gap-1"><Clock3 size={12} /> Approx Run Age</div>
+                <div className="text-lg font-bold text-white">{dashboardInsights.avgLatency}s</div>
               </div>
-              <div className="bg-white/75 border border-slate-200 rounded-xl p-3">
-                <div className="text-xs text-slate-500 mb-1 flex items-center gap-1"><Activity size={12} /> Active Runs</div>
-                <div className="text-lg font-bold text-slate-900">{dashboardInsights.activeRunsNow}</div>
+              <div className={dashboardOperatorCard}>
+                <div className="text-xs text-slate-400 mb-1 flex items-center gap-1"><Activity size={12} /> Active Runs</div>
+                <div className="text-lg font-bold text-white">{dashboardInsights.activeRunsNow}</div>
               </div>
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2">
-              <div className="bg-white/75 border border-slate-200 rounded-xl p-3">
-                <div className="text-[11px] text-slate-500">Success Rate</div>
+              <div className={dashboardOperatorCard}>
+                <div className="text-[11px] text-slate-400">Success Rate</div>
                 <div className="text-base font-bold text-emerald-700">{opsPulse.successRate}%</div>
               </div>
-              <div className="bg-white/75 border border-slate-200 rounded-xl p-3">
-                <div className="text-[11px] text-slate-500">Avg Tokens/Run</div>
-                <div className="text-base font-bold text-slate-900">{opsPulse.avgTokens.toLocaleString()}</div>
+              <div className={dashboardOperatorCard}>
+                <div className="text-[11px] text-slate-400">Avg Tokens/Run</div>
+                <div className="text-base font-bold text-white">{opsPulse.avgTokens.toLocaleString()}</div>
               </div>
-              <div className="bg-white/75 border border-slate-200 rounded-xl p-3">
-                <div className="text-[11px] text-slate-500">Avg Cost/Run</div>
-                <div className="text-base font-bold text-slate-900">${opsPulse.avgCost.toFixed(4)}</div>
+              <div className={dashboardOperatorCard}>
+                <div className="text-[11px] text-slate-400">Avg Cost/Run</div>
+                <div className="text-base font-bold text-white">${opsPulse.avgCost.toFixed(4)}</div>
               </div>
-              <div className="bg-white/75 border border-slate-200 rounded-xl p-3">
-                <div className="text-[11px] text-slate-500">Busiest Agent</div>
-                <div className="text-sm font-bold text-slate-900 truncate" title={opsPulse.busiestAgent}>{opsPulse.busiestAgent}</div>
+              <div className={dashboardOperatorCard}>
+                <div className="text-[11px] text-slate-400">Busiest Agent</div>
+                <div className="text-sm font-bold text-white truncate" title={opsPulse.busiestAgent}>{opsPulse.busiestAgent}</div>
               </div>
             </div>
-            <div className="bg-white/75 border border-slate-200 rounded-xl p-3">
-              <div className="flex items-center justify-between text-xs text-slate-500 mb-2">
+            <div className={dashboardOperatorCard}>
+              <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
                 <span>Recent Status Mix (last {opsPulse.total})</span>
                 <span>{opsPulse.lastRun ? new Date(opsPulse.lastRun).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</span>
               </div>
@@ -1037,19 +1054,19 @@ export default function Dashboard() {
               </div>
             </div>
             <div className="pt-2">
-              <div className="text-xs uppercase tracking-wider text-slate-500 mb-2">Running Agents</div>
-              {agentStopMessage && <div className="text-[11px] text-slate-600 mb-2">{agentStopMessage}</div>}
+              <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">Running Agents</div>
+              {agentStopMessage && <div className="text-[11px] text-slate-300 mb-2">{agentStopMessage}</div>}
               <div className="space-y-2 max-h-[130px] overflow-y-auto pr-1 custom-scrollbar">
                 {runningAgentsList.length === 0 && (
-                  <div className="text-xs text-slate-500 border border-slate-200 rounded-lg px-3 py-2 bg-white/70">
+                  <div className="text-xs text-slate-400 border border-white/10 rounded-lg px-3 py-2 bg-white/[0.05]">
                     No agents running right now.
                   </div>
                 )}
                 {runningAgentsList.map((agent) => (
-                  <div key={agent.id} className="flex items-center justify-between border border-slate-200 rounded-lg px-3 py-2 bg-white/70">
+                  <div key={agent.id} className="flex items-center justify-between border border-white/10 rounded-lg px-3 py-2 bg-white/[0.05]">
                     <div className="min-w-0">
-                      <div className="text-xs font-semibold text-slate-800 truncate">{agent.name}</div>
-                      <div className="text-[11px] text-slate-500 truncate">
+                      <div className="text-xs font-semibold text-white truncate">{agent.name}</div>
+                      <div className="text-[11px] text-slate-400 truncate">
                         {agent.role} • {agent.runningCount} active
                         {stoppingAgentIds.includes(agent.id) ? ' • stopping...' : ''}
                       </div>
@@ -1068,12 +1085,12 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="panel-chrome rounded-2xl p-6">
+        <div className={dashboardOperatorPanel}>
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-bold text-slate-800">Execution Wave</h2>
-            <span className="text-xs uppercase tracking-[0.2em] text-slate-500">Last 10</span>
+            <h2 className="text-lg font-bold text-white">Execution Wave</h2>
+            <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Last 10</span>
           </div>
-          <div className="flex items-center justify-between text-[10px] text-slate-500 mb-3">
+          <div className="flex items-center justify-between text-[10px] text-slate-400 mb-3">
             <span>Main bar = tokens</span>
             <span>Mini bar = cost</span>
           </div>
@@ -1082,18 +1099,18 @@ export default function Dashboard() {
               <div className="text-sm text-slate-500">No runs yet.</div>
             )}
             {recentLoadBars.map((bar) => (
-              <div key={bar.id} className="border border-slate-200 rounded-xl p-2 bg-white/60">
+              <div key={bar.id} className="border border-white/10 rounded-xl p-2 bg-white/[0.05]">
                 <div className="flex items-center justify-between mb-1">
                   <div className="flex items-center gap-2 min-w-0">
-                    <div className="w-4.5 h-4.5 rounded-full bg-slate-100 border border-slate-200 text-[10px] text-slate-600 flex items-center justify-center">
+                    <div className="w-4.5 h-4.5 rounded-full bg-white/10 border border-white/10 text-[10px] text-slate-300 flex items-center justify-center">
                       {bar.index}
                     </div>
-                    <div className="text-xs text-slate-700 truncate max-w-[120px]" title={bar.agentName}>{bar.agentName || `Agent ${bar.id}`}</div>
+                    <div className="text-xs text-slate-200 truncate max-w-[120px]" title={bar.agentName}>{bar.agentName || `Agent ${bar.id}`}</div>
                   </div>
-                  <div className="text-[10px] text-slate-500">{new Date(bar.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                  <div className="text-[10px] text-slate-400">{new Date(bar.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
                 </div>
                 <div className="flex items-center gap-2">
-                  <div className="flex-1 h-2 rounded-full bg-slate-200 overflow-hidden">
+                  <div className="flex-1 h-2 rounded-full bg-white/10 overflow-hidden">
                     <motion.div
                       initial={{ width: 0 }}
                       animate={{ width: `${bar.pct}%` }}
@@ -1101,10 +1118,10 @@ export default function Dashboard() {
                       className="h-full rounded-full bg-linear-to-r from-indigo-500 via-brand-500 to-emerald-500"
                     />
                   </div>
-                  <div className="w-14 text-right text-[10px] font-mono text-slate-700">{bar.tokens.toLocaleString()}t</div>
+                  <div className="w-14 text-right text-[10px] font-mono text-slate-200">{bar.tokens.toLocaleString()}t</div>
                 </div>
                 <div className="flex items-center gap-2 mt-1">
-                  <div className="flex-1 h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                  <div className="flex-1 h-1.5 rounded-full bg-white/10 overflow-hidden">
                     <motion.div
                       initial={{ width: 0 }}
                       animate={{ width: `${bar.costPct}%` }}
@@ -1118,7 +1135,7 @@ export default function Dashboard() {
             ))}
           </div>
           {recentLoadBars.length > 0 && recentLoadBars.every((bar) => bar.cost === 0) && (
-            <div className="mt-3 text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-2">
+            <div className="mt-3 text-[11px] text-slate-400 bg-white/[0.05] border border-white/10 rounded-lg px-2.5 py-2">
               Cost tracking is enabled, but recent runs returned $0.0000. Token and time view is shown above.
             </div>
           )}
@@ -1127,7 +1144,7 @@ export default function Dashboard() {
 
       <div className="mb-12">
         <div className="flex items-center justify-between mb-6">
-          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+          <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
             <Users className="text-brand-500" size={20} />
             Active Workforce
           </h2>
@@ -1153,35 +1170,43 @@ export default function Dashboard() {
       </div>
 
       {isCreating && (
-        <div className="mb-8 bg-white p-6 rounded-xl border border-slate-200 shadow-sm animate-in fade-in slide-in-from-top-4">
-          <h3 className="text-lg font-semibold mb-4">Create New Crew</h3>
+        <div className={`mb-8 animate-in fade-in slide-in-from-top-4 ${dashboardOperatorPanel}`}>
+          <div className="flex items-start justify-between gap-4 mb-4">
+            <div>
+              <h3 className="text-lg font-semibold text-white">Create New Crew</h3>
+              <p className="text-sm text-slate-400 mt-1">Spin up a new syndicate without leaving the command surface.</p>
+            </div>
+            <div className="rounded-full border border-brand-400/20 bg-brand-400/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-brand-200">
+              Quick Deploy
+            </div>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="md:col-span-2">
-                <label className="block text-sm font-medium text-slate-700 mb-1">Crew Name</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Crew Name</label>
                 <input
                 type="text"
                 placeholder="e.g. Marketing Team"
-                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                className="w-full px-4 py-2 border border-white/10 bg-white/[0.06] text-white rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
                 value={newCrewName}
                 onChange={(e) => setNewCrewName(e.target.value)}
                 />
             </div>
 
             <div className="md:col-span-2">
-                <label className="block text-sm font-medium text-slate-700 mb-1">Description</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Description</label>
                 <input
                 type="text"
                 placeholder="Brief description for MCP/API users"
-                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                className="w-full px-4 py-2 border border-white/10 bg-white/[0.06] text-white rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
                 value={newCrewDescription}
                 onChange={(e) => setNewCrewDescription(e.target.value)}
                 />
             </div>
             
             <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Process</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Process</label>
                 <select
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white"
+                    className="w-full px-4 py-2 border border-white/10 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white/[0.06] text-white"
                     value={newCrewProcess}
                     onChange={(e) => setNewCrewProcess(e.target.value)}
                 >
@@ -1191,9 +1216,9 @@ export default function Dashboard() {
             </div>
 
             <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Project</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Project</label>
                 <select
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white"
+                    className="w-full px-4 py-2 border border-white/10 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white/[0.06] text-white"
                     value={selectedProjectId}
                     onChange={(e) => setSelectedProjectId(e.target.value)}
                 >
@@ -1212,7 +1237,7 @@ export default function Dashboard() {
                     checked={newCrewExposed}
                     onChange={(e) => setNewCrewExposed(e.target.checked)}
                 />
-                <label htmlFor="crewExposed" className="text-sm text-slate-700">
+                <label htmlFor="crewExposed" className="text-sm text-slate-300">
                     Expose Crew via API/MCP (Publicly accessible if key is shared)
                 </label>
             </div>
@@ -1221,7 +1246,7 @@ export default function Dashboard() {
           <div className="flex justify-end gap-3 mt-4">
             <button 
               onClick={() => setIsCreating(false)}
-              className="text-slate-500 px-4 py-2 hover:text-slate-700"
+              className="text-slate-400 px-4 py-2 hover:text-slate-200"
             >
               Cancel
             </button>
@@ -1325,15 +1350,15 @@ export default function Dashboard() {
             </div>
             Operation Streams
         </h2>
-        <div className="glass-card rounded-2xl overflow-hidden">
+        <div className={`${dashboardOperatorPanel} overflow-hidden p-0`}>
             {recentExecutions.length === 0 ? (
                 <div className="p-8 text-center text-slate-500">
                     No recent activity found.
                 </div>
             ) : (
                 <div className="overflow-x-auto">
-                    <table className="w-full text-sm text-left text-slate-600">
-                        <thead className="bg-slate-50 text-slate-700 font-medium border-b border-slate-200">
+                    <table className="w-full text-sm text-left text-slate-300">
+                        <thead className="bg-white/[0.06] text-slate-200 font-medium border-b border-white/10">
                             <tr>
                                 <th className="px-6 py-4">Agent</th>
                                 <th className="px-6 py-4">Time</th>
@@ -1342,26 +1367,26 @@ export default function Dashboard() {
                                 <th className="px-6 py-4 text-right">Cost</th>
                             </tr>
                         </thead>
-                        <tbody className="divide-y divide-slate-100">
+                        <tbody className="divide-y divide-white/10">
                             {pagedExecutions.map(exec => (
                                 <tr 
                                     key={exec.id} 
-                                    className="hover:bg-slate-50 transition-colors cursor-pointer"
+                                    className="hover:bg-white/[0.05] transition-colors cursor-pointer"
                                     onClick={() => setSelectedExecution(exec)}
                                 >
-                                    <td className="px-6 py-4 font-medium text-slate-900 flex items-center gap-2">
-                                        <div className="w-6 h-6 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center text-xs">
+                                    <td className="px-6 py-4 font-medium text-white flex items-center gap-2">
+                                        <div className="w-6 h-6 rounded-full bg-indigo-500/20 text-indigo-200 flex items-center justify-center text-xs">
                                             <Brain size={14} />
                                         </div>
                                         {exec.agent_name}
                                     </td>
-                                    <td className="px-6 py-4 text-slate-500">
+                                    <td className="px-6 py-4 text-slate-400">
                                         {exec.created_at ? new Date(exec.created_at).toLocaleString() : '—'}
                                     </td>
-                                    <td className="px-6 py-4 text-right font-mono text-slate-600">
+                                    <td className="px-6 py-4 text-right font-mono text-slate-300">
                                         {(exec.prompt_tokens || 0).toLocaleString()}
                                     </td>
-                                    <td className="px-6 py-4 text-right font-mono text-slate-600">
+                                    <td className="px-6 py-4 text-right font-mono text-slate-300">
                                         {(exec.completion_tokens || 0).toLocaleString()}
                                     </td>
                                     <td className="px-6 py-4 text-right font-mono font-medium text-emerald-600">
