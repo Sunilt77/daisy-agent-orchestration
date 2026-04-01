@@ -407,6 +407,12 @@ export default function VoicePage() {
         }
         if (message.type === 'stt.partial') setLiveTranscript(String(message.text || ''));
         if (message.type === 'stt.final') setLiveTranscript(String(message.text || ''));
+        if (message.type === 'agent.reply.start') setAgentReply('');
+        if (message.type === 'agent.reply.delta') {
+          if (message.fullText) setAgentReply(String(message.fullText || ''));
+          else if (message.text) setAgentReply((prev) => `${prev}${prev ? ' ' : ''}${String(message.text || '')}`);
+        }
+        if (message.type === 'agent.reply.complete') setAgentReply(String(message.text || ''));
         if (message.type === 'agent.reply') setAgentReply(String(message.text || ''));
         if (message.type === 'voice.busy') setStatusNote(String(message.message || 'The runtime is still processing the previous utterance.'));
         if (message.type === 'voice.progress' && message.text) {

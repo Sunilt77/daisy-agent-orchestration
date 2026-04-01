@@ -1213,6 +1213,26 @@ function sendVoiceSocketEvent(ws: WebSocket, type: string, payload: any = {}) {
   ws.send(JSON.stringify({ type, ...payload }));
 }
 
+function splitVoiceReplyIntoChunks(text: string) {
+  const normalized = String(text || '').trim();
+  if (!normalized) return [];
+  const sentenceMatches = normalized.match(/[^.!?]+[.!?]+|[^.!?]+$/g);
+  const sentences = (sentenceMatches || [normalized]).map((part) => String(part || '').trim()).filter(Boolean);
+  const chunks: string[] = [];
+  let current = '';
+  for (const sentence of sentences) {
+    const next = current ? `${current} ${sentence}` : sentence;
+    if (next.length <= 180) {
+      current = next;
+      continue;
+    }
+    if (current) chunks.push(current);
+    current = sentence;
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
 function buildVoiceProgressUpdate(log: any, targetType: 'agent' | 'crew', targetName: string) {
   if (!log || typeof log !== 'object') return null;
   const agentName = String(log.agent || '').trim();
@@ -1415,6 +1435,28 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
       execution_id: executionId,
       usage,
     });
+    sendVoiceSocketEvent(ws, 'agent.reply.start', {
+      sessionId: current.sessionId,
+      executionId,
+      usage,
+    });
+    const replyChunks = splitVoiceReplyIntoChunks(reply);
+    let replySoFar = '';
+    for (const chunk of replyChunks) {
+      replySoFar = replySoFar ? `${replySoFar} ${chunk}` : chunk;
+      sendVoiceSocketEvent(ws, 'agent.reply.delta', {
+        sessionId: current.sessionId,
+        text: chunk,
+        fullText: replySoFar,
+        executionId,
+      });
+    }
+    sendVoiceSocketEvent(ws, 'agent.reply.complete', {
+      sessionId: current.sessionId,
+      text: reply,
+      executionId,
+      usage,
+    });
     sendVoiceSocketEvent(ws, 'agent.reply', {
       sessionId: current.sessionId,
       text: reply,
@@ -1423,25 +1465,40 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
     });
 
     if (reply && current.autoTts) {
+      const mimeType = current.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg';
       const abortController = new AbortController();
       current.activeTtsAbort = abortController;
       setVoiceTurnState(ws, current, 'speaking');
       sendVoiceSocketEvent(ws, 'tts.processing', { sessionId: current.sessionId });
       sendVoiceSocketEvent(ws, 'tts.start', {
         sessionId: current.sessionId,
-        mimeType: current.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
+        mimeType,
         outputFormat: current.outputFormat,
       });
       let totalBytes = 0;
-      await streamSynthesizeVoiceAudio(reply, current.voiceId, current.ttsModelId, current.outputFormat, (chunk) => {
-        totalBytes += chunk.length;
-        sendVoiceSocketEvent(ws, 'tts.chunk', {
+      const ttsChunks = replyChunks.length ? replyChunks : [reply];
+      for (let index = 0; index < ttsChunks.length; index += 1) {
+        const ttsChunk = ttsChunks[index];
+        sendVoiceSocketEvent(ws, 'tts.segment.start', {
           sessionId: current.sessionId,
-          audio: chunk.toString('base64'),
-          mimeType: current.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
-          outputFormat: current.outputFormat,
+          index,
+          text: ttsChunk,
         });
-      }, abortController.signal);
+        await streamSynthesizeVoiceAudio(ttsChunk, current.voiceId, current.ttsModelId, current.outputFormat, (chunk) => {
+          totalBytes += chunk.length;
+          sendVoiceSocketEvent(ws, 'tts.chunk', {
+            sessionId: current.sessionId,
+            audio: chunk.toString('base64'),
+            mimeType,
+            outputFormat: current.outputFormat,
+          });
+        }, abortController.signal);
+        sendVoiceSocketEvent(ws, 'tts.segment.complete', {
+          sessionId: current.sessionId,
+          index,
+          text: ttsChunk,
+        });
+      }
       if (current.activeTtsAbort === abortController) current.activeTtsAbort = null;
       appendVoiceSessionEvent(current.sessionId, 'tts.audio', {
         bytes: totalBytes,
@@ -1449,7 +1506,7 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
       });
       sendVoiceSocketEvent(ws, 'tts.complete', {
         sessionId: current.sessionId,
-        mimeType: current.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
+        mimeType,
         outputFormat: current.outputFormat,
         bytes: totalBytes,
       });
