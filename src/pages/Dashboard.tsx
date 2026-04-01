@@ -133,6 +133,7 @@ export default function Dashboard() {
   const [cancelingAgentId, setCancelingAgentId] = useState<number | null>(null);
   const [agentStopMessage, setAgentStopMessage] = useState<string>('');
   const [stoppingAgentIds, setStoppingAgentIds] = useState<number[]>([]);
+  const dashboardDarkPanel = 'bg-linear-to-br from-slate-950 via-slate-900 to-slate-900 border-slate-800/80 shadow-[0_24px_70px_rgba(2,6,23,0.35)]';
   
   const navigate = useNavigate();
 
@@ -586,10 +587,10 @@ export default function Dashboard() {
           transition={{ duration: 0.5, delay: 0.2 }}
           className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-6 mb-12"
         >
-          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-brand-500/20 shadow-2xl">
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className={`telemetry-tile p-6 relative overflow-hidden group border-brand-500/30 ${dashboardDarkPanel}`}>
             <div className="absolute -top-8 -right-8 w-32 h-32 rounded-full bg-brand-500/10 blur-3xl group-hover:bg-brand-500/20 transition-all duration-500" />
             <div className="relative">
-              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-brand-300/80 mb-3">Agents Online</div>
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-brand-300 mb-3">Agents Online</div>
               <div className="flex items-end justify-between">
                 <div className="text-5xl font-black text-white tracking-tighter">{agents.length}</div>
                 <div className="p-3 rounded-2xl bg-brand-500/20 text-brand-300 border border-brand-500/30 group-hover:rotate-12 transition-all">
@@ -603,49 +604,49 @@ export default function Dashboard() {
             </div>
           </motion.div>
 
-          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-accent-500/20 shadow-2xl">
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className={`telemetry-tile p-6 relative overflow-hidden group border-amber-400/30 ${dashboardDarkPanel}`}>
             <div className="absolute -bottom-10 -left-10 w-32 h-32 rounded-full bg-accent-500/10 blur-3xl group-hover:bg-accent-500/20 transition-all duration-500" />
             <div className="relative">
-              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-accent-300/80 mb-3">Crew Matrix</div>
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-amber-300 mb-3">Crew Matrix</div>
               <div className="flex items-end justify-between">
                 <div className="text-5xl font-black text-white tracking-tighter">{crews.length}</div>
                 <div className="p-3 rounded-2xl bg-accent-500/20 text-accent-300 border border-accent-500/30 group-hover:rotate-12 transition-all">
                   <Users size={24} />
                 </div>
               </div>
-              <div className="text-[12px] font-bold text-slate-400 mt-4 flex items-center gap-2">
+              <div className="text-[12px] font-bold text-slate-200 mt-4 flex items-center gap-2">
                 <div className="w-3 h-3 rounded bg-accent-500/30" />
                 {dashboardInsights.exposedCrews} exposed via API/MCP
               </div>
             </div>
           </motion.div>
 
-          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-emerald-500/20 shadow-2xl">
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className={`telemetry-tile p-6 relative overflow-hidden group border-emerald-500/30 ${dashboardDarkPanel}`}>
             <div className="relative">
-              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-emerald-300/80 mb-3">24H Throughput</div>
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-emerald-300 mb-3">24H Throughput</div>
               <div className="flex items-end justify-between">
                 <div className="text-5xl font-black text-white tracking-tighter">{dashboardInsights.execution24h}</div>
                 <div className="p-3 rounded-2xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 group-hover:rotate-12 transition-all">
                   <TrendingUp size={24} />
                 </div>
               </div>
-              <div className="text-[12px] font-bold text-slate-400 mt-4 flex items-center gap-2">
+              <div className="text-[12px] font-bold text-slate-200 mt-4 flex items-center gap-2">
                 <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
                 Recent executions today
               </div>
             </div>
           </motion.div>
 
-          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-indigo-500/20 shadow-2xl">
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className={`telemetry-tile p-6 relative overflow-hidden group border-indigo-500/30 ${dashboardDarkPanel}`}>
             <div className="relative">
-              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-indigo-300/80 mb-3">Token Flow</div>
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-indigo-300 mb-3">Token Flow</div>
               <div className="flex items-end justify-between">
                 <div className="text-4xl font-black text-white tracking-tighter leading-none">{(dashboardInsights.totalPrompt + dashboardInsights.totalCompletion).toLocaleString()}</div>
                 <div className="p-3 rounded-2xl bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 group-hover:rotate-12 transition-all">
                   <Cpu size={24} />
                 </div>
               </div>
-              <div className="text-[11px] font-bold text-slate-400 mt-4 truncate flex items-center gap-2">
+              <div className="text-[11px] font-bold text-slate-200 mt-4 truncate flex items-center gap-2">
                 <span className="text-indigo-300">P</span> {dashboardInsights.totalPrompt.toLocaleString()}
                 <span className="mx-1 text-slate-600">|</span>
                 <span className="text-violet-300">C</span> {dashboardInsights.totalCompletion.toLocaleString()}
@@ -653,21 +654,21 @@ export default function Dashboard() {
             </div>
           </motion.div>
 
-          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-emerald-500/20 shadow-2xl">
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className={`telemetry-tile p-6 relative overflow-hidden group border-emerald-500/30 ${dashboardDarkPanel}`}>
             <div className="relative">
-              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-emerald-300/80 mb-3">Cost Envelope</div>
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-emerald-300 mb-3">Cost Envelope</div>
               <div className="flex items-end justify-between">
                 <div className="text-4xl font-black text-emerald-400 tracking-tighter">${dashboardInsights.totalCost.toFixed(4)}</div>
                 <div className="p-3 rounded-2xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 group-hover:rotate-12 transition-all">
                   <DollarSign size={24} />
                 </div>
               </div>
-              <div className="text-[12px] font-bold text-slate-400 mt-4">Avg latency {dashboardInsights.avgLatency}s</div>
+              <div className="text-[12px] font-bold text-slate-200 mt-4">Avg latency {dashboardInsights.avgLatency}s</div>
             </div>
           </motion.div>
         </motion.div>
 
-      <div className="panel-chrome rounded-[2.5rem] p-8 mb-10 overflow-hidden relative">
+      <div className="panel-chrome rounded-[2.5rem] p-8 mb-10 overflow-hidden relative border border-slate-200/90 bg-white/92">
         <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-brand-500/5 blur-[120px] rounded-full -mr-64 -mt-64" />
         
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-10 relative z-10">
@@ -722,7 +723,7 @@ export default function Dashboard() {
         </div>
 
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 relative z-10">
-          <div className="rounded-[2.4rem] border border-white/10 bg-white/[0.05] p-8 backdrop-blur-2xl relative overflow-hidden group">
+          <div className={`rounded-[2.4rem] border p-8 backdrop-blur-2xl relative overflow-hidden group ${dashboardDarkPanel}`}>
             <div className="absolute inset-0 bg-linear-to-b from-indigo-500/5 to-transparent pointer-events-none" />
             <div className="flex items-center justify-between mb-6 relative z-10">
               <div className="flex items-center gap-4">
@@ -731,10 +732,10 @@ export default function Dashboard() {
                 </div>
                 <div>
                   <h3 className="text-xl font-black text-white tracking-tight">Collective Evolution</h3>
-                  <div className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mt-0.5">Analytics Core</div>
+                  <div className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mt-0.5">Analytics Core</div>
                 </div>
               </div>
-              <div className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 text-[10px] font-black text-slate-400 uppercase tracking-widest hidden sm:block">
+              <div className="px-4 py-1.5 rounded-full bg-white/10 border border-white/10 text-[10px] font-black text-slate-300 uppercase tracking-widest hidden sm:block">
                 Last 7 Days
               </div>
             </div>
@@ -826,7 +827,7 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="rounded-[2.4rem] border border-white/10 bg-white/[0.05] p-8 backdrop-blur-2xl relative overflow-hidden group">
+          <div className={`rounded-[2.4rem] border p-8 backdrop-blur-2xl relative overflow-hidden group ${dashboardDarkPanel}`}>
             <div className="absolute inset-0 bg-linear-to-b from-brand-500/5 to-transparent pointer-events-none" />
             <div className="flex items-center justify-between mb-6 relative z-10">
               <div className="flex items-center gap-4">
@@ -835,10 +836,10 @@ export default function Dashboard() {
                 </div>
                 <div>
                   <h3 className="text-xl font-black text-white tracking-tight">Swarm Coordination</h3>
-                  <div className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mt-0.5">Real-Time Node Mesh</div>
+                  <div className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mt-0.5">Real-Time Node Mesh</div>
                 </div>
               </div>
-              <div className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 text-[10px] font-black text-slate-400 uppercase tracking-widest hidden sm:block">
+              <div className="px-4 py-1.5 rounded-full bg-white/10 border border-white/10 text-[10px] font-black text-slate-300 uppercase tracking-widest hidden sm:block">
                 Top Active Nodes
               </div>
             </div>
@@ -851,13 +852,13 @@ export default function Dashboard() {
                 </div>
               ) : (
                 coordinationSeries.map((row) => (
-                  <div key={row.name} className="group/row bg-white/[0.02] p-4 rounded-2xl border border-white/5 hover:bg-white/[0.05] transition-all">
+                  <div key={row.name} className="group/row bg-white/[0.06] p-4 rounded-2xl border border-white/10 hover:bg-white/[0.09] transition-all">
                     <div className="flex items-center justify-between text-[11px] mb-3">
                       <span className="truncate max-w-[65%] text-slate-200 font-black tracking-tight group-hover/row:text-brand-100 transition-colors uppercase">{row.name}</span>
-                      <div className="flex gap-3 font-black text-[9px] text-slate-500 uppercase tracking-wider">
-                         <span className="text-violet-400">Done:{row.completedPct}%</span>
-                         <span className="text-sky-400">Live:{row.runningPct}%</span>
-                         <span className="text-orange-400">Fail:{row.failedPct}%</span>
+                      <div className="flex gap-3 font-black text-[9px] text-slate-400 uppercase tracking-wider">
+                         <span className="text-violet-300">Done:{row.completedPct}%</span>
+                         <span className="text-sky-300">Live:{row.runningPct}%</span>
+                         <span className="text-orange-300">Fail:{row.failedPct}%</span>
                       </div>
                     </div>
                     <div className="h-4 w-full rounded-full bg-slate-900/50 overflow-hidden flex border border-white/5 shadow-inner">
