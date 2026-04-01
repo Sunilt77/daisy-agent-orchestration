@@ -377,6 +377,10 @@ export default function VoicePage() {
     () => availableTargets.find((target) => Number(target.id) === Number(targetId)) || null,
     [targetId, availableTargets],
   );
+  const currentPreset = useMemo(
+    () => voiceConfigs.find((item) => String(item.id) === String(selectedVoiceConfigId)) || null,
+    [selectedVoiceConfigId, voiceConfigs],
+  );
 
   const sensitivityGuide = useMemo(() => {
     if (!vadEnabled) {
@@ -928,10 +932,41 @@ export default function VoicePage() {
         </div>
       </div>
 
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+        <div className="rounded-2xl border border-white/10 bg-slate-950/88 px-4 py-4 text-white shadow-[0_18px_65px_rgba(15,23,42,0.28)]">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Target</div>
+          <div className="mt-2 text-lg font-semibold">{selectedTarget?.name || `No ${targetType} selected`}</div>
+          <div className="mt-1 text-xs text-slate-400">{selectedTarget?.subtitle || selectedTarget?.role || 'Select a runtime target'}</div>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-slate-950/88 px-4 py-4 text-white shadow-[0_18px_65px_rgba(15,23,42,0.28)]">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Connection</div>
+          <div className="mt-2 text-lg font-semibold">{isConnected ? 'Connected' : 'Disconnected'}</div>
+          <div className="mt-1 text-xs text-slate-400">{sessionId ? `Session ${sessionId}` : 'Open a socket to start a voice turn'}</div>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-slate-950/88 px-4 py-4 text-white shadow-[0_18px_65px_rgba(15,23,42,0.28)]">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Turn State</div>
+          <div className="mt-2 text-lg font-semibold capitalize">{turnState}</div>
+          <div className="mt-1 text-xs text-slate-400">Barge-in and VAD state are tracked live during the session.</div>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-slate-950/88 px-4 py-4 text-white shadow-[0_18px_65px_rgba(15,23,42,0.28)]">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Preset</div>
+          <div className="mt-2 text-lg font-semibold">{currentPreset?.name || 'Custom'}</div>
+          <div className="mt-1 text-xs text-slate-400">{currentPreset ? 'Saved runtime profile is active.' : 'Using unsaved runtime values.'}</div>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] gap-6">
         <section className="space-y-4">
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="text-sm font-semibold text-slate-900 mb-4">Session Setup</div>
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Session Setup</div>
+                <div className="mt-1 text-xs text-slate-500">Pick the runtime target, choose a saved voice profile, and connect. Advanced synthesis and turn controls stay below when you need them.</div>
+              </div>
+              <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-600">
+                Core Flow
+              </span>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Runtime Type</label>
@@ -977,92 +1012,6 @@ export default function VoicePage() {
                   ))}
                 </select>
               </div>
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Voice ID</label>
-                <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={voiceId} onChange={(e) => setVoiceId(e.target.value)} />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">TTS Model</label>
-                <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={ttsModelId} onChange={(e) => setTtsModelId(e.target.value)} />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">STT Model</label>
-                <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={sttModelId} onChange={(e) => setSttModelId(e.target.value)} />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Output Format</label>
-                <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={outputFormat} onChange={(e) => setOutputFormat(e.target.value)} />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Sample Rate</label>
-                <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" type="number" value={sampleRate} onChange={(e) => setSampleRate(Number(e.target.value) || 16000)} />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Language</label>
-                <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={languageCode} onChange={(e) => setLanguageCode(e.target.value)} />
-              </div>
-            </div>
-
-            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-4">
-              <div>
-                <div className="text-sm font-semibold text-slate-900">Turn Detection And Disturbance Control</div>
-                <div className="text-xs text-slate-500 mt-1">Use these controls to ignore short background disturbances, commit turns faster after real pauses, and keep the conversation feeling responsive.</div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {ENVIRONMENT_PRESETS.map((preset) => (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    onClick={() => applyEnvironmentPreset(preset.id)}
-                    className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-slate-400 hover:bg-slate-100"
-                    title={preset.description}
-                  >
-                    {preset.label}
-                  </button>
-                ))}
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                <label className="inline-flex items-center gap-2 text-sm text-slate-700">
-                  <input type="checkbox" checked={vadEnabled} onChange={(e) => setVadEnabled(e.target.checked)} />
-                  VAD auto-commit
-                </label>
-                <label className="inline-flex items-center gap-2 text-sm text-slate-700">
-                  <input type="checkbox" checked={browserNoiseSuppression} onChange={(e) => setBrowserNoiseSuppression(e.target.checked)} />
-                  Browser noise suppression
-                </label>
-                <label className="inline-flex items-center gap-2 text-sm text-slate-700">
-                  <input type="checkbox" checked={browserEchoCancellation} onChange={(e) => setBrowserEchoCancellation(e.target.checked)} />
-                  Echo cancellation
-                </label>
-                <label className="inline-flex items-center gap-2 text-sm text-slate-700">
-                  <input type="checkbox" checked={browserAutoGainControl} onChange={(e) => setBrowserAutoGainControl(e.target.checked)} />
-                  Auto gain control
-                </label>
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Silence Threshold (sec)</label>
-                  <input type="number" min="0.2" max="3" step="0.1" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={vadSilenceThresholdSecs} onChange={(e) => setVadSilenceThresholdSecs(Number(e.target.value) || DEFAULT_VAD_SILENCE_THRESHOLD_SECS)} />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">VAD Threshold</label>
-                  <input type="number" min="0.1" max="0.95" step="0.05" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={vadThreshold} onChange={(e) => setVadThreshold(Number(e.target.value) || DEFAULT_VAD_THRESHOLD)} />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Min Speech (ms)</label>
-                  <input type="number" min="50" max="2000" step="10" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={minSpeechDurationMs} onChange={(e) => setMinSpeechDurationMs(Number(e.target.value) || DEFAULT_MIN_SPEECH_DURATION_MS)} />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Min Silence (ms)</label>
-                  <input type="number" min="50" max="3000" step="10" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={minSilenceDurationMs} onChange={(e) => setMinSilenceDurationMs(Number(e.target.value) || DEFAULT_MIN_SILENCE_DURATION_MS)} />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Recompute Window</label>
-                  <input type="number" min="0" max="50" step="1" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={maxTokensToRecompute} onChange={(e) => setMaxTokensToRecompute(Number(e.target.value) || DEFAULT_MAX_TOKENS_TO_RECOMPUTE)} />
-                </div>
-              </div>
-              <div className={`rounded-xl border px-3 py-3 ${sensitivityGuide.tone}`}>
-                <div className="text-sm font-semibold">{sensitivityGuide.title}</div>
-                <div className="text-xs mt-1 opacity-90">{sensitivityGuide.text}</div>
-              </div>
             </div>
 
             <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -1085,67 +1034,182 @@ export default function VoicePage() {
               </button>
             </div>
 
-            {selectedVoiceConfigId ? (
-              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-900">Preset Access</div>
-                    <div className="text-xs text-slate-500 mt-1">Manage who can see and reuse this voice preset.</div>
-                  </div>
-                  {presetAccessLoading ? <div className="text-xs text-slate-500">Loading…</div> : null}
+            <details className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 group">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-slate-900">Runtime Configuration</div>
+                  <div className="mt-1 text-xs text-slate-500">Voice ID, synthesis model, transcription model, language, and audio format.</div>
                 </div>
-                <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-                    <div className="text-[11px] text-slate-500">Owner User</div>
-                    <div className="text-sm font-semibold text-slate-900 mt-1">{presetAccess?.owner?.owner_user_id || 'Unknown'}</div>
-                  </div>
-                  <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-                    <div className="text-[11px] text-slate-500">Owner Org</div>
-                    <div className="text-sm font-semibold text-slate-900 mt-1">{presetAccess?.owner?.owner_org_id || 'None'}</div>
-                  </div>
-                  <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-                    <div className="text-[11px] text-slate-500">Visibility</div>
-                    <select
-                      value={presetVisibility}
-                      onChange={(e) => setPresetVisibility(e.target.value === 'org' ? 'org' : 'private')}
-                      className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
-                    >
-                      <option value="private">Private</option>
-                      <option value="org">Organization</option>
-                    </select>
-                  </div>
+                <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 group-open:bg-slate-900 group-open:text-white">
+                  Expand
+                </span>
+              </summary>
+              <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Voice ID</label>
+                  <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={voiceId} onChange={(e) => setVoiceId(e.target.value)} />
                 </div>
-                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Shared User IDs</label>
-                    <textarea
-                      value={presetSharedUserIdsText}
-                      onChange={(e) => setPresetSharedUserIdsText(e.target.value)}
-                      placeholder="user_123, user_456"
-                      className="min-h-[88px] w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Shared Org IDs</label>
-                    <textarea
-                      value={presetSharedOrgIdsText}
-                      onChange={(e) => setPresetSharedOrgIdsText(e.target.value)}
-                      placeholder="org_123, org_456"
-                      className="min-h-[88px] w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
-                    />
-                  </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">TTS Model</label>
+                  <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={ttsModelId} onChange={(e) => setTtsModelId(e.target.value)} />
                 </div>
-                {presetAccessError ? <div className="mt-3 text-sm text-red-600">{presetAccessError}</div> : null}
-                <div className="mt-4 flex justify-end">
-                  <button
-                    onClick={saveSelectedPresetAccess}
-                    disabled={presetAccessLoading || presetAccessSaving}
-                    className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40"
-                  >
-                    {presetAccessSaving ? 'Saving Access…' : 'Save Preset Access'}
-                  </button>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">STT Model</label>
+                  <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={sttModelId} onChange={(e) => setSttModelId(e.target.value)} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Output Format</label>
+                  <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={outputFormat} onChange={(e) => setOutputFormat(e.target.value)} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Sample Rate</label>
+                  <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" type="number" value={sampleRate} onChange={(e) => setSampleRate(Number(e.target.value) || 16000)} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Language</label>
+                  <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={languageCode} onChange={(e) => setLanguageCode(e.target.value)} />
                 </div>
               </div>
+            </details>
+
+            <details className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 group">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-slate-900">Turn Detection And Disturbance Control</div>
+                  <div className="mt-1 text-xs text-slate-500">Tune VAD timing and browser-side cleanup to ignore disturbances without making the assistant feel slow.</div>
+                </div>
+                <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 group-open:bg-slate-900 group-open:text-white">
+                  Expand
+                </span>
+              </summary>
+              <div className="mt-4 space-y-4">
+                <div className="flex flex-wrap gap-2">
+                  {ENVIRONMENT_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => applyEnvironmentPreset(preset.id)}
+                      className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-slate-400 hover:bg-slate-100"
+                      title={preset.description}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                  <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" checked={vadEnabled} onChange={(e) => setVadEnabled(e.target.checked)} />
+                    VAD auto-commit
+                  </label>
+                  <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" checked={browserNoiseSuppression} onChange={(e) => setBrowserNoiseSuppression(e.target.checked)} />
+                    Browser noise suppression
+                  </label>
+                  <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" checked={browserEchoCancellation} onChange={(e) => setBrowserEchoCancellation(e.target.checked)} />
+                    Echo cancellation
+                  </label>
+                  <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" checked={browserAutoGainControl} onChange={(e) => setBrowserAutoGainControl(e.target.checked)} />
+                    Auto gain control
+                  </label>
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Silence Threshold (sec)</label>
+                    <input type="number" min="0.2" max="3" step="0.1" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={vadSilenceThresholdSecs} onChange={(e) => setVadSilenceThresholdSecs(Number(e.target.value) || DEFAULT_VAD_SILENCE_THRESHOLD_SECS)} />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">VAD Threshold</label>
+                    <input type="number" min="0.1" max="0.95" step="0.05" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={vadThreshold} onChange={(e) => setVadThreshold(Number(e.target.value) || DEFAULT_VAD_THRESHOLD)} />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Min Speech (ms)</label>
+                    <input type="number" min="50" max="2000" step="10" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={minSpeechDurationMs} onChange={(e) => setMinSpeechDurationMs(Number(e.target.value) || DEFAULT_MIN_SPEECH_DURATION_MS)} />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Min Silence (ms)</label>
+                    <input type="number" min="50" max="3000" step="10" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={minSilenceDurationMs} onChange={(e) => setMinSilenceDurationMs(Number(e.target.value) || DEFAULT_MIN_SILENCE_DURATION_MS)} />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Recompute Window</label>
+                    <input type="number" min="0" max="50" step="1" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={maxTokensToRecompute} onChange={(e) => setMaxTokensToRecompute(Number(e.target.value) || DEFAULT_MAX_TOKENS_TO_RECOMPUTE)} />
+                  </div>
+                </div>
+                <div className={`rounded-xl border px-3 py-3 ${sensitivityGuide.tone}`}>
+                  <div className="text-sm font-semibold">{sensitivityGuide.title}</div>
+                  <div className="text-xs mt-1 opacity-90">{sensitivityGuide.text}</div>
+                </div>
+              </div>
+            </details>
+
+            {selectedVoiceConfigId ? (
+              <details className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 group">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">Preset Access</div>
+                    <div className="mt-1 text-xs text-slate-500">Manage who can see and reuse this voice preset.</div>
+                  </div>
+                  <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 group-open:bg-slate-900 group-open:text-white">
+                    Expand
+                  </span>
+                </summary>
+                <div className="mt-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-xs text-slate-500">Shared settings for this preset.</div>
+                    {presetAccessLoading ? <div className="text-xs text-slate-500">Loading…</div> : null}
+                  </div>
+                  <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                      <div className="text-[11px] text-slate-500">Owner User</div>
+                      <div className="text-sm font-semibold text-slate-900 mt-1">{presetAccess?.owner?.owner_user_id || 'Unknown'}</div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                      <div className="text-[11px] text-slate-500">Owner Org</div>
+                      <div className="text-sm font-semibold text-slate-900 mt-1">{presetAccess?.owner?.owner_org_id || 'None'}</div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                      <div className="text-[11px] text-slate-500">Visibility</div>
+                      <select
+                        value={presetVisibility}
+                        onChange={(e) => setPresetVisibility(e.target.value === 'org' ? 'org' : 'private')}
+                        className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+                      >
+                        <option value="private">Private</option>
+                        <option value="org">Organization</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Shared User IDs</label>
+                      <textarea
+                        value={presetSharedUserIdsText}
+                        onChange={(e) => setPresetSharedUserIdsText(e.target.value)}
+                        placeholder="user_123, user_456"
+                        className="min-h-[88px] w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Shared Org IDs</label>
+                      <textarea
+                        value={presetSharedOrgIdsText}
+                        onChange={(e) => setPresetSharedOrgIdsText(e.target.value)}
+                        placeholder="org_123, org_456"
+                        className="min-h-[88px] w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                      />
+                    </div>
+                  </div>
+                  {presetAccessError ? <div className="mt-3 text-sm text-red-600">{presetAccessError}</div> : null}
+                  <div className="mt-4 flex justify-end">
+                    <button
+                      onClick={saveSelectedPresetAccess}
+                      disabled={presetAccessLoading || presetAccessSaving}
+                      className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40"
+                    >
+                      {presetAccessSaving ? 'Saving Access…' : 'Save Preset Access'}
+                    </button>
+                  </div>
+                </div>
+              </details>
             ) : null}
 
             <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
