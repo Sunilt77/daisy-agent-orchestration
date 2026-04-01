@@ -1616,7 +1616,15 @@ export default function ToolsPage() {
 
                               {selectedToolId !== 'new' && selectedTool && (
                                 <div className="bg-indigo-50/70 border border-indigo-100 rounded-xl p-4 space-y-4">
-                                  <div className="text-xs font-bold text-indigo-700 uppercase tracking-wider mb-2">Link Insights</div>
+                                  <div className="flex items-start justify-between gap-4">
+                                    <div>
+                                      <div className="text-xs font-bold text-indigo-700 uppercase tracking-wider mb-1">Tool Snapshot</div>
+                                      <div className="text-sm text-slate-600">Operational summary for linked agents, exposure status, recent usage, and delete impact.</div>
+                                    </div>
+                                    <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-700">
+                                      Summary
+                                    </span>
+                                  </div>
                                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                                     <div className="rounded-lg bg-white border border-indigo-100 px-3 py-2">
                                       <div className="text-[11px] text-slate-500">Linked Agents</div>
@@ -1671,132 +1679,158 @@ export default function ToolsPage() {
                               )}
 
                               {selectedToolId !== 'new' && selectedTool && (
-                                <div className="border border-slate-200 rounded-xl p-4 bg-white space-y-4">
-                                  <div className="flex items-center justify-between gap-3">
+                                <details className="border border-slate-200 rounded-xl p-4 bg-white group">
+                                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
                                     <div>
                                       <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Access</div>
                                       <div className="text-sm text-slate-600 mt-1">Control who can view and manage this tool.</div>
                                     </div>
-                                    {resourceAccessLoading && <div className="text-xs text-slate-500">Loading…</div>}
-                                  </div>
-                                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                      <div className="text-[11px] text-slate-500">Owner User</div>
-                                      <div className="text-sm font-semibold text-slate-900 mt-1">{resourceAccess?.owner?.owner_user_id || 'Unknown'}</div>
+                                    <div className="flex items-center gap-3">
+                                      {resourceAccessLoading && <div className="text-xs text-slate-500">Loading…</div>}
+                                      <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 group-open:bg-slate-900 group-open:text-white">
+                                        Expand
+                                      </span>
                                     </div>
-                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                      <div className="text-[11px] text-slate-500">Owner Org</div>
-                                      <div className="text-sm font-semibold text-slate-900 mt-1">{resourceAccess?.owner?.owner_org_id || 'None'}</div>
+                                  </summary>
+                                  <div className="mt-4 space-y-4">
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                        <div className="text-[11px] text-slate-500">Owner User</div>
+                                        <div className="text-sm font-semibold text-slate-900 mt-1">{resourceAccess?.owner?.owner_user_id || 'Unknown'}</div>
+                                      </div>
+                                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                        <div className="text-[11px] text-slate-500">Owner Org</div>
+                                        <div className="text-sm font-semibold text-slate-900 mt-1">{resourceAccess?.owner?.owner_org_id || 'None'}</div>
+                                      </div>
+                                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                        <div className="text-[11px] text-slate-500">Visibility</div>
+                                        <select
+                                          value={resourceVisibility}
+                                          onChange={(e) => setResourceVisibility(e.target.value === 'org' ? 'org' : 'private')}
+                                          className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                                        >
+                                          <option value="private">Private</option>
+                                          <option value="org">Organization</option>
+                                        </select>
+                                      </div>
                                     </div>
-                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                      <div className="text-[11px] text-slate-500">Visibility</div>
-                                      <select
-                                        value={resourceVisibility}
-                                        onChange={(e) => setResourceVisibility(e.target.value === 'org' ? 'org' : 'private')}
-                                        className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">Shared User IDs</label>
+                                        <textarea
+                                          value={sharedUserIdsText}
+                                          onChange={(e) => setSharedUserIdsText(e.target.value)}
+                                          placeholder="user_123, user_456"
+                                          className="w-full min-h-[84px] rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                                        />
+                                        <div className="text-[11px] text-slate-500 mt-1">Comma-separated user ids with direct access.</div>
+                                      </div>
+                                      <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">Shared Org IDs</label>
+                                        <textarea
+                                          value={sharedOrgIdsText}
+                                          onChange={(e) => setSharedOrgIdsText(e.target.value)}
+                                          placeholder="org_123, org_456"
+                                          className="w-full min-h-[84px] rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                                        />
+                                        <div className="text-[11px] text-slate-500 mt-1">Comma-separated org ids that should see this tool.</div>
+                                      </div>
+                                    </div>
+                                    {resourceAccessError && <div className="text-sm text-red-600">{resourceAccessError}</div>}
+                                    <div className="flex justify-end">
+                                      <button
+                                        type="button"
+                                        onClick={() => void saveResourceAccess()}
+                                        disabled={resourceAccessSaving || resourceAccessLoading}
+                                        className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-60"
                                       >
-                                        <option value="private">Private</option>
-                                        <option value="org">Organization</option>
-                                      </select>
+                                        {resourceAccessSaving ? 'Saving Access…' : 'Save Access'}
+                                      </button>
                                     </div>
                                   </div>
-                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    <div>
-                                      <label className="block text-sm font-medium text-slate-700 mb-1">Shared User IDs</label>
-                                      <textarea
-                                        value={sharedUserIdsText}
-                                        onChange={(e) => setSharedUserIdsText(e.target.value)}
-                                        placeholder="user_123, user_456"
-                                        className="w-full min-h-[84px] rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
-                                      />
-                                      <div className="text-[11px] text-slate-500 mt-1">Comma-separated user ids with direct access.</div>
-                                    </div>
-                                    <div>
-                                      <label className="block text-sm font-medium text-slate-700 mb-1">Shared Org IDs</label>
-                                      <textarea
-                                        value={sharedOrgIdsText}
-                                        onChange={(e) => setSharedOrgIdsText(e.target.value)}
-                                        placeholder="org_123, org_456"
-                                        className="w-full min-h-[84px] rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
-                                      />
-                                      <div className="text-[11px] text-slate-500 mt-1">Comma-separated org ids that should see this tool.</div>
-                                    </div>
-                                  </div>
-                                  {resourceAccessError && <div className="text-sm text-red-600">{resourceAccessError}</div>}
-                                  <div className="flex justify-end">
-                                    <button
-                                      type="button"
-                                      onClick={() => void saveResourceAccess()}
-                                      disabled={resourceAccessSaving || resourceAccessLoading}
-                                      className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-60"
-                                    >
-                                      {resourceAccessSaving ? 'Saving Access…' : 'Save Access'}
-                                    </button>
-                                  </div>
-                                </div>
+                                </details>
                               )}
 
                               {selectedToolId !== 'new' && selectedTool && (
-                                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                                  <div className="border border-slate-200 rounded-xl p-4 bg-white">
-                                    <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Version History</div>
-                                    <div className="space-y-2 max-h-56 overflow-y-auto">
-                                      {toolVersions.map((version) => (
-                                        <div key={version.id} className="rounded-lg border border-slate-200 px-3 py-2 bg-slate-50/70">
-                                          <div className="flex items-center justify-between gap-2">
-                                            <div className="text-sm font-semibold text-slate-900">v{version.version_number}</div>
-                                            <div className="flex items-center gap-2">
-                                              <div className="text-[11px] uppercase tracking-wider text-slate-500">{version.change_kind}</div>
-                                              {selectedTool && version.version_number !== Number(selectedTool.version || 1) && (
-                                                <button
-                                                  type="button"
-                                                  onClick={() => void restoreToolVersion(selectedTool.id, version.id)}
-                                                  disabled={restoringVersionId === version.id}
-                                                  className="text-[11px] px-2 py-1 rounded-md border border-indigo-200 text-indigo-700 hover:bg-indigo-50 disabled:opacity-60"
-                                                >
-                                                  {restoringVersionId === version.id ? 'Restoring...' : 'Rollback'}
-                                                </button>
-                                              )}
+                                <details className="border border-slate-200 rounded-xl p-4 bg-white group">
+                                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                                    <div>
+                                      <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Versions And Usage</div>
+                                      <div className="text-sm text-slate-600 mt-1">Historical changes, rollback points, and recent execution activity.</div>
+                                    </div>
+                                    <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 group-open:bg-slate-900 group-open:text-white">
+                                      Expand
+                                    </span>
+                                  </summary>
+                                  <div className="mt-4 grid grid-cols-1 xl:grid-cols-2 gap-4">
+                                    <div className="border border-slate-200 rounded-xl p-4 bg-white">
+                                      <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Version History</div>
+                                      <div className="space-y-2 max-h-56 overflow-y-auto">
+                                        {toolVersions.map((version) => (
+                                          <div key={version.id} className="rounded-lg border border-slate-200 px-3 py-2 bg-slate-50/70">
+                                            <div className="flex items-center justify-between gap-2">
+                                              <div className="text-sm font-semibold text-slate-900">v{version.version_number}</div>
+                                              <div className="flex items-center gap-2">
+                                                <div className="text-[11px] uppercase tracking-wider text-slate-500">{version.change_kind}</div>
+                                                {selectedTool && version.version_number !== Number(selectedTool.version || 1) && (
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => void restoreToolVersion(selectedTool.id, version.id)}
+                                                    disabled={restoringVersionId === version.id}
+                                                    className="text-[11px] px-2 py-1 rounded-md border border-indigo-200 text-indigo-700 hover:bg-indigo-50 disabled:opacity-60"
+                                                  >
+                                                    {restoringVersionId === version.id ? 'Restoring...' : 'Rollback'}
+                                                  </button>
+                                                )}
+                                              </div>
                                             </div>
+                                            <div className="text-[11px] text-slate-500 mt-1">{new Date(version.created_at).toLocaleString()}</div>
+                                            <div className="text-xs text-slate-600 mt-1">{version.name} • {version.type}</div>
                                           </div>
-                                          <div className="text-[11px] text-slate-500 mt-1">{new Date(version.created_at).toLocaleString()}</div>
-                                          <div className="text-xs text-slate-600 mt-1">{version.name} • {version.type}</div>
-                                        </div>
-                                      ))}
-                                      {toolVersions.length === 0 && <div className="text-sm text-slate-500">No version history yet.</div>}
+                                        ))}
+                                        {toolVersions.length === 0 && <div className="text-sm text-slate-500">No version history yet.</div>}
+                                      </div>
+                                    </div>
+                                    <div className="border border-slate-200 rounded-xl p-4 bg-white">
+                                      <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Recent Usage</div>
+                                      <div className="space-y-2 max-h-56 overflow-y-auto">
+                                        {(toolUsage?.recent_executions || []).map((run) => (
+                                          <div key={run.id} className="rounded-lg border border-slate-200 px-3 py-2 bg-slate-50/70">
+                                            <div className="flex items-center justify-between gap-2">
+                                              <div className="text-sm font-semibold text-slate-900">{run.agent_name || run.tool_name}</div>
+                                              <div className={`text-[11px] px-2 py-0.5 rounded-full ${
+                                                run.status === 'failed' ? 'bg-red-100 text-red-700' : run.status === 'running' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
+                                              }`}>
+                                                {run.status}
+                                              </div>
+                                            </div>
+                                            <div className="text-[11px] text-slate-500 mt-1">
+                                              {new Date(run.created_at).toLocaleString()}
+                                              {run.duration_ms != null ? ` • ${run.duration_ms}ms` : ''}
+                                            </div>
+                                            {run.error ? <div className="text-[11px] text-red-600 mt-1 truncate">{run.error}</div> : null}
+                                          </div>
+                                        ))}
+                                        {!(toolUsage?.recent_executions || []).length && <div className="text-sm text-slate-500">No usage history yet.</div>}
+                                      </div>
                                     </div>
                                   </div>
-                                  <div className="border border-slate-200 rounded-xl p-4 bg-white">
-                                    <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Recent Usage</div>
-                                    <div className="space-y-2 max-h-56 overflow-y-auto">
-                                      {(toolUsage?.recent_executions || []).map((run) => (
-                                        <div key={run.id} className="rounded-lg border border-slate-200 px-3 py-2 bg-slate-50/70">
-                                          <div className="flex items-center justify-between gap-2">
-                                            <div className="text-sm font-semibold text-slate-900">{run.agent_name || run.tool_name}</div>
-                                            <div className={`text-[11px] px-2 py-0.5 rounded-full ${
-                                              run.status === 'failed' ? 'bg-red-100 text-red-700' : run.status === 'running' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
-                                            }`}>
-                                              {run.status}
-                                            </div>
-                                          </div>
-                                          <div className="text-[11px] text-slate-500 mt-1">
-                                            {new Date(run.created_at).toLocaleString()}
-                                            {run.duration_ms != null ? ` • ${run.duration_ms}ms` : ''}
-                                          </div>
-                                          {run.error ? <div className="text-[11px] text-red-600 mt-1 truncate">{run.error}</div> : null}
-                                        </div>
-                                      ))}
-                                      {!(toolUsage?.recent_executions || []).length && <div className="text-sm text-slate-500">No usage history yet.</div>}
-                                    </div>
-                                  </div>
-                                </div>
+                                </details>
                               )}
 
                               {/* Dynamic Config Sections */}
                               <div className="bg-slate-50 p-5 rounded-xl border border-slate-200">
-                                  <h4 className="text-sm font-semibold text-slate-800 mb-4 flex items-center gap-2">
-                                      <Code size={16} className="text-indigo-500" /> Configuration
-                                  </h4>
+                                  <div className="flex items-start justify-between gap-4 mb-4">
+                                      <div>
+                                        <h4 className="text-sm font-semibold text-slate-800 flex items-center gap-2">
+                                            <Code size={16} className="text-indigo-500" /> Configuration
+                                        </h4>
+                                        <p className="text-xs text-slate-500 mt-1">Keep the primary tool definition visible here. Advanced import and protocol helpers are tucked behind expandable sections below.</p>
+                                      </div>
+                                      <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                                        Core Edit
+                                      </span>
+                                  </div>
                                   
                                   {formData.type === 'python' && (
                                       <div>
@@ -2278,20 +2312,20 @@ export default function ToolsPage() {
 
                                   {formData.type === 'mcp' && (
                                       <div className="space-y-4">
-                                          <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-4 space-y-4">
-                                              <div className="flex items-start justify-between gap-3">
+                                          <details className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-4 group">
+                                              <summary className="flex cursor-pointer list-none items-start justify-between gap-3">
                                                   <div>
                                                       <label className="block text-sm font-medium text-slate-800 mb-1">Import from npm MCP package</label>
                                                       <p className="text-xs text-slate-600">
                                                           Paste a package like <code className="bg-white px-1 rounded">meta-ads-mcp</code> and the app will run it over stdio, discover its MCP tools, register local proxy tools, and optionally create an exposed MCP bundle.
                                                       </p>
                                                   </div>
-                                                  <div className="text-[11px] px-2 py-1 rounded-full bg-white border border-emerald-200 text-emerald-700 font-medium">
+                                                  <div className="text-[11px] px-2 py-1 rounded-full bg-white border border-emerald-200 text-emerald-700 font-medium group-open:bg-emerald-600 group-open:text-white group-open:border-emerald-600">
                                                       Automated
                                                   </div>
-                                              </div>
+                                              </summary>
 
-                                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
                                                   <div>
                                                       <label className="block text-sm font-medium text-slate-700 mb-1">Package Name</label>
                                                       <input
@@ -2408,34 +2442,44 @@ export default function ToolsPage() {
                                                       )}
                                                   </div>
                                               )}
-                                          </div>
+                                          </details>
 
-                                          <div>
-                                              <label className="block text-sm font-medium text-slate-700 mb-1">Import from MCP Config (claude_desktop_config.json)</label>
-                                              <textarea
-                                                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none h-24 font-mono text-xs"
-                                                  value={mcpImportText}
-                                                  onChange={e => setMcpImportText(e.target.value)}
-                                                  placeholder={`{\n  \"mcpServers\": {\n    \"tool_currentdatetimetool\": {\n      \"command\": \"npx\",\n      \"args\": [\"-y\", \"@modelcontextprotocol/server-sse\", \"--url\", \"http://localhost:3000/mcp/sse\"]\n    }\n  }\n}`}
-                                              />
-                                              <div className="flex items-center justify-between mt-2">
-                                                  <button
-                                                      type="button"
-                                                      className="px-3 py-1.5 text-xs rounded-md bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
-                                                      onClick={importMcpConfig}
-                                                      disabled={!mcpImportText.trim() || mcpImportLoading}
-                                                  >
-                                                      {mcpImportLoading ? 'Importing...' : 'Import MCP Config'}
-                                                  </button>
-                                                  {mcpImportError && (
-                                                      <span className="text-xs text-red-600">{mcpImportError}</span>
-                                                  )}
-                                                  {mcpImportSuccess && (
-                                                      <span className="text-xs text-emerald-600">{mcpImportSuccess}</span>
-                                                  )}
+                                          <details className="rounded-xl border border-slate-200 bg-white p-4 group">
+                                              <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                                                  <div>
+                                                      <div className="text-sm font-medium text-slate-700">Import from MCP Config</div>
+                                                      <p className="text-xs text-slate-500 mt-1">Use a `claude_desktop_config.json` style config to create MCP tool entries in bulk.</p>
+                                                  </div>
+                                                  <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 group-open:bg-slate-900 group-open:text-white">
+                                                      Expand
+                                                  </span>
+                                              </summary>
+                                              <div className="mt-4">
+                                                  <textarea
+                                                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none h-24 font-mono text-xs"
+                                                      value={mcpImportText}
+                                                      onChange={e => setMcpImportText(e.target.value)}
+                                                      placeholder={`{\n  \"mcpServers\": {\n    \"tool_currentdatetimetool\": {\n      \"command\": \"npx\",\n      \"args\": [\"-y\", \"@modelcontextprotocol/server-sse\", \"--url\", \"http://localhost:3000/mcp/sse\"]\n    }\n  }\n}`}
+                                                  />
+                                                  <div className="flex items-center justify-between mt-2">
+                                                      <button
+                                                          type="button"
+                                                          className="px-3 py-1.5 text-xs rounded-md bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
+                                                          onClick={importMcpConfig}
+                                                          disabled={!mcpImportText.trim() || mcpImportLoading}
+                                                      >
+                                                          {mcpImportLoading ? 'Importing...' : 'Import MCP Config'}
+                                                      </button>
+                                                      {mcpImportError && (
+                                                          <span className="text-xs text-red-600">{mcpImportError}</span>
+                                                      )}
+                                                      {mcpImportSuccess && (
+                                                          <span className="text-xs text-emerald-600">{mcpImportSuccess}</span>
+                                                      )}
+                                                  </div>
+                                                  <p className="text-xs text-slate-500 mt-2">This will create MCP tools for each entry in <code className="bg-slate-100 px-1 rounded">mcpServers</code>.</p>
                                               </div>
-                                              <p className="text-xs text-slate-500 mt-2">This will create MCP tools for each entry in <code className="bg-slate-100 px-1 rounded">mcpServers</code>.</p>
-                                          </div>
+                                          </details>
                                           <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
                                               <strong>MCP (Model Context Protocol)</strong> — connects your agent to an external tool server.
                                               The <code className="font-mono bg-blue-100 px-1 rounded">serverUrl</code> should point to the MCP endpoint.
