@@ -76,6 +76,57 @@ const DEFAULT_MIN_SPEECH_DURATION_MS = 220;
 const DEFAULT_MIN_SILENCE_DURATION_MS = 420;
 const DEFAULT_MAX_TOKENS_TO_RECOMPUTE = 5;
 
+const ENVIRONMENT_PRESETS = [
+  {
+    id: 'quiet-room',
+    label: 'Quiet Room',
+    description: 'Fastest response for calm spaces.',
+    values: {
+      vadEnabled: true,
+      vadSilenceThresholdSecs: 0.6,
+      vadThreshold: 0.5,
+      minSpeechDurationMs: 180,
+      minSilenceDurationMs: 280,
+      maxTokensToRecompute: 4,
+      browserNoiseSuppression: true,
+      browserEchoCancellation: true,
+      browserAutoGainControl: false,
+    },
+  },
+  {
+    id: 'office',
+    label: 'Office',
+    description: 'Balanced for keyboard noise and nearby voices.',
+    values: {
+      vadEnabled: true,
+      vadSilenceThresholdSecs: 0.8,
+      vadThreshold: 0.65,
+      minSpeechDurationMs: 240,
+      minSilenceDurationMs: 420,
+      maxTokensToRecompute: 5,
+      browserNoiseSuppression: true,
+      browserEchoCancellation: true,
+      browserAutoGainControl: false,
+    },
+  },
+  {
+    id: 'street',
+    label: 'Street',
+    description: 'More defensive against disturbances and traffic.',
+    values: {
+      vadEnabled: true,
+      vadSilenceThresholdSecs: 1,
+      vadThreshold: 0.78,
+      minSpeechDurationMs: 320,
+      minSilenceDurationMs: 620,
+      maxTokensToRecompute: 6,
+      browserNoiseSuppression: true,
+      browserEchoCancellation: true,
+      browserAutoGainControl: false,
+    },
+  },
+];
+
 export default function VoicePage() {
   const [targets, setTargets] = useState<VoiceTarget[]>([]);
   const [voiceConfigs, setVoiceConfigs] = useState<VoiceConfigPreset[]>([]);
@@ -313,6 +364,35 @@ export default function VoicePage() {
     [targetId, availableTargets],
   );
 
+  const sensitivityGuide = useMemo(() => {
+    if (!vadEnabled) {
+      return {
+        title: 'Manual Commit Style',
+        text: 'Automatic turn commit is disabled, so speech will wait for explicit commit behavior rather than VAD timing.',
+        tone: 'bg-amber-50 border-amber-200 text-amber-900',
+      };
+    }
+    if (vadThreshold >= 0.75 || minSpeechDurationMs >= 300 || minSilenceDurationMs >= 600) {
+      return {
+        title: 'Noise Resistant',
+        text: 'Good for busy environments. It will ignore more disturbances, but the agent may wait a bit longer before responding.',
+        tone: 'bg-emerald-50 border-emerald-200 text-emerald-900',
+      };
+    }
+    if (vadThreshold <= 0.52 && minSilenceDurationMs <= 300 && vadSilenceThresholdSecs <= 0.65) {
+      return {
+        title: 'Ultra Responsive',
+        text: 'Great for quiet rooms and fast turn-taking. It may accidentally react to brief disturbances or clipped pauses.',
+        tone: 'bg-cyan-50 border-cyan-200 text-cyan-900',
+      };
+    }
+    return {
+      title: 'Balanced',
+      text: 'A good middle ground for home and office use, with moderate disturbance resistance and solid response speed.',
+      tone: 'bg-slate-50 border-slate-200 text-slate-900',
+    };
+  }, [vadEnabled, vadThreshold, minSpeechDurationMs, minSilenceDurationMs, vadSilenceThresholdSecs]);
+
   useEffect(() => {
     if (!availableTargets.some((target) => String(target.id) === String(targetId))) {
       setTargetId(availableTargets[0]?.id ? String(availableTargets[0].id) : '');
@@ -360,6 +440,21 @@ export default function VoicePage() {
     setBrowserNoiseSuppression(Boolean(preset.meta?.browser_noise_suppression ?? true));
     setBrowserEchoCancellation(Boolean(preset.meta?.browser_echo_cancellation ?? true));
     setBrowserAutoGainControl(Boolean(preset.meta?.browser_auto_gain_control ?? false));
+  };
+
+  const applyEnvironmentPreset = (presetId: string) => {
+    const preset = ENVIRONMENT_PRESETS.find((item) => item.id === presetId);
+    if (!preset) return;
+    setVadEnabled(preset.values.vadEnabled);
+    setVadSilenceThresholdSecs(preset.values.vadSilenceThresholdSecs);
+    setVadThreshold(preset.values.vadThreshold);
+    setMinSpeechDurationMs(preset.values.minSpeechDurationMs);
+    setMinSilenceDurationMs(preset.values.minSilenceDurationMs);
+    setMaxTokensToRecompute(preset.values.maxTokensToRecompute);
+    setBrowserNoiseSuppression(preset.values.browserNoiseSuppression);
+    setBrowserEchoCancellation(preset.values.browserEchoCancellation);
+    setBrowserAutoGainControl(preset.values.browserAutoGainControl);
+    setStatusNote(`Applied ${preset.label} voice tuning.`);
   };
 
   useEffect(() => {
@@ -872,6 +967,19 @@ export default function VoicePage() {
                 <div className="text-sm font-semibold text-slate-900">Turn Detection And Disturbance Control</div>
                 <div className="text-xs text-slate-500 mt-1">Use these controls to ignore short background disturbances, commit turns faster after real pauses, and keep the conversation feeling responsive.</div>
               </div>
+              <div className="flex flex-wrap gap-2">
+                {ENVIRONMENT_PRESETS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => applyEnvironmentPreset(preset.id)}
+                    className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-slate-400 hover:bg-slate-100"
+                    title={preset.description}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                 <label className="inline-flex items-center gap-2 text-sm text-slate-700">
                   <input type="checkbox" checked={vadEnabled} onChange={(e) => setVadEnabled(e.target.checked)} />
@@ -909,6 +1017,10 @@ export default function VoicePage() {
                   <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Recompute Window</label>
                   <input type="number" min="0" max="50" step="1" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={maxTokensToRecompute} onChange={(e) => setMaxTokensToRecompute(Number(e.target.value) || DEFAULT_MAX_TOKENS_TO_RECOMPUTE)} />
                 </div>
+              </div>
+              <div className={`rounded-xl border px-3 py-3 ${sensitivityGuide.tone}`}>
+                <div className="text-sm font-semibold">{sensitivityGuide.title}</div>
+                <div className="text-xs mt-1 opacity-90">{sensitivityGuide.text}</div>
               </div>
             </div>
 
