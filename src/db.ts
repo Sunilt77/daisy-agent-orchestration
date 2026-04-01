@@ -1325,6 +1325,42 @@ export function ensureLearningTables() {
 
       CREATE INDEX IF NOT EXISTS idx_agent_learning_lessons_lookup
         ON agent_learning_lessons(agent_id, user_id, task_signature, lesson_kind, updated_at);
+
+      CREATE TABLE IF NOT EXISTS crew_run_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        execution_id INTEGER NOT NULL,
+        crew_id INTEGER NOT NULL,
+        user_id TEXT,
+        rating TEXT,
+        solved INTEGER,
+        feedback_text TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (crew_id) REFERENCES crews(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_crew_run_feedback_execution_lookup
+        ON crew_run_feedback(execution_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_crew_run_feedback_crew_lookup
+        ON crew_run_feedback(crew_id, user_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS workflow_run_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workflow_run_id INTEGER NOT NULL,
+        workflow_id INTEGER NOT NULL,
+        user_id TEXT,
+        rating TEXT,
+        solved INTEGER,
+        feedback_text TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_run_feedback_run_lookup
+        ON workflow_run_feedback(workflow_run_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_run_feedback_workflow_lookup
+        ON workflow_run_feedback(workflow_id, user_id, created_at);
     `);
   } catch (e) {
     console.error('Learning table migration error:', e);

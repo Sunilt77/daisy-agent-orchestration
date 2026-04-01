@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { Plus, Play, Trash2, CheckCircle2, Clock, Terminal, ArrowLeft, Globe, Copy, Check, X, MessagesSquare, Focus, PanelRightOpen, ChevronDown, ChevronUp, Link2 } from 'lucide-react';
+import { Plus, Play, Trash2, CheckCircle2, Clock, Terminal, ArrowLeft, Globe, Copy, Check, X, MessagesSquare, Focus, PanelRightOpen, ChevronDown, ChevronUp, Link2, ThumbsUp, ThumbsDown } from 'lucide-react';
 
 import CrewWorkflow from '../components/CrewWorkflow';
 import TaskAgentEditor from '../components/TaskAgentEditor';
@@ -64,6 +64,11 @@ type CrewThreadMessage = {
   ts: string;
   executionId?: number | null;
 };
+type FeedbackState = {
+  status: 'saving' | 'saved' | 'error';
+  rating?: 'up' | 'down';
+  error?: string;
+};
 
 function buildCrewThreadContext(messages: CrewThreadMessage[], latestInput: string, recentCount = 6) {
   const recent = messages.slice(-recentCount).map((message) => {
@@ -107,6 +112,7 @@ export default function CrewPage() {
   const [threadMessages, setThreadMessages] = useState<CrewThreadMessage[]>([]);
   const [threadLinkedExecutionIds, setThreadLinkedExecutionIds] = useState<number[]>([]);
   const [selectedThreadExecutionId, setSelectedThreadExecutionId] = useState<number | null>(null);
+  const [feedbackByExecution, setFeedbackByExecution] = useState<Record<number, FeedbackState>>({});
 
   const [initialInput, setInitialInput] = useState('');
   const [newTask, setNewTask] = useState({
@@ -499,6 +505,25 @@ export default function CrewPage() {
   const handleDeleteTaskDetails = async (taskId: number) => {
     await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
     fetchCrewData();
+  };
+
+  const submitCrewFeedback = async (targetExecutionId: number, rating: 'up' | 'down') => {
+    setFeedbackByExecution((prev) => ({ ...prev, [targetExecutionId]: { status: 'saving', rating } }));
+    try {
+      const feedback = rating === 'down'
+        ? window.prompt('What should this crew do differently next time?', '')?.trim() || ''
+        : '';
+      const res = await fetch(`/api/executions/${targetExecutionId}/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rating, solved: rating === 'up', feedback: feedback || undefined }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || 'Failed to save crew feedback');
+      setFeedbackByExecution((prev) => ({ ...prev, [targetExecutionId]: { status: 'saved', rating } }));
+    } catch (e: any) {
+      setFeedbackByExecution((prev) => ({ ...prev, [targetExecutionId]: { status: 'error', rating, error: e?.message || 'Failed to save crew feedback' } }));
+    }
   };
 
   if (!crew) return <div>Loading...</div>;
@@ -1129,13 +1154,52 @@ export default function CrewPage() {
 
           {!isRunning && logs.length > 0 && finalCrewOutput && (
             <div className="bg-white p-6 rounded-xl border border-emerald-200 shadow-sm">
+              {(() => {
+                const activeExecutionId = Number(selectedThreadExecutionId || executionId || 0);
+                const feedbackState = activeExecutionId > 0 ? feedbackByExecution[activeExecutionId] : undefined;
+                return (
+                  <>
               <h2 className="text-xl font-bold text-emerald-800 mb-4 flex items-center gap-2">
                 <CheckCircle2 className="text-emerald-500" />
                 Final Crew Output
               </h2>
+              {activeExecutionId > 0 && (
+                <div className="mb-4 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => submitCrewFeedback(activeExecutionId, 'up')}
+                    disabled={feedbackState?.status === 'saving'}
+                    className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-[11px] font-semibold ${
+                      feedbackState?.rating === 'up' && feedbackState?.status === 'saved'
+                        ? 'border-emerald-200 bg-emerald-100 text-emerald-700'
+                        : 'border-slate-200 bg-white text-slate-600 hover:border-emerald-200 hover:text-emerald-700'
+                    }`}
+                  >
+                    <ThumbsUp size={11} /> Helpful
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => submitCrewFeedback(activeExecutionId, 'down')}
+                    disabled={feedbackState?.status === 'saving'}
+                    className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-[11px] font-semibold ${
+                      feedbackState?.rating === 'down' && feedbackState?.status === 'saved'
+                        ? 'border-amber-200 bg-amber-100 text-amber-700'
+                        : 'border-slate-200 bg-white text-slate-600 hover:border-amber-200 hover:text-amber-700'
+                    }`}
+                  >
+                    <ThumbsDown size={11} /> Improve
+                  </button>
+                  {feedbackState?.status === 'saving' && <span className="text-[11px] font-semibold text-slate-400">Saving feedback…</span>}
+                  {feedbackState?.status === 'saved' && <span className="text-[11px] font-semibold text-emerald-600">Feedback saved</span>}
+                  {feedbackState?.status === 'error' && <span className="text-[11px] font-semibold text-red-600">{feedbackState.error || 'Failed to save feedback'}</span>}
+                </div>
+              )}
               <div className="prose prose-sm max-w-none text-slate-700 whitespace-pre-wrap bg-emerald-50/50 p-4 rounded-lg border border-emerald-100">
                 {finalCrewOutput}
               </div>
+                  </>
+                );
+              })()}
             </div>
           )}
         </div>

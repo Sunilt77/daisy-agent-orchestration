@@ -16,7 +16,7 @@ import {
   MarkerType,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Bot, Boxes, CheckCircle2, Clock3, GitBranch, Play, Plus, Radio, Repeat, RotateCcw, Save, Sparkles, Users, Webhook, Wrench, Zap } from 'lucide-react';
+import { Bot, Boxes, CheckCircle2, Clock3, GitBranch, Play, Plus, Radio, Repeat, RotateCcw, Save, Sparkles, ThumbsDown, ThumbsUp, Users, Webhook, Wrench, Zap } from 'lucide-react';
 
 type WorkflowRecord = {
   id: number;
@@ -44,6 +44,11 @@ type WorkflowRun = {
   graph_snapshot?: { nodes?: Array<any>; edges?: Array<any> };
   created_at: string;
   updated_at?: string;
+};
+type FeedbackState = {
+  status: 'saving' | 'saved' | 'error';
+  rating?: 'up' | 'down';
+  error?: string;
 };
 
 type Project = { id: number; name: string };
@@ -253,6 +258,7 @@ export default function WorkflowsPage() {
   const [versions, setVersions] = useState<any[]>([]);
   const [showVersions, setShowVersions] = useState(false);
   const [runningWorkflowRunId, setRunningWorkflowRunId] = useState<number | null>(null);
+  const [feedbackByRun, setFeedbackByRun] = useState<Record<number, FeedbackState>>({});
 
   const activeRun = useMemo(() => {
     if (runningWorkflowRunId) {
@@ -600,6 +606,25 @@ export default function WorkflowsPage() {
     ? ''
     : `${window.location.origin}/api/workflows/${selectedWorkflowId}/webhook`;
 
+  const submitWorkflowFeedback = async (runId: number, rating: 'up' | 'down') => {
+    setFeedbackByRun((prev) => ({ ...prev, [runId]: { status: 'saving', rating } }));
+    try {
+      const feedback = rating === 'down'
+        ? window.prompt('What should this workflow do differently next time?', '')?.trim() || ''
+        : '';
+      const res = await fetch(`/api/workflow-runs/${runId}/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rating, solved: rating === 'up', feedback: feedback || undefined }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || 'Failed to save workflow feedback');
+      setFeedbackByRun((prev) => ({ ...prev, [runId]: { status: 'saved', rating } }));
+    } catch (e: any) {
+      setFeedbackByRun((prev) => ({ ...prev, [runId]: { status: 'error', rating, error: e?.message || 'Failed to save workflow feedback' } }));
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="swarm-hero p-6">
@@ -856,10 +881,43 @@ export default function WorkflowsPage() {
             </div>
             {selectedRun && (
               <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+              {(() => {
+                const feedbackState = feedbackByRun[selectedRun.id];
+                return (
+                  <>
               <div className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 mb-2">Run Detail</div>
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-sm font-semibold text-slate-900">Run #{selectedRun.id}</div>
                   <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${statusTone(selectedRun.status)}`}>{selectedRun.status}</span>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => submitWorkflowFeedback(selectedRun.id, 'up')}
+                    disabled={feedbackState?.status === 'saving'}
+                    className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-[11px] font-semibold ${
+                      feedbackState?.rating === 'up' && feedbackState?.status === 'saved'
+                        ? 'border-emerald-200 bg-emerald-100 text-emerald-700'
+                        : 'border-slate-200 bg-white text-slate-600 hover:border-emerald-200 hover:text-emerald-700'
+                    }`}
+                  >
+                    <ThumbsUp size={11} /> Helpful
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => submitWorkflowFeedback(selectedRun.id, 'down')}
+                    disabled={feedbackState?.status === 'saving'}
+                    className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-[11px] font-semibold ${
+                      feedbackState?.rating === 'down' && feedbackState?.status === 'saved'
+                        ? 'border-amber-200 bg-amber-100 text-amber-700'
+                        : 'border-slate-200 bg-white text-slate-600 hover:border-amber-200 hover:text-amber-700'
+                    }`}
+                  >
+                    <ThumbsDown size={11} /> Improve
+                  </button>
+                  {feedbackState?.status === 'saving' && <span className="text-[11px] font-semibold text-slate-400">Saving feedback…</span>}
+                  {feedbackState?.status === 'saved' && <span className="text-[11px] font-semibold text-emerald-600">Feedback saved</span>}
+                  {feedbackState?.status === 'error' && <span className="text-[11px] font-semibold text-red-600">{feedbackState.error || 'Failed to save feedback'}</span>}
                 </div>
                 <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-slate-500">
                   <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
@@ -884,6 +942,9 @@ export default function WorkflowsPage() {
                     </div>
                   ))}
                 </div>
+                  </>
+                );
+              })()}
               </div>
             )}
           </div>

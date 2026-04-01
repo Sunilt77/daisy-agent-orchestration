@@ -906,6 +906,23 @@ async function getExecutionToolSequence(execId: number) {
     .filter(Boolean);
 }
 
+async function getExecutionFailedTools(execId: number) {
+  const rows = await getPrisma().orchestratorToolExecution.findMany({
+    where: {
+      agentExecutionId: execId,
+      NOT: { status: 'completed' },
+    },
+    orderBy: { id: 'asc' },
+    select: { toolName: true, error: true, status: true },
+    take: 5,
+  });
+  return rows.map((row) => ({
+    tool_name: String(row.toolName || '').trim(),
+    error: compactPromptText(String(row.error || row.status || '').trim(), 220),
+    status: String(row.status || '').trim(),
+  })).filter((row) => row.tool_name);
+}
+
 function getUserAgentPreference(userId: string | null | undefined, agentId: number) {
   if (!userId) return '';
   ensureLearningTables();
@@ -984,6 +1001,7 @@ async function recordExecutionFeedback(exec: any, userId: string, payload: Feedb
   const feedbackText = compactPromptText(String(payload.feedback || '').trim(), 1200);
   const taskSignature = normalizeTaskSignature(String(exec?.task || ''));
   const toolSequence = await getExecutionToolSequence(Number(exec.id));
+  const failedTools = (rating === 'down' || solved === false) ? await getExecutionFailedTools(Number(exec.id)) : [];
 
   const result = db.prepare(`
     INSERT INTO run_feedback (execution_id, agent_id, user_id, session_id, rating, solved, feedback_text, task_signature, tool_sequence)
@@ -1035,12 +1053,74 @@ async function recordExecutionFeedback(exec: any, userId: string, payload: Feedb
     );
   }
 
+  for (const failedTool of failedTools.slice(0, 3)) {
+    const guidance = compactPromptText(
+      [
+        feedbackText || '',
+        `Avoid immediately retrying tool ${failedTool.tool_name} with the same path.`,
+        failedTool.error ? `Last observed error/status: ${failedTool.error}.` : '',
+        'Verify required inputs first or choose a shorter alternate path.',
+      ].filter(Boolean).join(' '),
+      700,
+    );
+    db.prepare(`
+      INSERT INTO agent_learning_lessons (agent_id, user_id, lesson_kind, task_signature, guidance, weight, source_feedback_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `).run(
+      agentId,
+      userId,
+      'tool_failure',
+      taskSignature || null,
+      guidance,
+      95,
+      feedbackId || null,
+    );
+  }
+
   return {
     id: feedbackId,
     agent_id: agentId,
     task_signature: taskSignature,
     tool_sequence: toolSequence,
   };
+}
+
+function recordCrewExecutionFeedback(exec: any, userId: string, payload: FeedbackPayload) {
+  ensureLearningTables();
+  const rating = payload.rating === 'down' ? 'down' : payload.rating === 'up' ? 'up' : null;
+  const solved = typeof payload.solved === 'boolean' ? payload.solved : null;
+  const feedbackText = compactPromptText(String(payload.feedback || '').trim(), 1200);
+  const result = db.prepare(`
+    INSERT INTO crew_run_feedback (execution_id, crew_id, user_id, rating, solved, feedback_text)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    Number(exec.id),
+    Number(exec.crew_id),
+    userId,
+    rating,
+    solved == null ? null : (solved ? 1 : 0),
+    feedbackText || null,
+  );
+  return { id: Number(result.lastInsertRowid || 0), execution_id: Number(exec.id), crew_id: Number(exec.crew_id) };
+}
+
+function recordWorkflowRunFeedback(run: any, userId: string, payload: FeedbackPayload) {
+  ensureLearningTables();
+  const rating = payload.rating === 'down' ? 'down' : payload.rating === 'up' ? 'up' : null;
+  const solved = typeof payload.solved === 'boolean' ? payload.solved : null;
+  const feedbackText = compactPromptText(String(payload.feedback || '').trim(), 1200);
+  const result = db.prepare(`
+    INSERT INTO workflow_run_feedback (workflow_run_id, workflow_id, user_id, rating, solved, feedback_text)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    Number(run.id),
+    Number(run.workflowId || run.workflow_id),
+    userId,
+    rating,
+    solved == null ? null : (solved ? 1 : 0),
+    feedbackText || null,
+  );
+  return { id: Number(result.lastInsertRowid || 0), workflow_run_id: Number(run.id), workflow_id: Number(run.workflowId || run.workflow_id) };
 }
 
 function getPublicBaseUrl() {
@@ -5020,6 +5100,26 @@ app.get('/api/workflow-runs/:id/stream', requireUser, async (req, res) => {
   const timer = setInterval(() => { void sendSnapshot(); }, 1200);
   await sendSnapshot();
   req.on('close', () => clearInterval(timer));
+});
+
+app.post('/api/workflow-runs/:id/feedback', requireUser, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow run id' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    const run = await getPrisma().orchestratorWorkflowRun.findUnique({
+      where: { id },
+      include: { workflow: { select: { projectId: true } } },
+    });
+    if (!run) return res.status(404).json({ error: 'Workflow run not found' });
+    requireVisibleProjectId(scope, run.workflow?.projectId ?? null);
+    const userId = String((req as any)?.user?.id || '').trim();
+    if (!userId) return res.status(401).json({ error: 'Authentication required' });
+    const feedback = recordWorkflowRunFeedback(run, userId, (req.body || {}) as FeedbackPayload);
+    res.json({ success: true, feedback });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to save workflow feedback' });
+  }
 });
 
 app.post('/api/workflows/:id/execute', requireUser, async (req, res) => {
@@ -9749,6 +9849,23 @@ app.get('/api/executions/:id/stream', (req, res) => {
   const timer = setInterval(sendSnapshot, 1200);
   sendSnapshot();
   req.on('close', () => clearInterval(timer));
+});
+
+app.post('/api/executions/:id/feedback', requireUser, async (req, res) => {
+  try {
+    const executionId = Number(req.params.id);
+    if (!Number.isFinite(executionId)) return res.status(400).json({ error: 'Invalid execution id' });
+    const exec = db.prepare('SELECT id, crew_id, status, initial_input FROM crew_executions WHERE id = ?').get(executionId) as any;
+    if (!exec) return res.status(404).json({ error: 'Execution not found' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleCrewId(scope, Number(exec.crew_id));
+    const userId = String((req as any)?.user?.id || '').trim();
+    if (!userId) return res.status(401).json({ error: 'Authentication required' });
+    const feedback = recordCrewExecutionFeedback(exec, userId, (req.body || {}) as FeedbackPayload);
+    res.json({ success: true, feedback });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to save crew feedback' });
+  }
 });
 
 registerRuntimeControlRoutes({
