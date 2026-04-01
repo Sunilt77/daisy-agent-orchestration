@@ -1233,6 +1233,41 @@ function splitVoiceReplyIntoChunks(text: string) {
   return chunks;
 }
 
+function buildVoiceConversationSystemPrompt(agent: { name?: string; role?: string; goal?: string; backstory?: string }) {
+  const name = agent.name || 'Agent';
+  const role = agent.role || 'assistant';
+  const goal = agent.goal ? `Goal: ${agent.goal}` : '';
+  const backstory = agent.backstory ? `Backstory: ${agent.backstory}` : '';
+  return [
+    `You are ${name}, a ${role}.`,
+    goal,
+    backstory,
+    'You are responding in a realtime voice conversation.',
+    'Respond naturally, clearly, and concisely in spoken language.',
+    'Do not output JSON, markdown, XML, or role labels.',
+  ].filter(Boolean).join('\n');
+}
+
+function extractReadySpeechSegments(buffer: string, flushAll = false) {
+  const text = String(buffer || '');
+  if (!text.trim()) return { ready: [] as string[], remainder: '' };
+  const matches = text.match(/[^.!?]+[.!?]+(?:\s+|$)/g) || [];
+  const ready = matches.map((part) => String(part || '').trim()).filter(Boolean);
+  const consumed = matches.join('');
+  let remainder = text.slice(consumed.length);
+  if (flushAll && remainder.trim()) {
+    ready.push(remainder.trim());
+    remainder = '';
+  }
+  if (!flushAll && !ready.length && text.trim().length > 160) {
+    const splitAt = text.lastIndexOf(' ', 160);
+    const idx = splitAt > 40 ? splitAt : 160;
+    ready.push(text.slice(0, idx).trim());
+    remainder = text.slice(idx).trimStart();
+  }
+  return { ready, remainder };
+}
+
 function buildVoiceProgressUpdate(log: any, targetType: 'agent' | 'crew', targetName: string) {
   if (!log || typeof log !== 'object') return null;
   const agentName = String(log.agent || '').trim();
@@ -1359,6 +1394,7 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
     let reply = '';
     let executionId: number | null = null;
     let usage: any = null;
+    let streamedReplyToClient = false;
 
     if (current.targetType === 'crew') {
       const crewId = current.targetId;
@@ -1407,26 +1443,211 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
       const agentSession = await ensureAgentSession(current.agentId, current.sessionId, `voice_${current.sessionId}`);
       sendVoiceSocketEvent(ws, 'runtime.event', { event: { type: 'status', message: 'Agent execution started' } });
 
-      const result = await runAgent(
-        agentRow,
-        { description: transcript, expected_output: 'A helpful spoken response.' },
-        '',
-        (log) => {
-          appendVoiceSessionEvent(current.sessionId, 'runtime.event', log);
-          sendVoiceSocketEvent(ws, 'runtime.event', { event: log });
-          void emitVoiceProgress(ws, current, buildVoiceProgressUpdate(log, current.targetType, current.targetName), {
-            logType: log?.type || null,
+      const directToolsEnabled = agentRow.tools_enabled !== 0 && agentRow.tools_enabled !== false;
+      const linkedToolCount = directToolsEnabled
+        ? Number((db.prepare('SELECT COUNT(*) as count FROM agent_tools WHERE agent_id = ?').get(current.agentId) as any)?.count || 0)
+        : 0;
+      const linkedMcpToolCount = directToolsEnabled
+        ? Number((db.prepare('SELECT COUNT(*) as count FROM agent_mcp_tools WHERE agent_id = ?').get(current.agentId) as any)?.count || 0)
+        : 0;
+      const linkedMcpBundleCount = directToolsEnabled
+        ? Number((db.prepare('SELECT COUNT(*) as count FROM agent_mcp_bundles WHERE agent_id = ?').get(current.agentId) as any)?.count || 0)
+        : 0;
+      const canDirectStream =
+        linkedToolCount === 0 &&
+        linkedMcpToolCount === 0 &&
+        linkedMcpBundleCount === 0 &&
+        ['openai', 'openai-compatible', 'litellm', 'google'].includes(String(agentRow.provider || 'google'));
+
+      if (canDirectStream) {
+        const sessionConversation = await loadSessionConversation(agentSession.id);
+        const sessionSummary = await loadSessionSummary(agentSession.id);
+        const memoryContext = buildMemoryContext(sessionSummary, sessionConversation);
+        const systemPrompt = buildVoiceConversationSystemPrompt(agentRow);
+        const config = await getProviderConfig(agentRow.provider || 'google');
+        const providerType = config.providerType;
+        const model = String(agentRow?.model || 'gemini-1.5-flash');
+        const apiKey = config.apiKey;
+        if (!apiKey) throw new Error(`API Key not found for provider: ${agentRow.provider || 'google'}`);
+
+        sendVoiceSocketEvent(ws, 'runtime.event', { event: { type: 'status', message: 'Using direct voice stream path' } });
+        sendVoiceSocketEvent(ws, 'agent.reply.start', {
+          sessionId: current.sessionId,
+          executionId: null,
+          usage: null,
+        });
+        streamedReplyToClient = true;
+
+        let fullReply = '';
+        let speechBuffer = '';
+        let speechQueue: string[] = [];
+        let speechWorker: Promise<void> | null = null;
+        const mimeType = current.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg';
+        const startTtsIfNeeded = () => {
+          if (!current.autoTts || speechWorker) return;
+          speechWorker = (async () => {
+            const abortController = new AbortController();
+            current.activeTtsAbort = abortController;
+            sendVoiceSocketEvent(ws, 'tts.processing', { sessionId: current.sessionId });
+            sendVoiceSocketEvent(ws, 'tts.start', {
+              sessionId: current.sessionId,
+              mimeType,
+              outputFormat: current.outputFormat,
+            });
+            let totalBytes = 0;
+            let index = 0;
+            try {
+              while (speechQueue.length) {
+                const segment = speechQueue.shift();
+                if (!segment) continue;
+                setVoiceTurnState(ws, current, 'speaking');
+                sendVoiceSocketEvent(ws, 'tts.segment.start', {
+                  sessionId: current.sessionId,
+                  index,
+                  text: segment,
+                });
+                await streamSynthesizeVoiceAudio(segment, current.voiceId, current.ttsModelId, current.outputFormat, (chunk) => {
+                  totalBytes += chunk.length;
+                  sendVoiceSocketEvent(ws, 'tts.chunk', {
+                    sessionId: current.sessionId,
+                    audio: chunk.toString('base64'),
+                    mimeType,
+                    outputFormat: current.outputFormat,
+                  });
+                }, abortController.signal);
+                sendVoiceSocketEvent(ws, 'tts.segment.complete', {
+                  sessionId: current.sessionId,
+                  index,
+                  text: segment,
+                });
+                index += 1;
+              }
+              appendVoiceSessionEvent(current.sessionId, 'tts.audio', {
+                bytes: totalBytes,
+                output_format: current.outputFormat,
+              });
+              sendVoiceSocketEvent(ws, 'tts.complete', {
+                sessionId: current.sessionId,
+                mimeType,
+                outputFormat: current.outputFormat,
+                bytes: totalBytes,
+              });
+            } finally {
+              if (current.activeTtsAbort === abortController) current.activeTtsAbort = null;
+              speechWorker = null;
+            }
+          })();
+        };
+        const enqueueSpeechSegments = (textChunk: string, flushAll = false) => {
+          speechBuffer = `${speechBuffer}${textChunk}`;
+          const { ready, remainder } = extractReadySpeechSegments(speechBuffer, flushAll);
+          speechBuffer = remainder;
+          if (ready.length) {
+            speechQueue.push(...ready);
+            startTtsIfNeeded();
+          }
+        };
+        const onTextDelta = (deltaText: string) => {
+          const clean = String(deltaText || '');
+          if (!clean) return;
+          fullReply += clean;
+          sendVoiceSocketEvent(ws, 'agent.reply.delta', {
+            sessionId: current.sessionId,
+            text: clean,
+            fullText: fullReply,
+            executionId: null,
           });
-        },
-        {
-          initiatedBy: 'voice_console',
-          sessionId: agentSession.id,
-          userId: agentSession.user_id ?? `voice_${current.sessionId}`,
+          enqueueSpeechSegments(clean, false);
+        };
+
+        const userPrompt = [
+          memoryContext ? `Conversation memory:\n${memoryContext}` : '',
+          `User said:\n${transcript}`,
+        ].filter(Boolean).join('\n\n');
+
+        setVoiceTurnState(ws, current, 'thinking');
+        if (providerType === 'openai' || providerType === 'openai-compatible' || providerType === 'litellm') {
+          const openai = new OpenAI({
+            apiKey,
+            baseURL: config.apiBase,
+            fetch: async (url: string | Request | URL, init?: RequestInit) => {
+              const headers = new Headers(init?.headers);
+              Array.from(headers.keys()).forEach(k => {
+                if (k.toLowerCase().startsWith('x-stainless')) headers.delete(k);
+              });
+              headers.set('User-Agent', 'curl/8.7.1');
+              headers.set('x-litellm-api-key', apiKey!);
+              return fetch(url, { ...init, headers });
+            }
+          });
+          const stream = await openai.chat.completions.create({
+            model,
+            stream: true,
+            temperature: normalizeNumber(agentRow.temperature) ?? undefined,
+            max_tokens: normalizeNumber(agentRow.max_tokens) ?? undefined,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+          });
+          for await (const chunk of stream as any) {
+            const delta = String(chunk?.choices?.[0]?.delta?.content || '');
+            if (delta) onTextDelta(delta);
+          }
+        } else if (providerType === 'google') {
+          const ai = new GoogleGenAI({ apiKey });
+          const stream = await (ai.models as any).generateContentStream({
+            model,
+            contents: `${systemPrompt}\n\n${userPrompt}`,
+            config: {
+              temperature: normalizeNumber(agentRow.temperature) ?? undefined,
+              maxOutputTokens: normalizeNumber(agentRow.max_tokens) ?? undefined,
+            }
+          });
+          for await (const chunk of stream) {
+            const delta = String((chunk as any)?.text || '');
+            if (delta) onTextDelta(delta);
+          }
         }
-      );
-      reply = String(result?.text || '').trim();
-      executionId = Number(result?.exec_id || 0) || null;
-      usage = result?.usage ?? null;
+
+        enqueueSpeechSegments('', true);
+        if (speechWorker) await speechWorker;
+        reply = fullReply.trim();
+        if (!reply) reply = 'I did not generate a response.';
+        const nextConversation = [
+          ...sessionConversation,
+          { role: 'user', content: transcript, ts: new Date().toISOString() },
+          { role: 'assistant', content: reply, ts: new Date().toISOString() },
+        ].slice(-12);
+        await saveSessionConversation(agentSession.id, nextConversation);
+        sendVoiceSocketEvent(ws, 'agent.reply.complete', {
+          sessionId: current.sessionId,
+          text: reply,
+          executionId: null,
+          usage: null,
+        });
+      } else {
+        const result = await runAgent(
+          agentRow,
+          { description: transcript, expected_output: 'A helpful spoken response.' },
+          '',
+          (log) => {
+            appendVoiceSessionEvent(current.sessionId, 'runtime.event', log);
+            sendVoiceSocketEvent(ws, 'runtime.event', { event: log });
+            void emitVoiceProgress(ws, current, buildVoiceProgressUpdate(log, current.targetType, current.targetName), {
+              logType: log?.type || null,
+            });
+          },
+          {
+            initiatedBy: 'voice_console',
+            sessionId: agentSession.id,
+            userId: agentSession.user_id ?? `voice_${current.sessionId}`,
+          }
+        );
+        reply = String(result?.text || '').trim();
+        executionId = Number(result?.exec_id || 0) || null;
+        usage = result?.usage ?? null;
+      }
     }
 
     updateVoiceSession(current.sessionId, { status: 'speaking', reply_text: reply });
@@ -1435,28 +1656,30 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
       execution_id: executionId,
       usage,
     });
-    sendVoiceSocketEvent(ws, 'agent.reply.start', {
-      sessionId: current.sessionId,
-      executionId,
-      usage,
-    });
     const replyChunks = splitVoiceReplyIntoChunks(reply);
-    let replySoFar = '';
-    for (const chunk of replyChunks) {
-      replySoFar = replySoFar ? `${replySoFar} ${chunk}` : chunk;
-      sendVoiceSocketEvent(ws, 'agent.reply.delta', {
+    if (!streamedReplyToClient) {
+      sendVoiceSocketEvent(ws, 'agent.reply.start', {
         sessionId: current.sessionId,
-        text: chunk,
-        fullText: replySoFar,
         executionId,
+        usage,
+      });
+      let replySoFar = '';
+      for (const chunk of replyChunks) {
+        replySoFar = replySoFar ? `${replySoFar} ${chunk}` : chunk;
+        sendVoiceSocketEvent(ws, 'agent.reply.delta', {
+          sessionId: current.sessionId,
+          text: chunk,
+          fullText: replySoFar,
+          executionId,
+        });
+      }
+      sendVoiceSocketEvent(ws, 'agent.reply.complete', {
+        sessionId: current.sessionId,
+        text: reply,
+        executionId,
+        usage,
       });
     }
-    sendVoiceSocketEvent(ws, 'agent.reply.complete', {
-      sessionId: current.sessionId,
-      text: reply,
-      executionId,
-      usage,
-    });
     sendVoiceSocketEvent(ws, 'agent.reply', {
       sessionId: current.sessionId,
       text: reply,
