@@ -16,7 +16,7 @@ function slugifySegment(input: string) {
 }
 
 function attachmentBucketConfig() {
-  const bucket = String(process.env.GCS_ATTACHMENTS_BUCKET || '').trim();
+  const bucket = String(process.env.GCS_ATTACHMENTS_BUCKET || process.env.GCS_SQLITE_BUCKET || '').trim();
   const prefix = String(process.env.GCS_ATTACHMENTS_PREFIX || 'attachments')
     .trim()
     .replace(/^\/+|\/+$/g, '');
@@ -36,7 +36,7 @@ export async function uploadAttachmentBuffer(params: {
 }) : Promise<StoredAttachment> {
   const { bucket, prefix, signedUrlHours } = attachmentBucketConfig();
   if (!bucket) {
-    throw new Error('Attachment storage bucket is not configured. Set GCS_ATTACHMENTS_BUCKET.');
+    throw new Error('Attachment storage bucket is not configured. Set GCS_ATTACHMENTS_BUCKET or reuse GCS_SQLITE_BUCKET.');
   }
 
   const storage = new Storage();

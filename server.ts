@@ -1262,7 +1262,7 @@ async function persistUploadedAttachment(params: {
 }) {
   ensureAttachmentTables();
   if (!isAttachmentStorageConfigured()) {
-    throw new Error('Attachment storage is not configured. Set GCS_ATTACHMENTS_BUCKET before uploading files.');
+    throw new Error('Attachment storage is not configured. Set GCS_ATTACHMENTS_BUCKET or reuse GCS_SQLITE_BUCKET before uploading files.');
   }
 
   const file = params.file;
