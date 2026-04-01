@@ -119,6 +119,93 @@ type Settings = {
   max_active_sessions_org: number;
 };
 
+type LearningSummary = {
+  lessons: number;
+  feedback_rows: number;
+  preferences: number;
+  disabled_counts: {
+    agents: number;
+    crews: number;
+    workflows: number;
+  };
+};
+
+type LearningSettingRow = {
+  resource_type: 'agent' | 'crew' | 'workflow';
+  resource_id: number;
+  enabled: number;
+  updated_at: string;
+};
+
+type LearningLessonRow = {
+  id: string;
+  agent_id: number;
+  agent_name: string;
+  user_id: string;
+  lesson_kind: string;
+  task_signature: string | null;
+  guidance: string;
+  weight: number;
+  source_feedback_id?: string | null;
+  updated_at: string;
+};
+
+type AgentFeedbackRow = {
+  id: string;
+  execution_id: string;
+  agent_id: number;
+  agent_name: string;
+  user_id: string;
+  rating: 'helpful' | 'improve';
+  solved: number;
+  feedback_text?: string | null;
+  task_signature?: string | null;
+  tool_sequence?: string | null;
+  created_at: string;
+};
+
+type CrewFeedbackRow = {
+  id: string;
+  execution_id: string;
+  crew_id: number;
+  crew_name: string;
+  user_id: string;
+  rating: 'helpful' | 'improve';
+  solved: number;
+  feedback_text?: string | null;
+  created_at: string;
+};
+
+type WorkflowFeedbackRow = {
+  id: string;
+  workflow_run_id: string;
+  workflow_id: number;
+  workflow_name: string;
+  user_id: string;
+  rating: 'helpful' | 'improve';
+  solved: number;
+  feedback_text?: string | null;
+  created_at: string;
+};
+
+type LearningPreferenceRow = {
+  user_id: string;
+  agent_id: number;
+  agent_name: string;
+  preference_text: string;
+  updated_at: string;
+};
+
+type LearningInsightsResponse = {
+  summary: LearningSummary;
+  settings: LearningSettingRow[];
+  agent_lessons: LearningLessonRow[];
+  agent_feedback: AgentFeedbackRow[];
+  crew_feedback: CrewFeedbackRow[];
+  workflow_feedback: WorkflowFeedbackRow[];
+  preferences: LearningPreferenceRow[];
+};
+
 const DEFAULT_SETTINGS: Settings = {
   daily_message_cap: 1,
   batch_size: 1,
@@ -202,6 +289,15 @@ export default function PlatformPage() {
   const [planForm, setPlanForm] = useState<Omit<Plan, 'id'>>(EMPTY_PLAN);
   const [tenantPolicyTenantId, setTenantPolicyTenantId] = useState<string>('');
   const [tenantPolicyDraft, setTenantPolicyDraft] = useState<Record<string, string>>({});
+  const [learningInsights, setLearningInsights] = useState<LearningInsightsResponse>({
+    summary: { lessons: 0, feedback_rows: 0, preferences: 0, disabled_counts: { agents: 0, crews: 0, workflows: 0 } },
+    settings: [],
+    agent_lessons: [],
+    agent_feedback: [],
+    crew_feedback: [],
+    workflow_feedback: [],
+    preferences: [],
+  });
 
   const notify = (type: 'success' | 'error', message: string) => {
     setNotice({ type, message });
@@ -221,12 +317,13 @@ export default function PlatformPage() {
   const fetchAll = async () => {
     setLoading(true);
     try {
-      const [statsRes, tenantsRes, usersRes, plansRes, settingsRes] = await Promise.all([
+      const [statsRes, tenantsRes, usersRes, plansRes, settingsRes, learningRes] = await Promise.all([
         requestJson('/api/admin/stats'),
         requestJson('/api/admin/tenants'),
         requestJson('/api/admin/users'),
         requestJson('/api/admin/plans'),
         requestJson('/api/admin/settings'),
+        requestJson('/api/admin/learning-insights'),
       ]);
       const accessRes = await requestJson('/api/admin/access-controls');
       setStats(statsRes);
@@ -234,6 +331,7 @@ export default function PlatformPage() {
       setUsers(Array.isArray(usersRes) ? usersRes : []);
       setPlans(Array.isArray(plansRes) ? plansRes : []);
       setSettings(settingsRes || DEFAULT_SETTINGS);
+      setLearningInsights(learningRes || {});
       setAccessControls(accessRes);
       setGlobalAccessDraft(accessRes?.global || {});
     } catch (e: any) {
@@ -517,6 +615,21 @@ export default function PlatformPage() {
     }
   };
 
+  const removeLearningItem = async (
+    scope: 'agent-lessons' | 'agent-feedback' | 'crew-feedback' | 'workflow-feedback',
+    id: string,
+  ) => {
+    try {
+      await requestJson(`/api/admin/learning-insights/${scope}/${id}`, { method: 'DELETE' });
+      notify('success', 'Learning record removed');
+      await fetchAll();
+    } catch (e: any) {
+      notify('error', e.message || 'Failed to remove learning record');
+    }
+  };
+
+  const learningStatusText = (enabled: number) => (Number(enabled) === 0 ? 'Disabled' : 'Enabled');
+
   return (
     <div className="space-y-7">
       <div className="swarm-hero p-6">
@@ -746,6 +859,191 @@ export default function PlatformPage() {
           </div>
         )}
       </div>
+
+      <details className="bg-white border border-slate-200 rounded-2xl p-5 group" open>
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+          <div>
+            <h3 className="text-lg font-black text-slate-900">Learning Insights</h3>
+            <p className="text-xs text-slate-500">Inspect lessons learned from feedback, review recent corrections, and clear stale or misleading guidance.</p>
+          </div>
+          <span className="text-xs font-semibold text-slate-600 group-open:hidden">Show insights</span>
+          <span className="text-xs font-semibold text-slate-600 hidden group-open:inline">Hide insights</span>
+        </summary>
+        <div className="mt-4 space-y-4">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            {[
+              { label: 'Saved Lessons', value: learningInsights.summary.lessons },
+              { label: 'Feedback Rows', value: learningInsights.summary.feedback_rows },
+              { label: 'User Preferences', value: learningInsights.summary.preferences },
+              { label: 'Learning Disabled', value: learningInsights.summary.disabled_counts.agents + learningInsights.summary.disabled_counts.crews + learningInsights.summary.disabled_counts.workflows },
+              { label: 'Overrides Tracked', value: learningInsights.settings.length },
+            ].map((card) => (
+              <div key={card.label} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-slate-500">{card.label}</div>
+                <div className="mt-2 text-2xl font-black text-slate-900">{card.value}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div>
+                  <div className="text-sm font-black text-slate-900">Recent Learned Lessons</div>
+                  <div className="text-xs text-slate-500">Failure avoidance and shortest-path guidance now affecting future runs.</div>
+                </div>
+                <span className="text-xs text-slate-500">{learningInsights.agent_lessons.length} rows</span>
+              </div>
+              <div className="space-y-3">
+                {learningInsights.agent_lessons.length === 0 ? (
+                  <p className="text-sm text-slate-500">No lessons stored yet.</p>
+                ) : learningInsights.agent_lessons.slice(0, 6).map((row) => (
+                  <div key={row.id} className="rounded-xl border border-slate-200 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">{row.agent_name}</div>
+                        <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">{row.lesson_kind.replace(/_/g, ' ')} • weight {row.weight}</div>
+                      </div>
+                      <button
+                        onClick={() => removeLearningItem('agent-lessons', row.id)}
+                        className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                    <div className="mt-2 text-sm text-slate-700">{row.guidance}</div>
+                    <div className="mt-2 text-[11px] text-slate-500">
+                      user {row.user_id} • {row.task_signature || 'general lesson'} • {new Date(row.updated_at).toLocaleString()}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div>
+                  <div className="text-sm font-black text-slate-900">Learning Switches</div>
+                  <div className="text-xs text-slate-500">Entity-level overrides applied on top of the default learning behavior.</div>
+                </div>
+                <span className="text-xs text-slate-500">{learningInsights.settings.length} tracked</span>
+              </div>
+              <div className="space-y-2">
+                {learningInsights.settings.length === 0 ? (
+                  <p className="text-sm text-slate-500">No entity-specific learning overrides yet.</p>
+                ) : learningInsights.settings.slice(0, 8).map((row) => (
+                  <div key={`${row.resource_type}-${row.resource_id}`} className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-900">{row.resource_type} #{row.resource_id}</div>
+                      <div className="text-[11px] text-slate-500">{new Date(row.updated_at).toLocaleString()}</div>
+                    </div>
+                    <span className={`rounded-full px-2 py-1 text-xs font-semibold ${Number(row.enabled) === 0 ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                      {learningStatusText(row.enabled)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div className="text-sm font-black text-slate-900">Agent Feedback</div>
+                <span className="text-xs text-slate-500">{learningInsights.agent_feedback.length} rows</span>
+              </div>
+              <div className="space-y-3">
+                {learningInsights.agent_feedback.length === 0 ? (
+                  <p className="text-sm text-slate-500">No agent feedback captured yet.</p>
+                ) : learningInsights.agent_feedback.slice(0, 5).map((row) => (
+                  <div key={row.id} className="rounded-xl border border-slate-200 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">{row.agent_name}</div>
+                        <div className="text-[11px] text-slate-500">{row.rating} • {Number(row.solved) === 1 ? 'solved' : 'not solved'}</div>
+                      </div>
+                      <button onClick={() => removeLearningItem('agent-feedback', row.id)} className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">Delete</button>
+                    </div>
+                    <div className="mt-2 text-sm text-slate-700">{row.feedback_text || 'No correction text provided.'}</div>
+                    <div className="mt-2 text-[11px] text-slate-500">user {row.user_id} • {new Date(row.created_at).toLocaleString()}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div className="text-sm font-black text-slate-900">Crew Feedback</div>
+                <span className="text-xs text-slate-500">{learningInsights.crew_feedback.length} rows</span>
+              </div>
+              <div className="space-y-3">
+                {learningInsights.crew_feedback.length === 0 ? (
+                  <p className="text-sm text-slate-500">No crew feedback captured yet.</p>
+                ) : learningInsights.crew_feedback.slice(0, 5).map((row) => (
+                  <div key={row.id} className="rounded-xl border border-slate-200 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">{row.crew_name}</div>
+                        <div className="text-[11px] text-slate-500">{row.rating} • {Number(row.solved) === 1 ? 'solved' : 'not solved'}</div>
+                      </div>
+                      <button onClick={() => removeLearningItem('crew-feedback', row.id)} className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">Delete</button>
+                    </div>
+                    <div className="mt-2 text-sm text-slate-700">{row.feedback_text || 'No correction text provided.'}</div>
+                    <div className="mt-2 text-[11px] text-slate-500">user {row.user_id} • {new Date(row.created_at).toLocaleString()}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div className="text-sm font-black text-slate-900">Workflow Feedback</div>
+                <span className="text-xs text-slate-500">{learningInsights.workflow_feedback.length} rows</span>
+              </div>
+              <div className="space-y-3">
+                {learningInsights.workflow_feedback.length === 0 ? (
+                  <p className="text-sm text-slate-500">No workflow feedback captured yet.</p>
+                ) : learningInsights.workflow_feedback.slice(0, 5).map((row) => (
+                  <div key={row.id} className="rounded-xl border border-slate-200 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">{row.workflow_name}</div>
+                        <div className="text-[11px] text-slate-500">{row.rating} • {Number(row.solved) === 1 ? 'solved' : 'not solved'}</div>
+                      </div>
+                      <button onClick={() => removeLearningItem('workflow-feedback', row.id)} className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">Delete</button>
+                    </div>
+                    <div className="mt-2 text-sm text-slate-700">{row.feedback_text || 'No correction text provided.'}</div>
+                    <div className="mt-2 text-[11px] text-slate-500">user {row.user_id} • {new Date(row.created_at).toLocaleString()}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 p-4">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <div>
+                <div className="text-sm font-black text-slate-900">Recent User Preferences</div>
+                <div className="text-xs text-slate-500">Per-user hints the platform now feeds back into later agent runs.</div>
+              </div>
+              <span className="text-xs text-slate-500">{learningInsights.preferences.length} rows</span>
+            </div>
+            {learningInsights.preferences.length === 0 ? (
+              <p className="text-sm text-slate-500">No learned user preferences yet.</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                {learningInsights.preferences.slice(0, 6).map((row) => (
+                  <div key={`${row.user_id}-${row.agent_id}`} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="text-sm font-semibold text-slate-900">{row.agent_name}</div>
+                    <div className="mt-1 text-sm text-slate-700">{row.preference_text}</div>
+                    <div className="mt-2 text-[11px] text-slate-500">user {row.user_id} • {new Date(row.updated_at).toLocaleString()}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </details>
 
       <div className="space-y-6">
         <div className="bg-white border border-slate-200 rounded-2xl p-5 min-h-[560px]">

@@ -1245,6 +1245,143 @@ export function registerPlatformRoutes(app: Express) {
     }
   });
 
+  router.get('/api/admin/learning-insights', requireUser, async (req, res, next) => {
+    try {
+      requirePlatformAdmin(req);
+      const agents = db.prepare('SELECT id, name FROM agents').all() as Array<{ id: number; name: string }>;
+      const crews = db.prepare('SELECT id, name FROM crews').all() as Array<{ id: number; name: string }>;
+      const workflows = db.prepare('SELECT id, name FROM workflows').all() as Array<{ id: number; name: string }>;
+      const agentNameById = new Map(agents.map((row) => [Number(row.id), row.name]));
+      const crewNameById = new Map(crews.map((row) => [Number(row.id), row.name]));
+      const workflowNameById = new Map(workflows.map((row) => [Number(row.id), row.name]));
+
+      const agentLessons = db.prepare(`
+        SELECT id, agent_id, user_id, lesson_kind, task_signature, guidance, weight, source_feedback_id, updated_at
+        FROM agent_learning_lessons
+        ORDER BY datetime(updated_at) DESC
+        LIMIT 50
+      `).all() as any[];
+      const agentFeedback = db.prepare(`
+        SELECT id, execution_id, agent_id, user_id, rating, solved, feedback_text, task_signature, tool_sequence, created_at
+        FROM run_feedback
+        ORDER BY datetime(created_at) DESC
+        LIMIT 50
+      `).all() as any[];
+      const crewFeedback = db.prepare(`
+        SELECT id, execution_id, crew_id, user_id, rating, solved, feedback_text, created_at
+        FROM crew_run_feedback
+        ORDER BY datetime(created_at) DESC
+        LIMIT 50
+      `).all() as any[];
+      const workflowFeedback = db.prepare(`
+        SELECT id, workflow_run_id, workflow_id, user_id, rating, solved, feedback_text, created_at
+        FROM workflow_run_feedback
+        ORDER BY datetime(created_at) DESC
+        LIMIT 50
+      `).all() as any[];
+      const preferences = db.prepare(`
+        SELECT user_id, agent_id, preference_text, updated_at
+        FROM user_agent_preferences
+        ORDER BY datetime(updated_at) DESC
+        LIMIT 50
+      `).all() as any[];
+      const learningSettings = db.prepare(`
+        SELECT resource_type, resource_id, enabled, updated_at
+        FROM entity_learning_settings
+        ORDER BY datetime(updated_at) DESC
+        LIMIT 100
+      `).all() as any[];
+
+      const disabledCounts = learningSettings.reduce(
+        (acc, row) => {
+          if (Number(row.enabled) === 0) {
+            if (row.resource_type === 'agent') acc.agents += 1;
+            if (row.resource_type === 'crew') acc.crews += 1;
+            if (row.resource_type === 'workflow') acc.workflows += 1;
+          }
+          return acc;
+        },
+        { agents: 0, crews: 0, workflows: 0 },
+      );
+
+      res.json({
+        summary: {
+          lessons: agentLessons.length,
+          feedback_rows: agentFeedback.length + crewFeedback.length + workflowFeedback.length,
+          preferences: preferences.length,
+          disabled_counts: disabledCounts,
+        },
+        settings: learningSettings,
+        agent_lessons: agentLessons.map((row) => ({
+          ...row,
+          agent_name: agentNameById.get(Number(row.agent_id)) || `Agent ${row.agent_id}`,
+        })),
+        agent_feedback: agentFeedback.map((row) => ({
+          ...row,
+          agent_name: agentNameById.get(Number(row.agent_id)) || `Agent ${row.agent_id}`,
+        })),
+        crew_feedback: crewFeedback.map((row) => ({
+          ...row,
+          crew_name: crewNameById.get(Number(row.crew_id)) || `Crew ${row.crew_id}`,
+        })),
+        workflow_feedback: workflowFeedback.map((row) => ({
+          ...row,
+          workflow_name: workflowNameById.get(Number(row.workflow_id)) || `Workflow ${row.workflow_id}`,
+        })),
+        preferences: preferences.map((row) => ({
+          ...row,
+          agent_name: agentNameById.get(Number(row.agent_id)) || `Agent ${row.agent_id}`,
+        })),
+      });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  router.delete('/api/admin/learning-insights/agent-lessons/:id', requireUser, async (req, res, next) => {
+    try {
+      requirePlatformAdmin(req);
+      const result = db.prepare('DELETE FROM agent_learning_lessons WHERE id = ?').run(String(req.params.id));
+      if (!result.changes) throw new HttpError(404, 'Learning lesson not found');
+      res.json({ success: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  router.delete('/api/admin/learning-insights/agent-feedback/:id', requireUser, async (req, res, next) => {
+    try {
+      requirePlatformAdmin(req);
+      const result = db.prepare('DELETE FROM run_feedback WHERE id = ?').run(String(req.params.id));
+      if (!result.changes) throw new HttpError(404, 'Feedback entry not found');
+      res.json({ success: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  router.delete('/api/admin/learning-insights/crew-feedback/:id', requireUser, async (req, res, next) => {
+    try {
+      requirePlatformAdmin(req);
+      const result = db.prepare('DELETE FROM crew_run_feedback WHERE id = ?').run(String(req.params.id));
+      if (!result.changes) throw new HttpError(404, 'Crew feedback entry not found');
+      res.json({ success: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  router.delete('/api/admin/learning-insights/workflow-feedback/:id', requireUser, async (req, res, next) => {
+    try {
+      requirePlatformAdmin(req);
+      const result = db.prepare('DELETE FROM workflow_run_feedback WHERE id = ?').run(String(req.params.id));
+      if (!result.changes) throw new HttpError(404, 'Workflow feedback entry not found');
+      res.json({ success: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
   router.patch('/api/admin/access-controls/global', requireUser, async (req, res, next) => {
     try {
       requirePlatformAdmin(req);
