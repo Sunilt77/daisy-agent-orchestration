@@ -18,14 +18,22 @@ interface Agent {
 interface LiveAgentCardProps {
   agent: Agent;
   onClick?: () => void;
+  variant?: 'default' | 'dashboard';
 }
 
-export const LiveAgentCard: React.FC<LiveAgentCardProps> = ({ agent, onClick }) => {
+export const LiveAgentCard: React.FC<LiveAgentCardProps> = ({ agent, onClick, variant = 'default' }) => {
   const isRunning = agent.status === 'running' || (agent.running_count ?? 0) > 0;
   const totalTokens = (agent.stats?.prompt_tokens ?? 0) + (agent.stats?.completion_tokens ?? 0);
+  const isDashboard = variant === 'dashboard';
   const roleTone = (agent.role || '').toLowerCase().includes('supervisor')
     ? 'text-violet-200 border-violet-400/30 bg-violet-500/15'
     : 'text-cyan-100 border-cyan-400/30 bg-cyan-500/15';
+  const shellClass = isDashboard
+    ? 'border-white/10 bg-slate-950/88 shadow-[0_18px_65px_rgba(15,23,42,0.42)] backdrop-blur-xl'
+    : 'glass-card';
+  const hoverClass = isDashboard
+    ? 'hover:border-brand-300/40 hover:bg-slate-950/94'
+    : 'hover:border-brand-200/60';
 
   return (
     <motion.div
@@ -34,8 +42,8 @@ export const LiveAgentCard: React.FC<LiveAgentCardProps> = ({ agent, onClick }) 
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       whileHover={{ y: -4, transition: { duration: 0.2 } }}
-      className={`relative group cursor-pointer glass-card rounded-[1.75rem] p-6 transition-all duration-300 overflow-hidden ${
-        isRunning ? 'ring-2 ring-brand-400/50 shadow-[0_20px_80px_rgba(39,110,241,0.22)]' : 'hover:border-brand-200/60'
+      className={`relative group cursor-pointer rounded-[1.75rem] border p-6 transition-all duration-300 overflow-hidden ${shellClass} ${
+        isRunning ? 'ring-2 ring-brand-400/50 shadow-[0_20px_80px_rgba(39,110,241,0.22)]' : hoverClass
       }`}
     >
       <div className="absolute inset-x-0 top-0 h-24 bg-[radial-gradient(circle_at_top_right,rgba(120,255,214,0.18),transparent_55%)] opacity-90" />

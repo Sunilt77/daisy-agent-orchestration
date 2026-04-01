@@ -1144,11 +1144,11 @@ export default function Dashboard() {
 
       <div className="mb-12">
         <div className="flex items-center justify-between mb-6">
-          <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+          <h2 className="text-lg font-bold text-white flex items-center gap-2">
             <Users className="text-brand-500" size={20} />
             Active Workforce
           </h2>
-          <Link to="/agents" className="text-sm font-bold text-brand-600 hover:text-brand-700 transition-colors flex items-center gap-1">
+          <Link to="/agents" className="text-sm font-bold text-brand-300 hover:text-brand-200 transition-colors flex items-center gap-1">
             View All Agents <ArrowRight size={14} />
           </Link>
         </div>
@@ -1162,6 +1162,7 @@ export default function Dashboard() {
               <LiveAgentCard 
                 key={agent.id} 
                 agent={agent} 
+                variant="dashboard"
                 onClick={() => navigate('/agents')} 
               />
             ))}
@@ -1260,74 +1261,79 @@ export default function Dashboard() {
         </div>
       )}
 
+      <div className="mt-14">
         <div className="flex items-center justify-between mb-6">
-          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+          <h2 className="text-lg font-bold text-white flex items-center gap-2">
             <LayoutGrid className="text-accent-500" size={20} />
             Syndicates & Operations
           </h2>
-          <Link to="/crews" className="text-sm font-bold text-brand-600 hover:text-brand-700 transition-colors flex items-center gap-1">
+          <Link to="/crews" className="text-sm font-bold text-brand-300 hover:text-brand-200 transition-colors flex items-center gap-1">
             Browse All Crews <ArrowRight size={14} />
           </Link>
         </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {pagedCrews.map(crew => (
-          <Link 
-            key={crew.id} 
-            to={`/crew/${crew.id}`}
-            className="group glass-card p-6 rounded-2xl hover:border-brand-200 transition-all duration-300 relative overflow-hidden"
-          >
-            <div className="absolute top-0 right-0 w-32 h-32 bg-brand-50 rounded-full -mr-16 -mt-16 opacity-0 group-hover:opacity-100 transition-all duration-500" />
-            
-            <div className="flex justify-between items-start mb-6 relative z-10">
-              <div className="p-3 bg-brand-50 rounded-xl text-brand-600 transition-colors group-hover:bg-brand-500 group-hover:text-white">
-                <Users size={24} />
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-black px-2 py-1 bg-slate-100 text-slate-600 rounded-lg uppercase tracking-widest border border-slate-200">
-                  {crew.process}
-                </span>
-                {crew.is_exposed && (
-                    <span className="text-[10px] font-bold px-2 py-1 bg-purple-100 text-purple-600 rounded-full uppercase tracking-wide">
-                        MCP
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {pagedCrews.map(crew => (
+            <Link 
+              key={crew.id} 
+              to={`/crew/${crew.id}`}
+              className="group relative overflow-hidden rounded-[1.75rem] border border-white/10 bg-slate-950/88 p-6 shadow-[0_18px_65px_rgba(15,23,42,0.42)] backdrop-blur-xl transition-all duration-300 hover:border-brand-300/40 hover:bg-slate-950/94"
+            >
+              <div className="absolute inset-x-0 top-0 h-24 bg-[radial-gradient(circle_at_top_right,rgba(96,165,250,0.2),transparent_60%)] opacity-90" />
+              <div className="absolute -right-10 top-4 h-28 w-28 rounded-full border border-white/10 bg-white/5 blur-xl" />
+              
+              <div className="relative z-10">
+                <div className="flex justify-between items-start mb-6">
+                  <div className="rounded-2xl border border-brand-300/20 bg-brand-500/12 p-3 text-brand-100 transition-colors group-hover:bg-brand-500/20">
+                    <Users size={24} />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-slate-200">
+                      {crew.process}
                     </span>
-                )}
-                <button
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setRunCrew(crew);
-                  }}
-                  className="p-1 text-slate-300 hover:text-indigo-600 transition-colors"
-                  title="Run Crew"
-                >
-                  <PlayCircle size={16} />
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    deleteCrew(crew.id);
-                  }}
-                  className="p-1 text-slate-300 hover:text-red-500 transition-colors"
-                >
-                  <Trash2 size={16} />
-                </button>
+                    {crew.is_exposed && (
+                      <span className="rounded-full border border-violet-400/30 bg-violet-500/15 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.2em] text-violet-100">
+                        MCP
+                      </span>
+                    )}
+                    <button
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setRunCrew(crew);
+                      }}
+                      className="rounded-lg p-1 text-slate-400 transition-colors hover:text-brand-200"
+                      title="Run Crew"
+                    >
+                      <PlayCircle size={16} />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        deleteCrew(crew.id);
+                      }}
+                      className="rounded-lg p-1 text-slate-400 transition-colors hover:text-rose-300"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                </div>
+                <h3 className="mb-2 text-xl font-semibold text-white">{crew.name}</h3>
+                <p className="mb-4 text-sm text-slate-400">Click to manage agents, execution flow, and delegated operations for this crew.</p>
+                <div className="flex items-center text-sm font-medium text-brand-300">
+                  Manage Crew <ArrowRight size={16} className="ml-1 transition-transform group-hover:translate-x-1" />
+                </div>
               </div>
+            </Link>
+          ))}
+          
+          {crews.length === 0 && !isCreating && (
+            <div className="col-span-full rounded-[1.75rem] border border-dashed border-white/10 bg-slate-950/72 py-12 text-center">
+              <p className="text-slate-400">No crews created yet. Start by creating one!</p>
             </div>
-            <h3 className="text-xl font-semibold text-slate-900 mb-2">{crew.name}</h3>
-            <p className="text-slate-500 text-sm mb-4">Click to manage agents and tasks for this crew.</p>
-            <div className="flex items-center text-indigo-600 text-sm font-medium">
-              Manage Crew <ArrowRight size={16} className="ml-1 group-hover:translate-x-1 transition-transform" />
-            </div>
-          </Link>
-        ))}
-        
-      {crews.length === 0 && !isCreating && (
-          <div className="col-span-full text-center py-12 bg-slate-50 rounded-xl border border-dashed border-slate-300">
-            <p className="text-slate-500">No crews created yet. Start by creating one!</p>
-          </div>
-        )}
+          )}
+        </div>
       </div>
       <div className="mt-6">
         <Pagination
