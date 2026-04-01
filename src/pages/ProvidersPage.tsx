@@ -152,31 +152,60 @@ export default function ProvidersPage() {
     return providers.slice(start, start + providersPageSize);
   }, [providers, providersPage, providersPageSize]);
 
+  const providerInsights = useMemo(() => ({
+    totalProviders: providers.length,
+    defaultProviders: providers.filter((provider) => provider.is_default).length,
+    openAiCompatible: providers.filter((provider) => provider.provider === 'openai-compatible').length,
+    managedKeys: providers.length,
+  }), [providers]);
+
   return (
     <div>
-      <div className="flex justify-between items-end mb-8">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900">LLM Providers</h1>
-          <p className="text-slate-500 mt-1">Configure AI model providers (Google, OpenAI, Anthropic, etc.)</p>
-          <p className="text-xs text-slate-400 mt-1">
-            For non-LLM API keys (e.g. Search, Databases), go to{' '}
-            <Link to="/credentials" className="text-brand-600 hover:underline font-medium inline-flex items-center gap-1">
-              Credentials <ExternalLink size={10} />
-            </Link>
-          </p>
+      <div className="swarm-hero p-6 mb-8">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
+              <Shield size={12} />
+              Model Runtime Registry
+            </div>
+            <h1 className="text-3xl font-black text-white">LLM Providers</h1>
+            <p className="text-slate-300 mt-1">Maintain the model backends your agents can route through, test them, and keep defaults explicit.</p>
+            <p className="text-xs text-slate-400 mt-2">
+              For non-LLM API keys, go to{' '}
+              <Link to="/credentials" className="text-cyan-200 hover:text-white font-medium inline-flex items-center gap-1">
+                Credentials <ExternalLink size={10} />
+              </Link>
+            </p>
+          </div>
+          <button
+            onClick={() => setIsCreating((prev) => !prev)}
+            className="bg-white/10 hover:bg-white/15 text-white px-4 py-2 rounded-xl flex items-center gap-2 transition-colors border border-white/10"
+          >
+            <Plus size={18} />
+            {isCreating ? 'Close Builder' : 'New Provider'}
+          </button>
         </div>
-        <button 
-          onClick={() => setIsCreating(true)}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
-        >
-          <Plus size={18} />
-          New Provider
-        </button>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-4 mt-6">
+          {[
+            { label: 'Providers', value: providerInsights.totalProviders },
+            { label: 'Defaults', value: providerInsights.defaultProviders },
+            { label: 'Compat Runtimes', value: providerInsights.openAiCompatible },
+            { label: 'Managed Keys', value: providerInsights.managedKeys },
+          ].map((item) => (
+            <div key={item.label} className="telemetry-tile p-4">
+              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">{item.label}</div>
+              <div className="mt-2 text-3xl font-black text-white">{item.value}</div>
+            </div>
+          ))}
+        </div>
       </div>
 
       {isCreating && (
         <div className="mb-8 bg-white p-6 rounded-xl border border-slate-200 shadow-sm animate-in fade-in slide-in-from-top-4">
-          <h3 className="text-lg font-semibold mb-4">{editingId ? 'Edit Provider' : 'Add New Provider'}</h3>
+          <div className="mb-4">
+            <h3 className="text-lg font-semibold">{editingId ? 'Edit Provider' : 'Add New Provider'}</h3>
+            <p className="text-xs text-slate-500 mt-1">Keep the runtime identity and endpoint visible first. Testing stays in the same builder only when you need it.</p>
+          </div>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>

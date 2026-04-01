@@ -519,19 +519,25 @@ export default function PlatformPage() {
 
   return (
     <div className="space-y-7">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-3xl font-black tracking-tight text-slate-900">Platform Administration</h1>
-          <p className="text-slate-500 mt-1">Control tenants, users, plans, session limits, and usage governance.</p>
+      <div className="swarm-hero p-6">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
+              <Building2 size={12} />
+              Platform Governance
+            </div>
+            <h1 className="text-3xl font-black text-white">Platform Administration</h1>
+            <p className="text-slate-300 mt-1">Control tenants, users, plans, access policies, and usage ceilings from one command surface.</p>
+          </div>
+          <button
+            onClick={fetchAll}
+            disabled={loading}
+            className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-semibold text-white hover:bg-white/15 disabled:opacity-60"
+          >
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            {loading ? 'Refreshing...' : 'Refresh Metrics'}
+          </button>
         </div>
-        <button
-          onClick={fetchAll}
-          disabled={loading}
-          className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
-        >
-          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-          {loading ? 'Refreshing...' : 'Refresh Metrics'}
-        </button>
       </div>
 
       {notice && (
@@ -589,82 +595,26 @@ export default function PlatformPage() {
         ))}
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-2xl p-5">
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="min-w-[220px]">
+      <details className="bg-white border border-slate-200 rounded-2xl p-5 group">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+          <div>
             <div className="text-sm font-bold text-slate-900">Global Session/Usage Limits</div>
             <div className="text-xs text-slate-500">Defaults applied to all orgs unless overridden by plan.</div>
           </div>
-          <input
-            type="number"
-            className="ui-input w-48"
-            value={settings.daily_message_cap}
-            onChange={(e) => setSettings((s) => ({ ...s, daily_message_cap: Number(e.target.value || 0) }))}
-            placeholder="Daily cap"
-          />
-          <input
-            type="number"
-            className="ui-input w-40"
-            value={settings.batch_size}
-            onChange={(e) => setSettings((s) => ({ ...s, batch_size: Number(e.target.value || 0) }))}
-            placeholder="Batch size"
-          />
-          <input
-            type="number"
-            className="ui-input w-52"
-            value={settings.rate_limit_per_second}
-            onChange={(e) => setSettings((s) => ({ ...s, rate_limit_per_second: Number(e.target.value || 0) }))}
-            placeholder="Rate/sec"
-          />
-          <input
-            type="number"
-            className="ui-input w-40"
-            value={settings.max_agents}
-            onChange={(e) => setSettings((s) => ({ ...s, max_agents: Number(e.target.value || 0) }))}
-            placeholder="Max agents"
-          />
-          <input
-            type="number"
-            className="ui-input w-40"
-            value={settings.max_crews}
-            onChange={(e) => setSettings((s) => ({ ...s, max_crews: Number(e.target.value || 0) }))}
-            placeholder="Max crews"
-          />
-          <input
-            type="number"
-            className="ui-input w-44"
-            value={settings.max_linked_tools}
-            onChange={(e) => setSettings((s) => ({ ...s, max_linked_tools: Number(e.target.value || 0) }))}
-            placeholder="Max tools"
-          />
-          <input
-            type="number"
-            className="ui-input w-48"
-            value={settings.max_linked_mcp_tools}
-            onChange={(e) => setSettings((s) => ({ ...s, max_linked_mcp_tools: Number(e.target.value || 0) }))}
-            placeholder="Max MCP tools"
-          />
-          <input
-            type="number"
-            className="ui-input w-52"
-            value={settings.max_linked_mcp_bundles}
-            onChange={(e) => setSettings((s) => ({ ...s, max_linked_mcp_bundles: Number(e.target.value || 0) }))}
-            placeholder="Max MCP bundles"
-          />
-          <input
-            type="number"
-            className="ui-input w-56"
-            value={settings.max_active_sessions_per_user}
-            onChange={(e) => setSettings((s) => ({ ...s, max_active_sessions_per_user: Number(e.target.value || 0) }))}
-            placeholder="Sessions per user"
-          />
-          <input
-            type="number"
-            className="ui-input w-52"
-            value={settings.max_active_sessions_org}
-            onChange={(e) => setSettings((s) => ({ ...s, max_active_sessions_org: Number(e.target.value || 0) }))}
-            placeholder="Sessions per org"
-          />
+          <span className="text-xs font-semibold text-slate-600 group-open:hidden">Show limits</span>
+          <span className="text-xs font-semibold text-slate-600 hidden group-open:inline">Hide limits</span>
+        </summary>
+        <div className="mt-4 flex flex-wrap items-end gap-3">
+          <input type="number" className="ui-input w-48" value={settings.daily_message_cap} onChange={(e) => setSettings((s) => ({ ...s, daily_message_cap: Number(e.target.value || 0) }))} placeholder="Daily cap" />
+          <input type="number" className="ui-input w-40" value={settings.batch_size} onChange={(e) => setSettings((s) => ({ ...s, batch_size: Number(e.target.value || 0) }))} placeholder="Batch size" />
+          <input type="number" className="ui-input w-52" value={settings.rate_limit_per_second} onChange={(e) => setSettings((s) => ({ ...s, rate_limit_per_second: Number(e.target.value || 0) }))} placeholder="Rate/sec" />
+          <input type="number" className="ui-input w-40" value={settings.max_agents} onChange={(e) => setSettings((s) => ({ ...s, max_agents: Number(e.target.value || 0) }))} placeholder="Max agents" />
+          <input type="number" className="ui-input w-40" value={settings.max_crews} onChange={(e) => setSettings((s) => ({ ...s, max_crews: Number(e.target.value || 0) }))} placeholder="Max crews" />
+          <input type="number" className="ui-input w-44" value={settings.max_linked_tools} onChange={(e) => setSettings((s) => ({ ...s, max_linked_tools: Number(e.target.value || 0) }))} placeholder="Max tools" />
+          <input type="number" className="ui-input w-48" value={settings.max_linked_mcp_tools} onChange={(e) => setSettings((s) => ({ ...s, max_linked_mcp_tools: Number(e.target.value || 0) }))} placeholder="Max MCP tools" />
+          <input type="number" className="ui-input w-52" value={settings.max_linked_mcp_bundles} onChange={(e) => setSettings((s) => ({ ...s, max_linked_mcp_bundles: Number(e.target.value || 0) }))} placeholder="Max MCP bundles" />
+          <input type="number" className="ui-input w-56" value={settings.max_active_sessions_per_user} onChange={(e) => setSettings((s) => ({ ...s, max_active_sessions_per_user: Number(e.target.value || 0) }))} placeholder="Sessions per user" />
+          <input type="number" className="ui-input w-52" value={settings.max_active_sessions_org} onChange={(e) => setSettings((s) => ({ ...s, max_active_sessions_org: Number(e.target.value || 0) }))} placeholder="Sessions per org" />
           <button
             onClick={saveSettings}
             disabled={savingSettings}
@@ -674,14 +624,18 @@ export default function PlatformPage() {
             {savingSettings ? 'Saving...' : 'Save'}
           </button>
         </div>
-      </div>
+      </details>
 
-      <div className="bg-white border border-slate-200 rounded-2xl p-5">
-        <div className="flex items-center justify-between gap-3 mb-3">
+      <details className="bg-white border border-slate-200 rounded-2xl p-5 group">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 mb-3">
           <div>
             <h3 className="text-lg font-black text-slate-900">Global Access Controls</h3>
-            <p className="text-xs text-slate-500">Control global visibility/usage of agents, tools, and MCP resources.</p>
+            <p className="text-xs text-slate-500">Control global visibility and usage of agents, tools, and MCP resources.</p>
           </div>
+          <span className="text-xs font-semibold text-slate-600 group-open:hidden">Show policy</span>
+          <span className="text-xs font-semibold text-slate-600 hidden group-open:inline">Hide policy</span>
+        </summary>
+        <div className="flex items-center justify-end mb-3">
           <button onClick={saveGlobalAccessControls} className="bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-4 py-2 text-sm font-bold">
             Save Access Policy
           </button>
@@ -771,7 +725,7 @@ export default function PlatformPage() {
             </div>
           </div>
         )}
-      </div>
+      </details>
 
       <div className="bg-white border border-slate-200 rounded-2xl p-5">
         <div className="flex items-center gap-2 mb-3">

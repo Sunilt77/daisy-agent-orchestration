@@ -54,6 +54,15 @@ export default function ProjectsPage() {
     return projects.slice(start, start + projectsPageSize);
   }, [projects, projectsPage, projectsPageSize]);
 
+  const projectInsights = useMemo(() => {
+    return {
+      totalProjects: projects.length,
+      totalCrews: projects.reduce((sum, project) => sum + project.crews_count, 0),
+      totalAgents: projects.reduce((sum, project) => sum + project.agents_count, 0),
+      totalCost: projects.reduce((sum, project) => sum + project.total_cost, 0),
+    };
+  }, [projects]);
+
   const fetchProjects = () => {
     fetch('/api/projects', { cache: 'no-store' })
       .then(res => {
@@ -174,23 +183,45 @@ export default function ProjectsPage() {
 
   return (
     <div>
-      <div className="flex justify-between items-center mb-8">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900">Projects</h1>
-          <p className="text-slate-500 mt-1">Organize your crews into projects</p>
+      <div className="swarm-hero p-6 mb-8">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
+              <Folder size={12} />
+              Project Registry
+            </div>
+            <h1 className="text-3xl font-black text-white">Projects</h1>
+            <p className="text-slate-300 mt-1">Group agents, crews, traces, and platform links into clear operational spaces.</p>
+          </div>
+          <button
+            onClick={() => setIsCreating((prev) => !prev)}
+            className="bg-white/10 hover:bg-white/15 text-white px-4 py-2 rounded-xl flex items-center gap-2 transition-colors border border-white/10"
+          >
+            <Plus size={18} />
+            {isCreating ? 'Close Builder' : 'New Project'}
+          </button>
         </div>
-        <button 
-          onClick={() => setIsCreating(true)}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
-        >
-          <Plus size={18} />
-          New Project
-        </button>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-4 mt-6">
+          {[
+            { label: 'Projects', value: projectInsights.totalProjects },
+            { label: 'Crews', value: projectInsights.totalCrews },
+            { label: 'Agents', value: projectInsights.totalAgents },
+            { label: 'Tracked Cost', value: `$${projectInsights.totalCost.toFixed(2)}` },
+          ].map((item) => (
+            <div key={item.label} className="telemetry-tile p-4">
+              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">{item.label}</div>
+              <div className="mt-2 text-3xl font-black text-white">{item.value}</div>
+            </div>
+          ))}
+        </div>
       </div>
 
       {isCreating && (
         <div className="mb-8 bg-white p-6 rounded-xl border border-slate-200 shadow-sm animate-in fade-in slide-in-from-top-4">
-          <h3 className="text-lg font-semibold mb-4">Create New Project</h3>
+          <div className="mb-4">
+            <h3 className="text-lg font-semibold">Create New Project</h3>
+            <p className="text-xs text-slate-500 mt-1">Set the identity first. Platform linking can stay a second step when the project is ready.</p>
+          </div>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">Project Name</label>
