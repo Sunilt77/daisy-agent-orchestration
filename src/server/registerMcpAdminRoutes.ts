@@ -1,4 +1,14 @@
 import type express from 'express';
+import { requireUser } from '../platform/auth';
+import {
+  getScopedAgentIds,
+  getScopedBundleIds,
+  getScopedToolIds,
+  isPlatformAdminUser,
+  requireVisibleBundleId,
+  requireVisibleToolId,
+  resolveOrchestratorAccessScope,
+} from './orchestratorAccess';
 
 type RegisterMcpAdminRoutesDeps = {
   app: express.Express;
@@ -12,14 +22,15 @@ type RegisterMcpAdminRoutesDeps = {
   executeTool: (toolName: string, args: any, mcpClients?: Map<string, any>, toolRecord?: any) => Promise<string>;
 };
 
-function getMcpBundleDependencies(db: any, bundleId: number) {
+function getMcpBundleDependencies(db: any, bundleId: number, scopedAgentIds?: number[] | null) {
   const agents = db.prepare(`
     SELECT a.id, a.name
     FROM agent_mcp_bundles amb
     JOIN agents a ON a.id = amb.agent_id
     WHERE amb.bundle_id = ?
+      ${scopedAgentIds ? `AND a.id IN (${scopedAgentIds.map(() => '?').join(',') || 'NULL'})` : ''}
     ORDER BY a.name ASC
-  `).all(bundleId) as any[];
+  `).all(bundleId, ...(scopedAgentIds || [])) as any[];
   return {
     agents,
     agents_count: agents.length,
@@ -65,14 +76,18 @@ export function registerMcpAdminRoutes({
   getToolInputSchemaForRecord,
   executeTool,
 }: RegisterMcpAdminRoutesDeps) {
-  app.get('/api/mcp/local-packages', async (_req, res) => {
+  app.get('/api/mcp/local-packages', requireUser, async (req, res) => {
     try {
+      const scope = await resolveOrchestratorAccessScope(req);
+      const scopedToolIds = getScopedToolIds(scope);
+      if (scopedToolIds && !scopedToolIds.length) return res.json([]);
       const tools = db.prepare(`
         SELECT id, name, description, config, updated_at
         FROM tools
         WHERE type = 'mcp_stdio_proxy'
+          ${scopedToolIds ? `AND id IN (${scopedToolIds.map(() => '?').join(',')})` : ''}
         ORDER BY name COLLATE NOCASE ASC
-      `).all() as any[];
+      `).all(...(scopedToolIds || [])) as any[];
       const bundleLinks = db.prepare(`
         SELECT mbt.tool_id, b.id AS bundle_id, b.name AS bundle_name, b.slug AS bundle_slug, b.description AS bundle_description, b.is_exposed AS bundle_is_exposed
         FROM mcp_bundle_tools mbt
@@ -246,12 +261,14 @@ export function registerMcpAdminRoutes({
     }
   });
 
-  app.get('/api/mcp/config', (_req, res) => {
+  app.get('/api/mcp/config', requireUser, (req, res) => {
+    if (!isPlatformAdminUser(req.user)) return res.status(403).json({ error: 'Platform admin access required' });
     const token = getSetting(settingsKeyMcpAuthToken);
     res.json({ auth_token: token || null });
   });
 
-  app.put('/api/mcp/config', async (req, res) => {
+  app.put('/api/mcp/config', requireUser, async (req, res) => {
+    if (!isPlatformAdminUser(req.user)) return res.status(403).json({ error: 'Platform admin access required' });
     const { auth_token } = req.body || {};
     if (auth_token === '' || auth_token == null) {
       await setSetting(settingsKeyMcpAuthToken, null);
@@ -262,8 +279,11 @@ export function registerMcpAdminRoutes({
     res.json({ auth_token: auth_token.trim() });
   });
 
-  app.get('/api/mcp/exposed-tools', async (_req, res) => {
+  app.get('/api/mcp/exposed-tools', requireUser, async (req, res) => {
     try {
+      const scope = await resolveOrchestratorAccessScope(req);
+      const scopedToolIds = getScopedToolIds(scope);
+      if (scopedToolIds && !scopedToolIds.length) return res.json([]);
       const rows = db.prepare(`
         SELECT
           t.id AS tool_id,
@@ -275,31 +295,41 @@ export function registerMcpAdminRoutes({
           met.description AS exposed_description
         FROM tools t
         LEFT JOIN mcp_exposed_tools met ON met.tool_id = t.id
+        ${scopedToolIds ? `WHERE t.id IN (${scopedToolIds.map(() => '?').join(',')})` : ''}
         ORDER BY t.name COLLATE NOCASE ASC
-      `).all();
+      `).all(...(scopedToolIds || []));
       res.json(rows);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
-  app.get('/api/mcp/exposed-tools/:toolId/versions', (req, res) => {
-    const toolId = Number(req.params.toolId);
-    if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
-    const tool = db.prepare('SELECT id, name FROM tools WHERE id = ?').get(toolId) as any;
-    if (!tool) return res.status(404).json({ error: 'Tool not found' });
-    const versions = db.prepare(`
-      SELECT id, tool_id, version_number, exposed_name, description, is_exposed, change_kind, created_at
-      FROM mcp_exposed_tool_versions
-      WHERE tool_id = ?
-      ORDER BY version_number DESC, id DESC
-    `).all(toolId);
-    res.json({ tool, versions });
+  app.get('/api/mcp/exposed-tools/:toolId/versions', requireUser, async (req, res) => {
+    try {
+      const toolId = Number(req.params.toolId);
+      if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
+      const scope = await resolveOrchestratorAccessScope(req);
+      requireVisibleToolId(scope, toolId);
+      const tool = db.prepare('SELECT id, name FROM tools WHERE id = ?').get(toolId) as any;
+      if (!tool) return res.status(404).json({ error: 'Tool not found' });
+      const versions = db.prepare(`
+        SELECT id, tool_id, version_number, exposed_name, description, is_exposed, change_kind, created_at
+        FROM mcp_exposed_tool_versions
+        WHERE tool_id = ?
+        ORDER BY version_number DESC, id DESC
+      `).all(toolId);
+      res.json({ tool, versions });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || 'Failed to load MCP tool versions' });
+    }
   });
 
-  app.put('/api/mcp/exposed-tools/:toolId', async (req, res) => {
+  app.put('/api/mcp/exposed-tools/:toolId', requireUser, async (req, res) => {
     const toolId = Number(req.params.toolId);
     if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared MCP exposure right now.' });
+    requireVisibleToolId(scope, toolId);
     const { exposed, exposed_name, description } = req.body || {};
     const prisma = getPrisma();
     let tool = await prisma.orchestratorTool.findUnique({
@@ -431,10 +461,13 @@ export function registerMcpAdminRoutes({
     }
   });
 
-  app.post('/api/mcp/exposed-tools/:toolId/restore/:versionId', async (req, res) => {
+  app.post('/api/mcp/exposed-tools/:toolId/restore/:versionId', requireUser, async (req, res) => {
     const toolId = Number(req.params.toolId);
     const versionId = Number(req.params.versionId);
     if (!Number.isFinite(toolId) || !Number.isFinite(versionId)) return res.status(400).json({ error: 'Invalid tool or version id' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared MCP exposure right now.' });
+    requireVisibleToolId(scope, toolId);
     const version = db.prepare(`
       SELECT *
       FROM mcp_exposed_tool_versions
@@ -491,16 +524,21 @@ export function registerMcpAdminRoutes({
     }
   });
 
-  app.get('/api/mcp/bundles', async (_req, res) => {
+  app.get('/api/mcp/bundles', requireUser, async (req, res) => {
     try {
+      const scope = await resolveOrchestratorAccessScope(req);
+      const scopedBundleIds = getScopedBundleIds(scope);
+      if (scopedBundleIds && !scopedBundleIds.length) return res.json([]);
       const prisma = getPrisma();
       const [bundles, bundleTools, tools, exposures] = await Promise.all([
-        prisma.orchestratorMcpBundle.findMany({ orderBy: { updatedAt: 'desc' } }),
-        prisma.orchestratorMcpBundleTool.findMany({ orderBy: [{ bundleId: 'asc' }, { toolId: 'asc' }] }),
+        prisma.orchestratorMcpBundle.findMany({ where: scopedBundleIds ? { id: { in: scopedBundleIds } } : undefined, orderBy: { updatedAt: 'desc' } }),
+        prisma.orchestratorMcpBundleTool.findMany({ where: scopedBundleIds ? { bundleId: { in: scopedBundleIds } } : undefined, orderBy: [{ bundleId: 'asc' }, { toolId: 'asc' }] }),
         prisma.orchestratorTool.findMany({
+          where: getScopedToolIds(scope) ? { id: { in: getScopedToolIds(scope)! } } : undefined,
           select: { id: true, name: true, description: true, category: true },
         }),
         prisma.orchestratorMcpExposedTool.findMany({
+          where: getScopedToolIds(scope) ? { toolId: { in: getScopedToolIds(scope)! } } : undefined,
           select: { toolId: true, exposedName: true },
         }),
       ]);
@@ -545,25 +583,33 @@ export function registerMcpAdminRoutes({
     }
   });
 
-  app.get('/api/mcp/bundles/:id/versions', (req, res) => {
-    const bundleId = Number(req.params.id);
-    if (!Number.isFinite(bundleId)) return res.status(400).json({ error: 'Invalid bundle id' });
-    const bundle = db.prepare('SELECT id, name, slug FROM mcp_bundles WHERE id = ?').get(bundleId) as any;
-    if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
-    const versions = db.prepare(`
-      SELECT id, bundle_id, version_number, name, slug, description, tool_ids, change_kind, created_at
-      FROM mcp_bundle_versions
-      WHERE bundle_id = ?
-      ORDER BY version_number DESC, id DESC
-    `).all(bundleId);
-    const dependencies = getMcpBundleDependencies(db, bundleId);
-    res.json({ bundle, versions, dependencies });
+  app.get('/api/mcp/bundles/:id/versions', requireUser, async (req, res) => {
+    try {
+      const bundleId = Number(req.params.id);
+      if (!Number.isFinite(bundleId)) return res.status(400).json({ error: 'Invalid bundle id' });
+      const scope = await resolveOrchestratorAccessScope(req);
+      requireVisibleBundleId(scope, bundleId);
+      const bundle = db.prepare('SELECT id, name, slug FROM mcp_bundles WHERE id = ?').get(bundleId) as any;
+      if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
+      const versions = db.prepare(`
+        SELECT id, bundle_id, version_number, name, slug, description, tool_ids, change_kind, created_at
+        FROM mcp_bundle_versions
+        WHERE bundle_id = ?
+        ORDER BY version_number DESC, id DESC
+      `).all(bundleId);
+      const dependencies = getMcpBundleDependencies(db, bundleId, scope.isAdmin ? null : getScopedAgentIds(scope));
+      res.json({ bundle, versions, dependencies });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || 'Failed to load MCP bundle versions' });
+    }
   });
 
-  app.get('/api/mcp/bundles/:id/test-tools', async (req, res) => {
+  app.get('/api/mcp/bundles/:id/test-tools', requireUser, async (req, res) => {
     const bundleId = Number(req.params.id);
     if (!Number.isFinite(bundleId)) return res.status(400).json({ error: 'Invalid bundle id' });
     try {
+      const scope = await resolveOrchestratorAccessScope(req);
+      requireVisibleBundleId(scope, bundleId);
       const bundle = db.prepare('SELECT id, name, slug, description FROM mcp_bundles WHERE id = ?').get(bundleId) as any;
       if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
 
@@ -602,12 +648,15 @@ export function registerMcpAdminRoutes({
     }
   });
 
-  app.post('/api/mcp/bundles/:id/test-run', async (req, res) => {
+  app.post('/api/mcp/bundles/:id/test-run', requireUser, async (req, res) => {
     const bundleId = Number(req.params.id);
     if (!Number.isFinite(bundleId)) return res.status(400).json({ error: 'Invalid bundle id' });
     try {
+      const scope = await resolveOrchestratorAccessScope(req);
+      requireVisibleBundleId(scope, bundleId);
       const toolId = Number(req.body?.tool_id);
       if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'tool_id is required' });
+      requireVisibleToolId(scope, toolId);
       const bundle = db.prepare('SELECT id, name, slug, description FROM mcp_bundles WHERE id = ?').get(bundleId) as any;
       if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
       const tool = db.prepare(`
@@ -645,12 +694,15 @@ export function registerMcpAdminRoutes({
     }
   });
 
-  app.put('/api/mcp/bundles/:id/exposure', async (req, res) => {
+  app.put('/api/mcp/bundles/:id/exposure', requireUser, async (req, res) => {
     const bundleId = Number(req.params.id);
     const { is_exposed } = req.body || {};
     if (!Number.isFinite(bundleId)) return res.status(400).json({ error: 'Invalid bundle id' });
 
     try {
+      const scope = await resolveOrchestratorAccessScope(req);
+      if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared MCP bundles right now.' });
+      requireVisibleBundleId(scope, bundleId);
       db.prepare('UPDATE mcp_bundles SET is_exposed = ? WHERE id = ?')
         .run(is_exposed ? 1 : 0, bundleId);
 
@@ -676,7 +728,7 @@ export function registerMcpAdminRoutes({
     }
   });
 
-  app.post('/api/mcp/bundles', async (req, res) => {
+  app.post('/api/mcp/bundles', requireUser, async (req, res) => {
     const { name, slug, description, tool_ids, is_exposed } = req.body || {};
     const parsedIds = Array.isArray(tool_ids) ? [...new Set(tool_ids.map((v: any) => Number(v)).filter((n: number) => Number.isFinite(n)))] : [];
     if (!parsedIds.length) return res.status(400).json({ error: 'tool_ids must include at least one tool' });
@@ -689,6 +741,8 @@ export function registerMcpAdminRoutes({
     const isExposed = is_exposed !== false;
 
     try {
+      const scope = await resolveOrchestratorAccessScope(req);
+      if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can create shared MCP bundles right now.' });
       const prisma = getPrisma();
       const existing = await prisma.orchestratorMcpBundle.findUnique({ where: { slug: cleanSlug } });
       let bundleId: number;
@@ -761,10 +815,13 @@ export function registerMcpAdminRoutes({
     }
   });
 
-  app.post('/api/mcp/bundles/:id/restore/:versionId', async (req, res) => {
+  app.post('/api/mcp/bundles/:id/restore/:versionId', requireUser, async (req, res) => {
     const bundleId = Number(req.params.id);
     const versionId = Number(req.params.versionId);
     if (!Number.isFinite(bundleId) || !Number.isFinite(versionId)) return res.status(400).json({ error: 'Invalid bundle or version id' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared MCP bundles right now.' });
+    requireVisibleBundleId(scope, bundleId);
     const bundle = db.prepare('SELECT id FROM mcp_bundles WHERE id = ?').get(bundleId) as any;
     if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
     const version = db.prepare(`
@@ -820,11 +877,14 @@ export function registerMcpAdminRoutes({
     }
   });
 
-  app.delete('/api/mcp/bundles/:id', async (req, res) => {
+  app.delete('/api/mcp/bundles/:id', requireUser, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid bundle id' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared MCP bundles right now.' });
+    requireVisibleBundleId(scope, id);
     const force = String(req.query.force || '') === 'true';
-    const dependencies = getMcpBundleDependencies(db, id);
+    const dependencies = getMcpBundleDependencies(db, id, scope.isAdmin ? null : getScopedAgentIds(scope));
     if (dependencies.agents_count > 0 && !force) {
       return res.status(409).json({ error: 'Bundle is still linked to agents.', dependencies });
     }

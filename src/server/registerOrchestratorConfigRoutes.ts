@@ -1,4 +1,6 @@
 import type express from 'express';
+import { requireUser } from '../platform/auth';
+import { isPlatformAdminUser, requireVisibleProjectId, resolveOrchestratorAccessScope } from './orchestratorAccess';
 
 type PrismaLike = ReturnType<() => any>;
 
@@ -15,10 +17,12 @@ export function registerOrchestratorConfigRoutes({
   getPrisma,
   refreshPersistentMirror,
 }: RegisterOrchestratorConfigRoutesDeps) {
-  app.get('/api/projects/:id/platform-link', async (req, res) => {
+  app.get('/api/projects/:id/platform-link', requireUser, async (req, res) => {
     try {
       const localProjectId = Number(req.params.id);
       if (!Number.isFinite(localProjectId)) return res.status(400).json({ error: 'Invalid project id' });
+      const scope = await resolveOrchestratorAccessScope(req);
+      requireVisibleProjectId(scope, localProjectId);
       const row = await getPrisma().orchestratorProject.findUnique({
         where: { id: localProjectId },
         select: { platformProjectId: true },
@@ -34,11 +38,13 @@ export function registerOrchestratorConfigRoutes({
     }
   });
 
-  app.put('/api/projects/:id/platform-link', async (req, res) => {
+  app.put('/api/projects/:id/platform-link', requireUser, async (req, res) => {
     try {
       const prisma = getPrisma();
       const localProjectId = Number(req.params.id);
       if (!Number.isFinite(localProjectId)) return res.status(400).json({ error: 'Invalid project id' });
+      const scope = await resolveOrchestratorAccessScope(req);
+      requireVisibleProjectId(scope, localProjectId);
 
       let localProject = await prisma.orchestratorProject.findUnique({ where: { id: localProjectId }, select: { id: true } });
       if (!localProject) {
@@ -67,6 +73,9 @@ export function registerOrchestratorConfigRoutes({
 
       const project = await getPrisma().project.findUnique({ where: { id: platformProjectId } });
       if (!project) return res.status(400).json({ error: 'Platform project not found' });
+      if (!isPlatformAdminUser(req.user) && project.orgId !== req.user?.orgId) {
+        return res.status(403).json({ error: 'Platform project is outside your organization.' });
+      }
 
       await prisma.orchestratorProject.update({
         where: { id: localProject.id },
@@ -89,8 +98,9 @@ export function registerOrchestratorConfigRoutes({
     }
   });
 
-  app.get('/api/credentials', async (req, res) => {
+  app.get('/api/credentials', requireUser, async (req, res) => {
     try {
+      if (!isPlatformAdminUser(req.user)) return res.json([]);
       const category = String(req.query.category || '').trim();
       const credentials = await getPrisma().orchestratorCredential.findMany({
         where: category ? { category } : undefined,
@@ -109,7 +119,7 @@ export function registerOrchestratorConfigRoutes({
     }
   });
 
-  app.post('/api/credentials', async (req, res) => {
+  app.post('/api/credentials', requireUser, async (req, res) => {
     const { provider, name, key_name, category, api_key, key_value } = req.body || {};
     const credentialKey = String(provider || '').trim();
     const secretValue = String(api_key || key_value || '').trim();
@@ -117,6 +127,7 @@ export function registerOrchestratorConfigRoutes({
     if (!credentialKey) return res.status(400).json({ error: 'provider (credential key) is required' });
     if (!secretValue) return res.status(400).json({ error: 'api_key (credential value) is required' });
     try {
+      if (!isPlatformAdminUser(req.user)) return res.status(403).json({ error: 'Only platform admin can manage shared credentials right now.' });
       await getPrisma().orchestratorCredential.upsert({
         where: { provider: credentialKey },
         update: {
@@ -141,8 +152,9 @@ export function registerOrchestratorConfigRoutes({
     }
   });
 
-  app.delete('/api/credentials/:id', async (req, res) => {
+  app.delete('/api/credentials/:id', requireUser, async (req, res) => {
     try {
+      if (!isPlatformAdminUser(req.user)) return res.status(403).json({ error: 'Only platform admin can manage shared credentials right now.' });
       const id = Number(req.params.id);
       if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid credential id' });
       await getPrisma().orchestratorCredential.deleteMany({ where: { id } });

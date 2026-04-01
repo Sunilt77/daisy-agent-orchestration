@@ -63,6 +63,19 @@ import { registerOrchestratorConfigRoutes } from './src/server/registerOrchestra
 import { registerMcpAdminRoutes } from './src/server/registerMcpAdminRoutes';
 import { registerRuntimeControlRoutes } from './src/server/registerRuntimeControlRoutes';
 import { WebSocketServer, WebSocket } from 'ws';
+import { requireUser } from './src/platform/auth';
+import {
+  getScopedAgentIds,
+  getScopedBundleIds,
+  getScopedCrewIds,
+  getScopedProjectIds,
+  getScopedToolIds,
+  requireVisibleAgentId,
+  requireVisibleCrewId,
+  requireVisibleProjectId,
+  requireVisibleToolId,
+  resolveOrchestratorAccessScope,
+} from './src/server/orchestratorAccess';
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -2061,16 +2074,19 @@ async function validateMCPConfig(config: any) {
 }
 
 // --- Tools ---
-app.get('/api/tools', async (req, res) => {
+app.get('/api/tools', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const scopedToolIds = getScopedToolIds(scope);
+    if (scopedToolIds && !scopedToolIds.length) return res.json([]);
     const prisma = getPrisma();
     const [tools, agentTools, agents, exposures, bundleTools, bundles] = await Promise.all([
-      prisma.orchestratorTool.findMany({ orderBy: { name: 'asc' } }),
-      prisma.orchestratorAgentTool.findMany({ orderBy: [{ toolId: 'asc' }, { agentId: 'asc' }] }),
-      prisma.orchestratorAgent.findMany({ select: { id: true, name: true } }),
-      prisma.orchestratorMcpExposedTool.findMany(),
-      prisma.orchestratorMcpBundleTool.findMany({ orderBy: [{ toolId: 'asc' }, { bundleId: 'asc' }] }),
-      prisma.orchestratorMcpBundle.findMany({ select: { id: true, name: true, slug: true } }),
+      prisma.orchestratorTool.findMany({ where: scopedToolIds ? { id: { in: scopedToolIds } } : undefined, orderBy: { name: 'asc' } }),
+      prisma.orchestratorAgentTool.findMany({ where: scopedToolIds ? { toolId: { in: scopedToolIds } } : undefined, orderBy: [{ toolId: 'asc' }, { agentId: 'asc' }] }),
+      prisma.orchestratorAgent.findMany({ where: getScopedAgentIds(scope) ? { id: { in: getScopedAgentIds(scope)! } } : undefined, select: { id: true, name: true } }),
+      prisma.orchestratorMcpExposedTool.findMany({ where: scopedToolIds ? { toolId: { in: scopedToolIds } } : undefined }),
+      prisma.orchestratorMcpBundleTool.findMany({ where: scopedToolIds ? { toolId: { in: scopedToolIds } } : undefined, orderBy: [{ toolId: 'asc' }, { bundleId: 'asc' }] }),
+      prisma.orchestratorMcpBundle.findMany({ where: getScopedBundleIds(scope) ? { id: { in: getScopedBundleIds(scope)! } } : undefined, select: { id: true, name: true, slug: true } }),
     ]);
     const agentById = new Map(agents.map((agent) => [agent.id, agent]));
     const exposureByToolId = new Map(exposures.map((row) => [row.toolId, row]));
@@ -2121,14 +2137,17 @@ app.get('/api/tools', async (req, res) => {
   }
 });
 
-function getToolDependencies(toolId: number) {
+function getToolDependencies(toolId: number, scope?: Awaited<ReturnType<typeof resolveOrchestratorAccessScope>>) {
+  const scopedAgentIds = scope?.isAdmin ? null : Array.from(scope?.allowedAgentIds || []);
+  const scopedBundleIds = scope?.isAdmin ? null : Array.from(scope?.allowedBundleIds || []);
   const linkedAgents = db.prepare(`
     SELECT a.id, a.name
     FROM agent_tools at
     JOIN agents a ON a.id = at.agent_id
     WHERE at.tool_id = ?
+      ${scopedAgentIds ? `AND a.id IN (${scopedAgentIds.map(() => '?').join(',') || 'NULL'})` : ''}
     ORDER BY a.name ASC
-  `).all(toolId) as any[];
+  `).all(toolId, ...(scopedAgentIds || [])) as any[];
   const exposed = db.prepare(`
     SELECT exposed_name, description, updated_at
     FROM mcp_exposed_tools
@@ -2140,15 +2159,17 @@ function getToolDependencies(toolId: number) {
     FROM mcp_bundle_tools bt
     JOIN mcp_bundles b ON b.id = bt.bundle_id
     WHERE bt.tool_id = ?
+      ${scopedBundleIds ? `AND b.id IN (${scopedBundleIds.map(() => '?').join(',') || 'NULL'})` : ''}
     ORDER BY b.name ASC
-  `).all(toolId) as any[];
+  `).all(toolId, ...(scopedBundleIds || [])) as any[];
   const mcpAgents = db.prepare(`
     SELECT a.id, a.name
     FROM agent_mcp_tools amt
     JOIN agents a ON a.id = amt.agent_id
     WHERE amt.tool_id = ?
+      ${scopedAgentIds ? `AND a.id IN (${scopedAgentIds.map(() => '?').join(',') || 'NULL'})` : ''}
     ORDER BY a.name ASC
-  `).all(toolId) as any[];
+  `).all(toolId, ...(scopedAgentIds || [])) as any[];
   return {
     agents: linkedAgents,
     agents_count: linkedAgents.length,
@@ -2211,17 +2232,19 @@ async function getToolUsageStats(toolId: number) {
   };
 }
 
-app.get('/api/tools/:id/dependencies', async (req, res) => {
+app.get('/api/tools/:id/dependencies', requireUser, async (req, res) => {
   const toolId = Number(req.params.id);
   if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleToolId(scope, toolId);
     const prisma = getPrisma();
     const tool = await prisma.orchestratorTool.findUnique({
       where: { id: toolId },
       select: { id: true, name: true, version: true, updatedAt: true },
     });
     if (!tool) return res.status(404).json({ error: 'Tool not found' });
-    const dependencies = getToolDependencies(toolId);
+    const dependencies = getToolDependencies(toolId, scope);
     const versionCount = await prisma.orchestratorToolVersion.count({ where: { toolId } });
     const usage = await getToolUsageStats(toolId);
     res.json({
@@ -2240,10 +2263,12 @@ app.get('/api/tools/:id/dependencies', async (req, res) => {
   }
 });
 
-app.get('/api/tools/:id/versions', async (req, res) => {
+app.get('/api/tools/:id/versions', requireUser, async (req, res) => {
   const toolId = Number(req.params.id);
   if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleToolId(scope, toolId);
     const prisma = getPrisma();
     const tool = await prisma.orchestratorTool.findUnique({
       where: { id: toolId },
@@ -2274,14 +2299,17 @@ app.get('/api/tools/:id/versions', async (req, res) => {
   }
 });
 
-app.post('/api/tools/:id/restore/:versionId', async (req, res) => {
+app.post('/api/tools/:id/restore/:versionId', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared tools right now.' });
     const prisma = getPrisma();
     const toolId = Number(req.params.id);
     const versionId = Number(req.params.versionId);
     if (!Number.isFinite(toolId) || !Number.isFinite(versionId)) {
       return res.status(400).json({ error: 'Invalid tool or version id' });
     }
+    requireVisibleToolId(scope, toolId);
     const tool = db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId) as any;
     if (!tool) return res.status(404).json({ error: 'Tool not found' });
     const version = db.prepare(`
@@ -2341,9 +2369,11 @@ app.post('/api/tools/:id/restore/:versionId', async (req, res) => {
   }
 });
 
-app.get('/api/tools/:id/usage', async (req, res) => {
+app.get('/api/tools/:id/usage', requireUser, async (req, res) => {
   const toolId = Number(req.params.id);
   if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  requireVisibleToolId(scope, toolId);
   const tool = db.prepare('SELECT id, name FROM tools WHERE id = ?').get(toolId) as any;
   if (!tool) return res.status(404).json({ error: 'Tool not found' });
   const usage = await getToolUsageStats(toolId);
@@ -2375,8 +2405,10 @@ function inferToolCategory(name: any, description: any, type: any, config: any, 
   return explicit || 'General';
 }
 
-app.post('/api/tools', async (req, res) => {
+app.post('/api/tools', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can create shared tools right now.' });
     const prisma = getPrisma();
     const { name, description, category, type, config, skip_validate } = req.body;
     if (type === 'mcp') {
@@ -2421,10 +2453,13 @@ app.post('/api/tools', async (req, res) => {
   }
 });
 
-app.put('/api/tools/:id', async (req, res) => {
+app.put('/api/tools/:id', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared tools right now.' });
     const prisma = getPrisma();
     const { id } = req.params;
+    requireVisibleToolId(scope, Number(id));
     const { name, description, category, type, config, skip_validate } = req.body;
     if (type === 'mcp') {
       if (!skip_validate) {
@@ -2472,7 +2507,7 @@ app.put('/api/tools/:id', async (req, res) => {
   }
 });
 
-app.post('/api/tools/http-test', async (req, res) => {
+app.post('/api/tools/http-test', requireUser, async (req, res) => {
   try {
     const { config, args } = req.body || {};
     if (!config || typeof config !== 'object') {
@@ -2485,7 +2520,7 @@ app.post('/api/tools/http-test', async (req, res) => {
   }
 });
 
-app.post('/api/tools/mcp-test', async (req, res) => {
+app.post('/api/tools/mcp-test', requireUser, async (req, res) => {
   try {
     const { serverUrl, apiKey, credentialId, transportType, customHeaders } = req.body || {};
     const result = await validateMCPConfig({ serverUrl, apiKey, credentialId, transportType, customHeaders });
@@ -2501,8 +2536,10 @@ app.post('/api/tools/mcp-test', async (req, res) => {
   }
 });
 
-app.post('/api/tools/import-mcp-package', async (req, res) => {
+app.post('/api/tools/import-mcp-package', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can import shared MCP packages right now.' });
     const prisma = getPrisma();
     const {
       packageName,
@@ -2755,10 +2792,12 @@ app.post('/api/tools/import-mcp-package', async (req, res) => {
   }
 });
 
-app.get('/api/tools/:id/mcp-schema', async (req, res) => {
+app.get('/api/tools/:id/mcp-schema', requireUser, async (req, res) => {
   try {
     const toolId = Number(req.params.id);
     if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleToolId(scope, toolId);
     const tool = db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId) as any;
     if (!tool) return res.status(404).json({ error: 'Tool not found' });
     const inputSchema = await getToolInputSchemaForRecord(tool);
@@ -2776,10 +2815,12 @@ app.get('/api/tools/:id/mcp-schema', async (req, res) => {
   }
 });
 
-app.post('/api/tools/:id/test-run', async (req, res) => {
+app.post('/api/tools/:id/test-run', requireUser, async (req, res) => {
   try {
     const toolId = Number(req.params.id);
     if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleToolId(scope, toolId);
     const tool = db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId) as any;
     if (!tool) return res.status(404).json({ error: 'Tool not found' });
     const args = req.body?.args && typeof req.body.args === 'object' ? req.body.args : {};
@@ -2798,15 +2839,18 @@ app.post('/api/tools/:id/test-run', async (req, res) => {
   }
 });
 
-app.delete('/api/tools/:id', async (req, res) => {
+app.delete('/api/tools/:id', requireUser, async (req, res) => {
   console.log(`Deleting tool ${req.params.id}`);
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can modify shared tools right now.' });
     const force = String(req.query.force || '') === 'true';
     const idNum = Number(req.params.id);
     if (!Number.isFinite(idNum)) return res.status(400).json({ error: 'Invalid tool id' });
+    requireVisibleToolId(scope, idNum);
     const tool = db.prepare('SELECT id, name FROM tools WHERE id = ?').get(idNum) as any;
     if (!tool) return res.status(404).json({ error: 'Tool not found' });
-    const dependencies = getToolDependencies(idNum);
+    const dependencies = getToolDependencies(idNum, scope);
     const hasDependencies = Boolean(
       dependencies.agents_count ||
       dependencies.mcp_agents_count
@@ -3038,15 +3082,18 @@ app.post('/api/tools/autobuild', async (req, res) => {
 });
 
 // --- Agents ---
-app.get('/api/agents', async (req, res) => {
+app.get('/api/agents', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const scopedProjectIds = getScopedProjectIds(scope);
+    if (scopedProjectIds && !scopedProjectIds.length) return res.json([]);
     const prisma = getPrisma();
     const [agents, agentTools, tools, agentMcpTools, agentMcpBundles, bundles, exposures] = await Promise.all([
-      prisma.orchestratorAgent.findMany({ orderBy: { id: 'asc' } }),
-      prisma.orchestratorAgentTool.findMany({ orderBy: [{ agentId: 'asc' }, { toolId: 'asc' }] }),
+      prisma.orchestratorAgent.findMany({ where: scopedProjectIds ? { projectId: { in: scopedProjectIds } } : undefined, orderBy: { id: 'asc' } }),
+      prisma.orchestratorAgentTool.findMany({ where: getScopedAgentIds(scope) ? { agentId: { in: getScopedAgentIds(scope)! } } : undefined, orderBy: [{ agentId: 'asc' }, { toolId: 'asc' }] }),
       prisma.orchestratorTool.findMany({ orderBy: { name: 'asc' } }),
-      prisma.orchestratorAgentMcpTool.findMany({ orderBy: [{ agentId: 'asc' }, { toolId: 'asc' }] }),
-      prisma.orchestratorAgentMcpBundle.findMany({ orderBy: [{ agentId: 'asc' }, { bundleId: 'asc' }] }),
+      prisma.orchestratorAgentMcpTool.findMany({ where: getScopedAgentIds(scope) ? { agentId: { in: getScopedAgentIds(scope)! } } : undefined, orderBy: [{ agentId: 'asc' }, { toolId: 'asc' }] }),
+      prisma.orchestratorAgentMcpBundle.findMany({ where: getScopedAgentIds(scope) ? { agentId: { in: getScopedAgentIds(scope)! } } : undefined, orderBy: [{ agentId: 'asc' }, { bundleId: 'asc' }] }),
       prisma.orchestratorMcpBundle.findMany({ orderBy: { name: 'asc' } }),
       prisma.orchestratorMcpExposedTool.findMany(),
     ]);
@@ -3159,7 +3206,7 @@ app.get('/api/agents', async (req, res) => {
   }
 });
 
-app.post('/api/agents', async (req, res) => {
+app.post('/api/agents', requireUser, async (req, res) => {
   const {
     name,
     role,
@@ -3192,6 +3239,13 @@ app.post('/api/agents', async (req, res) => {
     ? String(system_prompt).trim()
     : buildSystemPrompt({ name: normalizedName, role: normalizedRole, goal: normalizedGoal, backstory: normalizedBackstory });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleProjectId(scope, Number(project_id));
+    for (const toolId of Array.isArray(toolIds) ? toolIds : []) requireVisibleToolId(scope, Number(toolId));
+    for (const toolId of Array.isArray(mcp_tool_ids) ? mcp_tool_ids : []) requireVisibleToolId(scope, Number(toolId));
+    for (const bundleId of Array.isArray(mcp_bundle_ids) ? mcp_bundle_ids : []) {
+      if (!scope.isAdmin && !(scope.allowedBundleIds?.has(Number(bundleId)))) return res.status(403).json({ error: 'Forbidden' });
+    }
     const prisma = getPrisma();
     const created = await prisma.orchestratorAgent.create({
       data: {
@@ -3273,7 +3327,7 @@ app.post('/api/agents', async (req, res) => {
   }
 });
 
-app.put('/api/agents/:id', async (req, res) => {
+app.put('/api/agents/:id', requireUser, async (req, res) => {
   const {
     name,
     role,
@@ -3306,8 +3360,16 @@ app.put('/api/agents/:id', async (req, res) => {
     ? String(system_prompt).trim()
     : buildSystemPrompt({ name: normalizedName, role: normalizedRole, goal: normalizedGoal, backstory: normalizedBackstory });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const prisma = getPrisma();
     const agentId = Number(req.params.id);
+    requireVisibleAgentId(scope, agentId);
+    requireVisibleProjectId(scope, Number(project_id));
+    for (const toolId of Array.isArray(toolIds) ? toolIds : []) requireVisibleToolId(scope, Number(toolId));
+    for (const toolId of Array.isArray(mcp_tool_ids) ? mcp_tool_ids : []) requireVisibleToolId(scope, Number(toolId));
+    for (const bundleId of Array.isArray(mcp_bundle_ids) ? mcp_bundle_ids : []) {
+      if (!scope.isAdmin && !(scope.allowedBundleIds?.has(Number(bundleId)))) return res.status(403).json({ error: 'Forbidden' });
+    }
     await prisma.orchestratorAgent.update({
       where: { id: agentId },
       data: {
@@ -3367,10 +3429,12 @@ app.put('/api/agents/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/agents/:id', async (req, res) => {
+app.delete('/api/agents/:id', requireUser, async (req, res) => {
   console.log(`Deleting agent ${req.params.id}`);
   try {
     const agentId = Number(req.params.id);
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleAgentId(scope, agentId);
     const prisma = getPrisma();
     await prisma.orchestratorAgentTool.deleteMany({ where: { agentId } });
     await prisma.orchestratorAgentMcpTool.deleteMany({ where: { agentId } });
@@ -3401,14 +3465,17 @@ app.delete('/api/agents/:id', async (req, res) => {
 });
 
 // --- Projects ---
-app.get('/api/projects', async (req, res) => {
+app.get('/api/projects', requireUser, async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const scopedProjectIds = getScopedProjectIds(scope);
+    if (scopedProjectIds && !scopedProjectIds.length) return res.json([]);
     const prisma = getPrisma();
     const [projects, crews, agents] = await Promise.all([
-      prisma.orchestratorProject.findMany({ orderBy: { id: 'asc' } }),
-      prisma.orchestratorCrew.findMany({ select: { id: true, projectId: true } }),
-      prisma.orchestratorAgent.findMany({ select: { id: true, projectId: true } }),
+      prisma.orchestratorProject.findMany({ where: scopedProjectIds ? { id: { in: scopedProjectIds } } : undefined, orderBy: { id: 'asc' } }),
+      prisma.orchestratorCrew.findMany({ where: scopedProjectIds ? { projectId: { in: scopedProjectIds } } : undefined, select: { id: true, projectId: true } }),
+      prisma.orchestratorAgent.findMany({ where: scopedProjectIds ? { projectId: { in: scopedProjectIds } } : undefined, select: { id: true, projectId: true } }),
     ]);
 
     const crewIdsByProject = new Map<number, number[]>();
@@ -3457,9 +3524,12 @@ app.get('/api/projects', async (req, res) => {
   }
 });
 
-app.get('/api/projects/platform-links', async (req, res) => {
+app.get('/api/projects/platform-links', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const scopedProjectIds = getScopedProjectIds(scope);
     const projects = await getPrisma().orchestratorProject.findMany({
+      where: scopedProjectIds ? { id: { in: scopedProjectIds } } : undefined,
       select: { id: true, platformProjectId: true },
     });
     const map: Record<number, string> = {};
@@ -3474,9 +3544,11 @@ app.get('/api/projects/platform-links', async (req, res) => {
   }
 });
 
-app.post('/api/projects', async (req, res) => {
+app.post('/api/projects', requireUser, async (req, res) => {
   const { name, description } = req.body;
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can create orchestrator projects right now.' });
     const created = await getPrisma().orchestratorProject.create({
       data: { name, description: description || null },
     });
@@ -3487,8 +3559,10 @@ app.post('/api/projects', async (req, res) => {
   }
 });
 
-app.get('/api/projects/:id', async (req, res) => {
+app.get('/api/projects/:id', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleProjectId(scope, Number(req.params.id));
     const project = await getPrisma().orchestratorProject.findUnique({
       where: { id: Number(req.params.id) },
     });
@@ -3504,10 +3578,12 @@ app.get('/api/projects/:id', async (req, res) => {
   }
 });
 
-app.get('/api/projects/:id/traces', async (req, res) => {
+app.get('/api/projects/:id/traces', requireUser, async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     if (!Number.isFinite(projectId)) return res.status(400).json({ error: 'Invalid project id' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleProjectId(scope, projectId);
 
     const executions = await getPrisma().orchestratorAgentExecution.findMany({
       where: {
@@ -3542,10 +3618,12 @@ app.get('/api/projects/:id/traces', async (req, res) => {
   }
 });
 
-app.get('/api/projects/:id/tool-traces', async (req, res) => {
+app.get('/api/projects/:id/tool-traces', requireUser, async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     if (!Number.isFinite(projectId)) return res.status(400).json({ error: 'Invalid project id' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleProjectId(scope, projectId);
 
     const rows = await getPrisma().orchestratorToolExecution.findMany({
       where: {
@@ -3579,19 +3657,26 @@ app.get('/api/projects/:id/tool-traces', async (req, res) => {
 });
 
 // --- Workflows ---
-app.get('/api/workflows', async (req, res) => {
+app.get('/api/workflows', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const prisma = getPrisma();
     const projectId = Number(req.query.project_id);
+    if (Number.isFinite(projectId)) requireVisibleProjectId(scope, projectId);
+    const scopedProjectIds = getScopedProjectIds(scope);
+    const workflowWhere = Number.isFinite(projectId)
+      ? { projectId }
+      : (scopedProjectIds ? { projectId: { in: scopedProjectIds } } : undefined);
     const [workflows, workflowRuns] = await Promise.all([
       prisma.orchestratorWorkflow.findMany({
-        where: Number.isFinite(projectId) ? { projectId } : undefined,
+        where: workflowWhere,
         orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
         include: {
           project: { select: { name: true } },
         },
       }),
       prisma.orchestratorWorkflowRun.findMany({
+        where: workflowWhere ? { workflow: workflowWhere as any } : undefined,
         select: { workflowId: true, status: true, createdAt: true, id: true },
         orderBy: [{ workflowId: 'asc' }, { id: 'desc' }],
       }),
@@ -3628,15 +3713,17 @@ app.get('/api/workflows', async (req, res) => {
   }
 });
 
-app.get('/api/workflows/:id', async (req, res) => {
+app.get('/api/workflows/:id', requireUser, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const [workflow, runs] = await Promise.all([
       getPrisma().orchestratorWorkflow.findUnique({ where: { id } }),
       getPrisma().orchestratorWorkflowRun.findMany({ where: { workflowId: id }, orderBy: { id: 'desc' }, take: 20 }),
     ]);
     if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
+    requireVisibleProjectId(scope, workflow.projectId);
     res.json({
       id: workflow.id,
       name: workflow.name,
@@ -3655,10 +3742,12 @@ app.get('/api/workflows/:id', async (req, res) => {
   }
 });
 
-app.post('/api/workflows', async (req, res) => {
+app.post('/api/workflows', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const prisma = getPrisma();
     const { name, description, status, trigger_type, graph, project_id } = req.body || {};
+    requireVisibleProjectId(scope, Number(project_id));
     const normalizedGraph = normalizeWorkflowGraph(parseWorkflowGraph(graph || { nodes: [], edges: [] }));
     const serializedGraph = JSON.stringify(normalizedGraph);
     const now = new Date().toISOString();
@@ -3695,14 +3784,17 @@ app.post('/api/workflows', async (req, res) => {
   }
 });
 
-app.put('/api/workflows/:id', async (req, res) => {
+app.put('/api/workflows/:id', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const prisma = getPrisma();
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
     const existing = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id) as any;
     if (!existing) return res.status(404).json({ error: 'Workflow not found' });
+    requireVisibleProjectId(scope, existing.project_id ?? null);
     const { name, description, status, trigger_type, graph, project_id } = req.body || {};
+    if (project_id != null && project_id !== '') requireVisibleProjectId(scope, Number(project_id));
     const normalizedGraph = normalizeWorkflowGraph(parseWorkflowGraph(graph || existing.graph || { nodes: [], edges: [] }));
     const serializedGraph = JSON.stringify(normalizedGraph);
     const nextVersion = Number(existing.version || 1) + 1;
@@ -3741,10 +3833,14 @@ app.put('/api/workflows/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/workflows/:id', async (req, res) => {
+app.delete('/api/workflows/:id', requireUser, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const existing = db.prepare('SELECT project_id FROM workflows WHERE id = ?').get(id) as any;
+    if (!existing) return res.status(404).json({ error: 'Workflow not found' });
+    requireVisibleProjectId(scope, existing.project_id ?? null);
     const prisma = getPrisma();
     await prisma.orchestratorWorkflowVersion.deleteMany({ where: { workflowId: id } });
     await prisma.orchestratorWorkflow.delete({ where: { id } });
@@ -3755,10 +3851,14 @@ app.delete('/api/workflows/:id', async (req, res) => {
   }
 });
 
-app.get('/api/workflows/:id/versions', async (req, res) => {
+app.get('/api/workflows/:id/versions', requireUser, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const existing = db.prepare('SELECT project_id FROM workflows WHERE id = ?').get(id) as any;
+    if (!existing) return res.status(404).json({ error: 'Workflow not found' });
+    requireVisibleProjectId(scope, existing.project_id ?? null);
     const versions = await getPrisma().orchestratorWorkflowVersion.findMany({
       where: { workflowId: id },
       orderBy: [{ versionNumber: 'desc' }, { id: 'desc' }],
@@ -3825,22 +3925,31 @@ app.post('/api/workflows/:id/restore/:versionId', async (req, res) => {
   }
 });
 
-app.get('/api/workflows/:id/runs', (req, res) => {
+app.get('/api/workflows/:id/runs', requireUser, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
-  getPrisma().orchestratorWorkflowRun.findMany({ where: { workflowId: id }, orderBy: { id: 'desc' } })
-    .then((runs) => res.json({ runs }))
-    .catch((e: any) => res.status(500).json({ error: e.message }));
+  try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const workflow = db.prepare('SELECT project_id FROM workflows WHERE id = ?').get(id) as any;
+    if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
+    requireVisibleProjectId(scope, workflow.project_id ?? null);
+    const runs = await getPrisma().orchestratorWorkflowRun.findMany({ where: { workflowId: id }, orderBy: { id: 'desc' } });
+    res.json({ runs });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.get('/api/workflow-runs/:id', async (req, res) => {
+app.get('/api/workflow-runs/:id', requireUser, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow run id' });
+  const scope = await resolveOrchestratorAccessScope(req);
   const run = await getPrisma().orchestratorWorkflowRun.findUnique({
     where: { id },
-    include: { workflow: { select: { name: true } } },
+    include: { workflow: { select: { name: true, projectId: true } } },
   });
   if (!run) return res.status(404).json({ error: 'Workflow run not found' });
+  requireVisibleProjectId(scope, run.workflow?.projectId ?? null);
   res.json({
     id: run.id,
     workflow_id: run.workflowId,
@@ -3856,9 +3965,16 @@ app.get('/api/workflow-runs/:id', async (req, res) => {
   });
 });
 
-app.get('/api/workflow-runs/:id/stream', async (req, res) => {
+app.get('/api/workflow-runs/:id/stream', requireUser, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow run id' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  const runMeta = await getPrisma().orchestratorWorkflowRun.findUnique({
+    where: { id },
+    include: { workflow: { select: { projectId: true } } },
+  });
+  if (!runMeta) return res.status(404).json({ error: 'Workflow run not found' });
+  requireVisibleProjectId(scope, runMeta.workflow?.projectId ?? null);
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
@@ -3899,12 +4015,14 @@ app.get('/api/workflow-runs/:id/stream', async (req, res) => {
   req.on('close', () => clearInterval(timer));
 });
 
-app.post('/api/workflows/:id/execute', async (req, res) => {
+app.post('/api/workflows/:id/execute', requireUser, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
+    const scope = await resolveOrchestratorAccessScope(req);
     const workflow = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id) as any;
     if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
+    requireVisibleProjectId(scope, workflow.project_id ?? null);
     const input = req.body?.input ?? {};
     const triggerType = String(req.body?.trigger_type || workflow.trigger_type || 'manual');
     const runId = await createWorkflowRun(id, triggerType, input, workflow.graph);
@@ -4079,9 +4197,11 @@ app.get('/api/analytics/failures', async (req, res) => {
 });
 
 // --- Direct Agent Execution (Exposed) ---
-app.get('/api/agents/:id/executions', async (req, res) => {
+app.get('/api/agents/:id/executions', requireUser, async (req, res) => {
     try {
+        const scope = await resolveOrchestratorAccessScope(req);
         const agentId = Number(req.params.id);
+        requireVisibleAgentId(scope, agentId);
         const executions = await getPrisma().orchestratorAgentExecution.findMany({
             where: { agentId },
             orderBy: { createdAt: 'desc' }
@@ -4103,8 +4223,10 @@ app.get('/api/agents/:id/executions', async (req, res) => {
     }
 });
 
-app.get('/api/agents/:id/sessions', async (req, res) => {
+app.get('/api/agents/:id/sessions', requireUser, async (req, res) => {
     const agentId = Number(req.params.id);
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleAgentId(scope, agentId);
     const prisma = getPrisma();
     const sessions = await prisma.orchestratorAgentSession.findMany({
       where: { agentId },
@@ -4145,8 +4267,10 @@ app.get('/api/agents/:id/sessions', async (req, res) => {
     res.json(mapped);
 });
 
-app.get('/api/agents/:id/sessions/:sessionId/messages', async (req, res) => {
+app.get('/api/agents/:id/sessions/:sessionId/messages', requireUser, async (req, res) => {
     const agentId = Number(req.params.id);
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleAgentId(scope, agentId);
     const sessionId = String(req.params.sessionId || '');
     if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
 
@@ -5595,13 +5719,16 @@ app.post('/api/crews/autobuild', async (req, res) => {
     }
 });
 
-app.get('/api/crews', async (req, res) => {
+app.get('/api/crews', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const scopedProjectIds = getScopedProjectIds(scope);
+    if (scopedProjectIds && !scopedProjectIds.length) return res.json([]);
     const prisma = getPrisma();
     const [crews, crewAgents, agents] = await Promise.all([
-      prisma.orchestratorCrew.findMany({ orderBy: { id: 'asc' } }),
-      prisma.orchestratorCrewAgent.findMany({ orderBy: [{ crewId: 'asc' }, { agentId: 'asc' }] }),
-      prisma.orchestratorAgent.findMany({ orderBy: { id: 'asc' } }),
+      prisma.orchestratorCrew.findMany({ where: scopedProjectIds ? { projectId: { in: scopedProjectIds } } : undefined, orderBy: { id: 'asc' } }),
+      prisma.orchestratorCrewAgent.findMany({ where: getScopedCrewIds(scope) ? { crewId: { in: getScopedCrewIds(scope)! } } : undefined, orderBy: [{ crewId: 'asc' }, { agentId: 'asc' }] }),
+      prisma.orchestratorAgent.findMany({ where: getScopedAgentIds(scope) ? { id: { in: getScopedAgentIds(scope)! } } : undefined, orderBy: { id: 'asc' } }),
     ]);
     const agentById = new Map(agents.map((agent) => [agent.id, agent]));
     const agentsByCrewId = new Map<number, any[]>();
@@ -5701,7 +5828,7 @@ app.get('/api/crew-templates', (_req, res) => {
   res.json(templates);
 });
 
-app.post('/api/crews/from-template', async (req, res) => {
+app.post('/api/crews/from-template', requireUser, async (req, res) => {
   const { template_id, project_id } = req.body || {};
   if (!template_id || typeof template_id !== 'string') return res.status(400).json({ error: 'template_id is required' });
   const templatesRes: any[] = [
@@ -5746,6 +5873,8 @@ app.post('/api/crews/from-template', async (req, res) => {
   if (!allAgents.length) return res.status(400).json({ error: 'Create at least one agent before using templates' });
 
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleProjectId(scope, Number(project_id));
     const prisma = getPrisma();
     const coordinatorHintRole = tpl.process === 'hierarchical' ? String(tpl.tasks?.[0]?.role_hint || '') : '';
     const coordinatorFromHints = coordinatorHintRole
@@ -5790,7 +5919,7 @@ app.post('/api/crews/from-template', async (req, res) => {
   }
 });
 
-app.post('/api/crews', async (req, res) => {
+app.post('/api/crews', requireUser, async (req, res) => {
   const { name, description, process, agentIds, project_id, is_exposed, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id } = req.body;
   const normalizedProcess = process === 'hierarchical' ? 'hierarchical' : 'sequential';
   const normalizedAgentIds = Array.isArray(agentIds)
@@ -5808,6 +5937,9 @@ app.post('/api/crews', async (req, res) => {
   }
 
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleProjectId(scope, Number(project_id));
+    for (const agentId of normalizedAgentIds) requireVisibleAgentId(scope, agentId);
     const prisma = getPrisma();
     const crew = await prisma.orchestratorCrew.create({
       data: {
@@ -5859,7 +5991,7 @@ app.post('/api/crews', async (req, res) => {
   }
 });
 
-app.put('/api/crews/:id', async (req, res) => {
+app.put('/api/crews/:id', requireUser, async (req, res) => {
     const { name, description, process, agentIds, project_id, is_exposed, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id } = req.body;
     const normalizedProcess = process === 'hierarchical' ? 'hierarchical' : 'sequential';
     const normalizedAgentIds = Array.isArray(agentIds)
@@ -5877,8 +6009,12 @@ app.put('/api/crews/:id', async (req, res) => {
     }
 
     try {
+      const scope = await resolveOrchestratorAccessScope(req);
       const prisma = getPrisma();
       const crewId = Number(req.params.id);
+      requireVisibleCrewId(scope, crewId);
+      requireVisibleProjectId(scope, Number(project_id));
+      for (const agentId of normalizedAgentIds) requireVisibleAgentId(scope, agentId);
       await prisma.orchestratorCrew.update({
         where: { id: crewId },
         data: {
@@ -5909,10 +6045,12 @@ app.put('/api/crews/:id', async (req, res) => {
     }
 });
 
-app.delete('/api/crews/:id', async (req, res) => {
+app.delete('/api/crews/:id', requireUser, async (req, res) => {
     console.log(`Deleting crew ${req.params.id}`);
     try {
         const crewId = Number(req.params.id);
+        const scope = await resolveOrchestratorAccessScope(req);
+        requireVisibleCrewId(scope, crewId);
         const prisma = getPrisma();
         await prisma.orchestratorCrew.delete({ where: { id: crewId } });
         await refreshPersistentMirror();
