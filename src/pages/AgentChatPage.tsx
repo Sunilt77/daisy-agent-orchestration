@@ -744,7 +744,6 @@ export default function AgentChatPage() {
     () => sessions.find((session) => session.id === selectedSessionId) ?? null,
     [sessions, selectedSessionId]
   );
-  const chatModeLabel = selectedSessionId ? 'Continuing selected chat' : 'Fresh chat ready';
   const chatColumnClass = historyHidden || focusMode ? 'col-span-12' : 'col-span-12 lg:col-span-9 xl:col-span-9';
 
   const loadAgents = async () => {
@@ -1215,7 +1214,7 @@ export default function AgentChatPage() {
 
             <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
               <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-slate-500">Current Mode</div>
-              <div className="mt-1 text-sm font-semibold text-slate-900">{chatModeLabel}</div>
+              <div className="mt-1 text-sm font-semibold text-slate-900">{selectedSession ? 'Selected chat' : 'New chat'}</div>
               <div className="mt-1 text-xs text-slate-500">
                 {selectedSession
                   ? `${selectedSession.message_count || 0} messages in this thread • last active ${formatSessionTimestamp(selectedSession.last_seen_at || selectedSession.created_at)}`
@@ -1558,9 +1557,6 @@ export default function AgentChatPage() {
               </div>
             )}
             <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
-              <span className={`rounded-full px-2.5 py-1 font-semibold ${selectedSessionId ? 'bg-indigo-100 text-indigo-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                {selectedSessionId ? 'Replying in selected chat' : 'Starting a new chat'}
-              </span>
               {supervisorMode ? (
                 <span className="rounded-full bg-violet-100 px-2.5 py-1 font-semibold text-violet-700">
                   Supervisor mode · {delegateAgentIds.length} delegates
@@ -1609,8 +1605,8 @@ export default function AgentChatPage() {
                     ? `Assign a task to ${selectedAgent?.name || 'the supervisor'} with ${delegateAgentIds.length} delegate${delegateAgentIds.length !== 1 ? 's' : ''}...`
                     : `Message ${selectedAgent?.name || 'the agent'}...`}
                   disabled={sending}
-                  rows={3}
-                  className="w-full rounded-2xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-400 resize-none disabled:opacity-60 min-h-[72px] max-h-48 leading-relaxed transition-all"
+                  rows={2}
+                  className="w-full rounded-2xl border border-slate-300 px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-400 resize-none disabled:opacity-60 min-h-[56px] max-h-36 leading-6 transition-all"
                   style={{ scrollbarWidth: 'thin' }}
                 />
                 {draft.length > 0 && (
@@ -1621,28 +1617,25 @@ export default function AgentChatPage() {
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={!selectedAgentId || sending}
-                className="h-12 w-12 shrink-0 rounded-2xl border border-slate-300 bg-white text-slate-600 disabled:opacity-50 flex items-center justify-center hover:border-indigo-300 hover:text-indigo-600 transition-all"
+                className="h-10 w-10 shrink-0 rounded-2xl border border-slate-300 bg-white text-slate-600 disabled:opacity-50 flex items-center justify-center hover:border-indigo-300 hover:text-indigo-600 transition-all"
                 title="Attach image or file"
               >
-                <Paperclip size={16} />
+                <Paperclip size={15} />
               </button>
               <button
                 onClick={sendMessage}
                 disabled={(!draft.trim() && !draftAttachments.length) || !selectedAgentId || sending || (supervisorMode && !delegateAgentIds.length)}
-                className="h-12 px-4 rounded-2xl bg-indigo-600 text-white text-sm disabled:opacity-50 flex items-center justify-center gap-2 hover:bg-indigo-700 active:scale-95 transition-all shadow-lg shadow-indigo-200 font-bold"
+                className="h-10 px-4 rounded-2xl bg-indigo-600 text-white text-sm disabled:opacity-50 flex items-center justify-center gap-2 hover:bg-indigo-700 active:scale-95 transition-all shadow-lg shadow-indigo-200 font-bold"
               >
-                {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+                {sending ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
                 <span className="text-[10px] font-black uppercase tracking-widest">{sending ? 'Wait' : 'Send'}</span>
               </button>
             </div>
-            <div className="mt-2 flex items-center gap-4 text-[10px] text-slate-400">
-              <span>Enter sends • Shift+Enter adds a line break</span>
-              {supervisorMode && delegateAgentIds.length > 0 && (
-                <span className="text-violet-500 font-semibold">
-                  ◆ Supervisor mode · {delegateAgentIds.length} delegate{delegateAgentIds.length > 1 ? 's' : ''}
-                </span>
-              )}
-            </div>
+            {supervisorMode && delegateAgentIds.length > 0 && (
+              <div className="mt-2 text-[10px] font-semibold text-violet-500">
+                Supervisor mode · {delegateAgentIds.length} delegate{delegateAgentIds.length > 1 ? 's' : ''}
+              </div>
+            )}
           </div>
         </section>
       </div>
