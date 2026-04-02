@@ -195,6 +195,109 @@ function buildDelegationStatusCopy(delegation: LiveDelegation) {
   return `Delegation ${delegation.supervisorStatus}.`;
 }
 
+type OrchestrationStep = {
+  key: string;
+  actor: string;
+  label: string;
+  detail: string;
+  tone: 'supervisor' | 'delegate' | 'synthesis' | 'error';
+  status?: string;
+  executionId?: number | null;
+};
+
+function buildOrchestrationSteps(delegation: LiveDelegation): OrchestrationStep[] {
+  const steps: OrchestrationStep[] = [
+    {
+      key: `supervisor-${delegation.parentExecutionId}`,
+      actor: 'Supervisor',
+      label: 'Dispatch',
+      detail: buildDelegationStatusCopy(delegation),
+      tone: 'supervisor',
+      status: delegation.supervisorStatus,
+      executionId: delegation.parentExecutionId,
+    },
+  ];
+
+  for (const item of delegation.delegates) {
+    if (item.role === 'delegate') {
+      steps.push({
+        key: `handoff-${item.agentId}-${item.title}`,
+        actor: 'Supervisor',
+        label: `Handoff to ${item.agentName}`,
+        detail: compactDelegationText(item.task || item.title || 'Delegated task in progress.', 180),
+        tone: 'supervisor',
+      });
+    }
+
+    steps.push({
+      key: `result-${item.agentId}-${item.title}`,
+      actor: item.agentName,
+      label: item.role === 'synthesis' ? 'Synthesis' : 'Specialist response',
+      detail: compactDelegationText(item.result || item.error || (item.status === 'running' ? 'Working on the delegated task…' : 'No response returned yet.'), 220),
+      tone: item.status === 'failed' ? 'error' : (item.role === 'synthesis' ? 'synthesis' : 'delegate'),
+      status: item.status,
+      executionId: item.executionId,
+    });
+  }
+
+  return steps;
+}
+
+function OrchestrationTimeline({ delegation }: { delegation: LiveDelegation }) {
+  const steps = buildOrchestrationSteps(delegation);
+  const toneClass = (tone: OrchestrationStep['tone']) => {
+    if (tone === 'supervisor') return 'border-indigo-200 bg-indigo-50 text-indigo-700';
+    if (tone === 'synthesis') return 'border-violet-200 bg-violet-50 text-violet-700';
+    if (tone === 'error') return 'border-red-200 bg-red-50 text-red-700';
+    return 'border-slate-200 bg-slate-50 text-slate-700';
+  };
+
+  const iconForTone = (tone: OrchestrationStep['tone']) => {
+    if (tone === 'supervisor') return <Zap size={12} />;
+    if (tone === 'synthesis') return <Sparkles size={12} />;
+    if (tone === 'error') return <AlertTriangle size={12} />;
+    return <Bot size={12} />;
+  };
+
+  return (
+    <div className="mt-3 rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100 bg-slate-50/80">
+        <Activity size={13} className="text-slate-600" />
+        <span className="text-[11px] font-black text-slate-700 uppercase tracking-[0.2em]">Orchestration Timeline</span>
+      </div>
+      <div className="p-4 space-y-3">
+        {steps.map((step, idx) => (
+          <div key={step.key} className="flex gap-3">
+            <div className="flex flex-col items-center">
+              <div className={`flex h-8 w-8 items-center justify-center rounded-full border ${toneClass(step.tone)}`}>
+                {iconForTone(step.tone)}
+              </div>
+              {idx < steps.length - 1 && <div className="mt-1 h-full min-h-6 w-px bg-slate-200" />}
+            </div>
+            <div className="min-w-0 flex-1 pb-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[12px] font-bold text-slate-900">{step.actor}</span>
+                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-black uppercase tracking-widest ${toneClass(step.tone)}`}>
+                  {step.label}
+                </span>
+                {step.status ? (
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{step.status}</span>
+                ) : null}
+                {step.executionId ? (
+                  <Link to={`/agent-executions/${step.executionId}`} className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800">
+                    View
+                  </Link>
+                ) : null}
+              </div>
+              <div className="mt-1 text-[12px] leading-relaxed text-slate-600">{step.detail}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DelegationHandoffFeed({ delegation }: { delegation: LiveDelegation }) {
   const items = delegation.delegates.filter((d) => d.role === 'delegate' || d.role === 'synthesis');
   if (!items.length) return null;
@@ -1288,6 +1391,7 @@ export default function AgentChatPage() {
                   {/* Delegation tree */}
                   {m.role === 'assistant' && m.delegation && (
                     <>
+                      <OrchestrationTimeline delegation={m.delegation} />
                       <DelegationHandoffFeed delegation={m.delegation} />
                       <DelegationTree delegation={m.delegation} agents={agents} />
                     </>
