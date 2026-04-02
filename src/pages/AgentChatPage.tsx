@@ -33,6 +33,7 @@ type DelegationStatus = {
   agentName: string;
   role: 'delegate' | 'synthesis';
   title: string;
+  task?: string;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'canceled' | string;
   result?: string;
   error?: string;
@@ -148,6 +149,7 @@ function parseDelegationsToLive(delegations: any[], parentExecutionId: number, s
       agentName: d.agent_name || `Agent ${d.agent_id}`,
       role: d.role === 'synthesis' ? 'synthesis' : 'delegate',
       title: d.title || d.agent_name || `Agent ${d.agent_id}`,
+      task: d.task || undefined,
       status: d.status || 'queued',
       result: d.result || undefined,
       error: d.error || undefined,
@@ -198,14 +200,18 @@ function DelegationHandoffFeed({ delegation }: { delegation: LiveDelegation }) {
   if (!items.length) return null;
 
   return (
-    <div className="mt-3 rounded-2xl border border-indigo-200/70 bg-indigo-50/70 overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-indigo-100 bg-white/60">
+    <div className="mt-3 rounded-2xl border border-indigo-200/70 bg-linear-to-br from-white via-indigo-50/70 to-slate-50 overflow-hidden shadow-[0_18px_50px_rgba(99,102,241,0.08)]">
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-indigo-100 bg-white/70">
         <GitBranch size={13} className="text-indigo-500" />
-        <span className="text-[11px] font-black text-indigo-700 uppercase tracking-[0.2em]">Handoff Feed</span>
+        <span className="text-[11px] font-black text-indigo-700 uppercase tracking-[0.2em]">Handoff Transcript</span>
+        <span className="ml-auto text-[10px] font-semibold text-slate-500">
+          {items.filter((item) => item.status === 'completed').length} completed
+        </span>
       </div>
-      <div className="divide-y divide-indigo-100/80">
+      <div className="space-y-4 p-4">
         {items.map((item, idx) => {
           const preview = compactDelegationText(item.result || item.error || '');
+          const taskPreview = compactDelegationText(item.task || item.title, 180);
           const statusTone =
             item.status === 'completed' ? 'text-emerald-700 bg-emerald-50 border-emerald-200' :
             item.status === 'failed' ? 'text-red-700 bg-red-50 border-red-200' :
@@ -213,38 +219,53 @@ function DelegationHandoffFeed({ delegation }: { delegation: LiveDelegation }) {
             item.status === 'running' ? 'text-indigo-700 bg-indigo-50 border-indigo-200' :
             'text-slate-600 bg-slate-50 border-slate-200';
           return (
-            <div key={`${item.agentId}-${idx}-${item.title}`} className="px-4 py-3">
+            <div key={`${item.agentId}-${idx}-${item.title}`} className="rounded-2xl border border-indigo-100/90 bg-white/80 p-3">
               <div className="flex items-start gap-3">
-                <div className="mt-0.5">
-                  <DelegationStatusIcon status={item.status} />
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-white shadow-sm">
+                  <Zap size={13} />
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[12px] font-bold text-slate-900">{item.agentName}</span>
+                    <span className="text-[11px] font-black uppercase tracking-[0.18em] text-indigo-600">Supervisor</span>
+                    <span className="text-[10px] text-slate-400">to {item.agentName}</span>
+                  </div>
+                  <div className="mt-1 rounded-2xl rounded-tl-sm border border-indigo-100 bg-indigo-50 px-3 py-2 text-[12px] leading-relaxed text-slate-700">
+                    {taskPreview || 'Delegated task in progress.'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-3 flex items-start gap-3">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-900 text-white shadow-sm">
+                  {item.role === 'synthesis' ? <Sparkles size={13} /> : <Bot size={13} />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-700">{item.agentName}</span>
                     <span className={`rounded-full border px-2 py-0.5 text-[10px] font-black uppercase tracking-widest ${statusTone}`}>
                       {item.role === 'synthesis' ? 'synthesis' : item.status}
                     </span>
+                    {item.executionId ? (
+                      <Link
+                        to={`/agent-executions/${item.executionId}`}
+                        className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800"
+                      >
+                        View Execution
+                      </Link>
+                    ) : null}
                   </div>
-                  <div className="mt-0.5 text-[11px] font-semibold text-slate-500">{item.title}</div>
-                  {preview && (
-                    <div className={`mt-2 rounded-xl border px-3 py-2 text-[11px] leading-relaxed ${
-                      item.error ? 'border-red-200 bg-red-50 text-red-700' : 'border-slate-200 bg-white text-slate-700'
+                  {preview ? (
+                    <div className={`mt-1 rounded-2xl rounded-tl-sm border px-3 py-2 text-[12px] leading-relaxed ${
+                      item.error ? 'border-red-200 bg-red-50 text-red-700' : 'border-slate-200 bg-slate-50 text-slate-700'
                     }`}>
                       {preview}
                     </div>
-                  )}
-                  {!preview && item.status === 'running' && (
-                    <div className="mt-2 text-[11px] text-slate-500">Working on the delegated task…</div>
+                  ) : (
+                    <div className="mt-1 rounded-2xl rounded-tl-sm border border-slate-200 bg-slate-50 px-3 py-2 text-[12px] text-slate-500">
+                      {item.status === 'running' ? 'Working on the delegated task…' : 'No specialist response was returned yet.'}
+                    </div>
                   )}
                 </div>
-                {item.executionId ? (
-                  <Link
-                    to={`/agent-executions/${item.executionId}`}
-                    className="shrink-0 text-[10px] font-semibold text-indigo-600 hover:text-indigo-800"
-                  >
-                    View
-                  </Link>
-                ) : null}
               </div>
             </div>
           );
