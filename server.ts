@@ -760,6 +760,88 @@ async function executeDelegatedAgentRun(options: {
   );
 }
 
+function normalizeAgentLookupKey(value: any): string {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function getDelegationCandidatesForAgent(currentAgent: any): any[] {
+  const currentId = Number(currentAgent?.id || 0);
+  const currentProjectId = Number(currentAgent?.project_id || 0);
+  if (currentProjectId > 0) {
+    return db.prepare(`
+      SELECT id, name, role, goal, project_id, tools_enabled
+      FROM agents
+      WHERE id != ? AND project_id = ?
+      ORDER BY name COLLATE NOCASE ASC
+    `).all(currentId, currentProjectId) as any[];
+  }
+  return db.prepare(`
+    SELECT id, name, role, goal, project_id, tools_enabled
+    FROM agents
+    WHERE id != ?
+    ORDER BY
+      CASE WHEN project_id IS NULL THEN 0 ELSE 1 END,
+      name COLLATE NOCASE ASC
+  `).all(currentId) as any[];
+}
+
+function buildDelegationRosterContext(currentAgent: any): string {
+  const candidates = getDelegationCandidatesForAgent(currentAgent);
+  if (!candidates.length) {
+    return 'No delegate agents are available for handoff right now.';
+  }
+  const lines = candidates.slice(0, 12).map((candidate: any) => {
+    const role = String(candidate.role || 'specialist').trim();
+    const goal = compactPromptText(String(candidate.goal || '').trim(), 90);
+    const toolsState = candidate.tools_enabled === 0 || candidate.tools_enabled === false ? 'tools disabled' : 'tools enabled';
+    return `- ${candidate.name} (id:${candidate.id}, role:${role}, ${toolsState})${goal ? ` - goal: ${goal}` : ''}`;
+  });
+  return [
+    'Available delegate agents for handoff:',
+    ...lines,
+    'Use delegate_to_agent only when a specialist is clearly better suited than continuing directly.',
+    'When you delegate, choose one of the exact names above when possible and give the child agent a narrow, concrete task.',
+  ].join('\n');
+}
+
+function resolveDelegationTarget(args: any, currentAgent: any): { targetAgent: any; candidates: any[] } {
+  const targetAgentId = Number(args?.target_agent_id ?? args?.agent_id ?? 0);
+  const targetAgentName = String(args?.target_agent_name || args?.agent_name || '').trim();
+  const candidates = getDelegationCandidatesForAgent(currentAgent);
+
+  if (Number.isFinite(targetAgentId) && targetAgentId > 0) {
+    const byId = candidates.find((candidate: any) => Number(candidate.id) === targetAgentId);
+    if (byId) return { targetAgent: byId, candidates };
+  }
+
+  if (!targetAgentName) {
+    throw new Error('Target agent not found. Provide target_agent_id or target_agent_name.');
+  }
+
+  const normalizedTarget = normalizeAgentLookupKey(targetAgentName);
+  const exact = candidates.find((candidate: any) => normalizeAgentLookupKey(candidate.name) === normalizedTarget);
+  if (exact) return { targetAgent: exact, candidates };
+
+  const containsMatches = candidates.filter((candidate: any) => {
+    const candidateKey = normalizeAgentLookupKey(candidate.name);
+    return candidateKey.includes(normalizedTarget) || normalizedTarget.includes(candidateKey);
+  });
+  if (containsMatches.length === 1) {
+    return { targetAgent: containsMatches[0], candidates };
+  }
+  if (containsMatches.length > 1) {
+    const suggestions = containsMatches.slice(0, 6).map((candidate: any) => `${candidate.name} (#${candidate.id})`).join(', ');
+    throw new Error(`Target agent name "${targetAgentName}" is ambiguous. Choose one of: ${suggestions}.`);
+  }
+
+  const suggestions = candidates.slice(0, 8).map((candidate: any) => `${candidate.name} (#${candidate.id})`).join(', ');
+  throw new Error(`Target agent "${targetAgentName}" was not found. Available delegate agents: ${suggestions || 'none'}.`);
+}
+
 async function delegateToAgentTool(args: any, ctx?: ToolExecutionContext): Promise<string> {
   const currentAgent = ctx?.agent;
   const parentExecutionId = Number(ctx?.executionId || 0);
@@ -772,8 +854,6 @@ async function delegateToAgentTool(args: any, ctx?: ToolExecutionContext): Promi
     throw new Error('Maximum delegation depth reached. Ask the current agent to finish with the available information.');
   }
 
-  const targetAgentId = Number(args?.target_agent_id ?? args?.agent_id ?? 0);
-  const targetAgentName = String(args?.target_agent_name || args?.agent_name || '').trim();
   const title = String(args?.title || '').trim();
   const taskText = String(args?.task || args?.prompt || args?.message || '').trim();
   const extraContext = String(args?.context || '').trim();
@@ -782,26 +862,23 @@ async function delegateToAgentTool(args: any, ctx?: ToolExecutionContext): Promi
 
   if (!taskText) throw new Error('delegate_to_agent requires task.');
 
-  let targetAgent: any = null;
-  if (Number.isFinite(targetAgentId) && targetAgentId > 0) {
-    targetAgent = db.prepare('SELECT * FROM agents WHERE id = ?').get(targetAgentId) as any;
-  } else if (targetAgentName) {
-    targetAgent = db.prepare('SELECT * FROM agents WHERE lower(name) = lower(?) LIMIT 1').get(targetAgentName) as any;
-  }
-  if (!targetAgent) {
-    throw new Error('Target agent not found. Provide target_agent_id or target_agent_name.');
-  }
+  const { targetAgent, candidates } = resolveDelegationTarget(args, currentAgent);
   if (Number(targetAgent.id) === Number(currentAgent.id)) {
     throw new Error('delegate_to_agent cannot target the same agent. Continue the work directly or choose another agent.');
   }
   if (currentAgent.project_id != null && targetAgent.project_id != null && Number(currentAgent.project_id) !== Number(targetAgent.project_id)) {
     throw new Error('Cross-project delegation is not allowed. Choose an agent in the same project.');
   }
+  if (!candidates.length) {
+    throw new Error('No delegate agents are available for this agent.');
+  }
 
   const delegationTitle = title || `${currentAgent.name} -> ${targetAgent.name}`;
   const combinedContext = [
     `Delegated by agent "${currentAgent.name}" (ID ${currentAgent.id}).`,
+    `Target specialist: "${targetAgent.name}" (ID ${targetAgent.id}, role: ${String(targetAgent.role || 'specialist')}).`,
     extraContext ? `Delegation context:\n${extraContext}` : '',
+    'Return a concise specialist result that the delegating agent can directly use to continue or answer the user.',
   ].filter(Boolean).join('\n\n');
 
   const row = await getPrisma().orchestratorAgentDelegation.create({
@@ -8969,8 +9046,33 @@ async function runAgent(
             }),
           )
         ).join('\n');
+        if (toolSchemaByName.has('delegate_to_agent')) {
+          const roster = getDelegationCandidatesForAgent(agent);
+          const existingSchema = normalizeToolInputSchema(toolSchemaByName.get('delegate_to_agent'));
+          const targetNameProperty = existingSchema?.properties?.target_agent_name && typeof existingSchema.properties.target_agent_name === 'object'
+            ? { ...existingSchema.properties.target_agent_name }
+            : { type: 'string' };
+          if (roster.length) {
+            targetNameProperty.enum = roster.map((candidate: any) => String(candidate.name || ''));
+            targetNameProperty.description = [
+              String(targetNameProperty.description || '').trim(),
+              `Choose one of: ${roster.slice(0, 12).map((candidate: any) => candidate.name).join(', ')}`,
+            ].filter(Boolean).join(' ');
+          }
+          toolSchemaByName.set('delegate_to_agent', {
+            ...existingSchema,
+            properties: {
+              ...(existingSchema.properties || {}),
+              target_agent_name: targetNameProperty,
+            },
+          });
+        }
         const toolDescriptions = scopedToolDescriptions + (mcpToolDescriptions ? '\n' + mcpToolDescriptions : '');
         const toolContext = (toolsEnabled && scopedTools.length > 0) ? toolDescriptions : 'No tools are available for this agent.';
+        const delegationRosterContext =
+          toolsEnabled && scopedTools.some((tool) => String(tool?.name || '') === 'delegate_to_agent')
+            ? buildDelegationRosterContext(agent)
+            : '';
 
         const basePrompt = `
             Your current task is: ${task.description}
@@ -8982,7 +9084,11 @@ async function runAgent(
             You have access to the following tools:
             ${toolContext}
 
+            ${delegationRosterContext}
+
             Before calling any tool, verify that every required argument is present. If a required field is missing, do not call the tool yet. Ask for the missing field or choose a different valid path.
+
+            If you use delegate_to_agent, give the child agent a focused subtask, include concrete context, and then use the delegated result to continue reasoning or provide the final answer.
 
             If you need to use a tool, respond with a JSON object in this format:
             { "tool": "tool_name", "args": { "arg_name": "value" }, "thought": "Why I am using this tool" }
@@ -9422,7 +9528,9 @@ async function runAgent(
                   `Tool: ${action.tool}`,
                   `Args: ${summarizeToolArgsForPrompt(action.args)}`,
                   `Result: ${summarizeToolResultForPrompt(toolResult)}`,
-                  'Continue toward the goal.',
+                  action.tool === 'delegate_to_agent'
+                    ? 'A delegated specialist result is now available. Use it to continue reasoning, decide the next step, or provide the final answer.'
+                    : 'Continue toward the goal.',
                 ].join('\n'));
             } else {
                 span.setStatus({ code: SpanStatusCode.OK });
