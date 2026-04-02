@@ -9447,9 +9447,9 @@ async function runAgent(
 
         if (recentToolResults.length > 0) {
           const latest = recentToolResults[recentToolResults.length - 1];
-          finalOutput = `The agent stopped after ${maxIterations} reasoning steps without a formal final_answer. Latest tool output:\n\nTool: ${latest.tool}\nArgs: ${JSON.stringify(latest.args)}\nResult: ${latest.result}\n\nTip: refine the task prompt or tighten tool instructions to avoid repeated tool loops.`;
+          finalOutput = `The agent stopped because it hit its reasoning step limit of ${maxIterations} before producing a formal final_answer. You can raise this in Agents > Advanced Config > Reasoning Step Limit.\n\nLatest tool output:\n\nTool: ${latest.tool}\nArgs: ${JSON.stringify(latest.args)}\nResult: ${latest.result}\n\nTip: increase the step limit for longer tool chains, or tighten the prompt/tool instructions to avoid repeated loops.`;
         } else {
-          finalOutput = "The agent stopped after reaching the iteration limit without returning a final answer.";
+          finalOutput = `The agent stopped because it hit its reasoning step limit of ${maxIterations} without returning a final answer. You can raise this in Agents > Advanced Config > Reasoning Step Limit.`;
         }
         return { exec_id: execId, text: finalOutput, usage: totalUsage };
     } finally {

@@ -2441,7 +2441,7 @@ type AgentOptionalConfig =
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Max Iterations (Optional)</label>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Reasoning Step Limit (Optional)</label>
                   <input
                     type="number"
                     min="1"
@@ -2450,8 +2450,11 @@ type AgentOptionalConfig =
                     className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
                     value={formData.max_iterations}
                     onChange={e => setFormData({...formData, max_iterations: e.target.value})}
-                    placeholder="e.g. 8"
+                    placeholder="Default 8 · try 15-20 for longer tool chains"
                   />
+                  <p className="mt-1 text-xs text-slate-500">
+                    Controls how many reasoning/tool steps this agent may take before it must return a final answer. Leave blank to use the default limit of 8.
+                  </p>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">Timeout (ms) (Optional)</label>
