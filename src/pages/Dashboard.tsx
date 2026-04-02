@@ -198,7 +198,7 @@ export default function Dashboard() {
     const totalPrompt = recentExecutions.reduce((sum, e) => sum + (e.prompt_tokens || 0), 0);
     const totalCompletion = recentExecutions.reduce((sum, e) => sum + (e.completion_tokens || 0), 0);
     const totalCost = recentExecutions.reduce((sum, e) => sum + (e.total_cost || 0), 0);
-    const avgLatency = (Array.isArray(recentExecutions) && recentExecutions.length)
+    const approxRunAge = (Array.isArray(recentExecutions) && recentExecutions.length)
       ? Math.round(recentExecutions.reduce((sum, e) => {
           if (!e.created_at) return sum;
           const delta = now - new Date(e.created_at).getTime();
@@ -218,7 +218,7 @@ export default function Dashboard() {
       totalPrompt,
       totalCompletion,
       totalCost,
-      avgLatency,
+      approxRunAge,
       runningAgents,
       activeRunsNow,
       exposedCrews,
@@ -397,6 +397,15 @@ export default function Dashboard() {
       tokens: toPath('tokensY'),
       cost: toPath('costY'),
     };
+  }, [evolutionSeries]);
+
+  const evolutionTotals = useMemo(() => {
+    return evolutionSeries.reduce((acc, point) => {
+      acc.runs += point.runs;
+      acc.tokens += point.tokens;
+      acc.cost += point.cost;
+      return acc;
+    }, { runs: 0, tokens: 0, cost: 0 });
   }, [evolutionSeries]);
 
   const orchestrationLanes = useMemo(() => ([
@@ -634,7 +643,7 @@ export default function Dashboard() {
               </div>
               <div className="text-[12px] font-bold text-slate-200 mt-4 flex items-center gap-2">
                 <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                Recent executions today
+                Executions recorded in the last 24 hours
               </div>
             </div>
           </motion.div>
@@ -665,7 +674,7 @@ export default function Dashboard() {
                   <DollarSign size={24} />
                 </div>
               </div>
-              <div className="text-[12px] font-bold text-slate-200 mt-4">Avg latency {dashboardInsights.avgLatency}s</div>
+              <div className="text-[12px] font-bold text-slate-200 mt-4">Approx run age {dashboardInsights.approxRunAge}s</div>
             </div>
           </motion.div>
         </motion.div>
@@ -796,21 +805,21 @@ export default function Dashboard() {
               <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 p-4 flex items-center justify-between group/legend">
                 <div>
                   <div className="text-[10px] font-black text-violet-300 uppercase tracking-widest mb-1">Runs</div>
-                  <div className="text-sm font-black text-white">{dashboardInsights.execution24h}</div>
+                  <div className="text-sm font-black text-white">{evolutionTotals.runs}</div>
                 </div>
                 <div className="w-3 h-3 rounded-full bg-violet-500 shadow-[0_0_12px_rgba(139,92,246,0.8)] group-hover:scale-125 transition-transform" />
               </div>
               <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4 flex items-center justify-between group/legend">
                 <div>
                   <div className="text-[10px] font-black text-cyan-300 uppercase tracking-widest mb-1">Tokens</div>
-                  <div className="text-sm font-black text-white">{Math.round((dashboardInsights.totalPrompt + dashboardInsights.totalCompletion)/1000)}k</div>
+                  <div className="text-sm font-black text-white">{Math.round(evolutionTotals.tokens / 1000)}k</div>
                 </div>
                 <div className="w-3 h-3 rounded-full bg-cyan-500 shadow-[0_0_12px_rgba(6,182,212,0.8)] group-hover:scale-125 transition-transform" />
               </div>
               <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4 flex items-center justify-between group/legend">
                 <div>
                   <div className="text-[10px] font-black text-emerald-300 uppercase tracking-widest mb-1">Cost</div>
-                  <div className="text-sm font-black text-white">${dashboardInsights.totalCost.toFixed(2)}</div>
+                  <div className="text-sm font-black text-white">${evolutionTotals.cost.toFixed(2)}</div>
                 </div>
                 <div className="w-3 h-3 rounded-full bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.8)] group-hover:scale-125 transition-transform" />
               </div>
@@ -1004,7 +1013,7 @@ export default function Dashboard() {
             <div className="grid grid-cols-2 gap-4 pt-2">
               <div className={dashboardOperatorCard}>
                 <div className="text-xs text-slate-400 mb-1 flex items-center gap-1"><Clock3 size={12} /> Approx Run Age</div>
-                <div className="text-lg font-bold text-white">{dashboardInsights.avgLatency}s</div>
+                <div className="text-lg font-bold text-white">{dashboardInsights.approxRunAge}s</div>
               </div>
               <div className={dashboardOperatorCard}>
                 <div className="text-xs text-slate-400 mb-1 flex items-center gap-1"><Activity size={12} /> Active Runs</div>

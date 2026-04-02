@@ -5684,25 +5684,33 @@ app.get('/api/stats', async (req, res) => {
     }
 });
 
-app.get('/api/analytics/failures', async (req, res) => {
+app.get('/api/analytics/failures', requireUser, async (req, res) => {
   try {
     const prisma = getPrisma();
+    const scope = await resolveOrchestratorAccessScope(req);
+    const visibleAgentIds = scope.isAdmin ? [] : Array.from(scope.allowedAgentIds ?? []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
     const topFailingTools = await prisma.orchestratorToolExecution.groupBy({
       by: ['toolName'],
-      where: { status: 'failed' },
+      where: (visibleAgentIds.length ? {
+        status: 'failed',
+        agentId: { in: visibleAgentIds },
+      } : {
+        status: 'failed',
+      }) as any,
       _count: { _all: true },
       orderBy: { _count: { toolName: 'desc' } },
       take: 8
     });
 
     const timeoutHotspotsRaw = await prisma.orchestratorAgentExecution.findMany({
-      where: {
+      where: ({
+        ...(visibleAgentIds.length ? { agentId: { in: visibleAgentIds } } : {}),
         status: 'failed',
         OR: [
           { output: { contains: 'timeout', mode: 'insensitive' } },
           { input: { contains: 'timeout', mode: 'insensitive' } }
         ]
-      },
+      }) as any,
       include: {
         agent: { select: { name: true } }
       }
@@ -5721,12 +5729,13 @@ app.get('/api/analytics/failures', async (req, res) => {
       .slice(0, 8);
 
     const tokenSpikesRaw = await prisma.orchestratorAgentExecution.findMany({
+      where: (visibleAgentIds.length ? { agentId: { in: visibleAgentIds } } : undefined) as any,
       include: {
         agent: { select: { name: true } }
       },
       orderBy: { promptTokens: 'desc' },
       take: 24 // Take more then sort by combined
-    });
+    }) as any[];
 
     const tokenSpikes = tokenSpikesRaw.map(ae => ({
       id: ae.id,
@@ -5921,17 +5930,20 @@ app.post('/api/agents/:id/attachments', requireUser, async (req, res, next) => {
   }
 });
 
-app.get('/api/executions/agents', async (req, res) => {
+app.get('/api/executions/agents', requireUser, async (req, res) => {
     try {
         const prisma = getPrisma();
+        const scope = await resolveOrchestratorAccessScope(req);
+        const visibleAgentIds = scope.isAdmin ? [] : Array.from(scope.allowedAgentIds ?? []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
         const executions = await prisma.orchestratorAgentExecution.findMany({
+            where: (visibleAgentIds.length ? { agentId: { in: visibleAgentIds } } : undefined) as any,
             include: {
                 agent: {
                     select: { name: true }
                 }
             },
             orderBy: { createdAt: 'desc' },
-            take: 10
+            take: 120
         });
 
         // Map to expected format
