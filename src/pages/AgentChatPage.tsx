@@ -691,6 +691,7 @@ export default function AgentChatPage() {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const traceEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     sendingRef.current = sending;
@@ -870,6 +871,7 @@ export default function AgentChatPage() {
     setDraftAttachments([]);
     setError('');
     loadedSessionKeyRef.current = '';
+    requestAnimationFrame(() => composerRef.current?.focus());
   };
 
   const toggleDelegateAgent = (agentId: number) => {
@@ -1123,6 +1125,7 @@ export default function AgentChatPage() {
       setMessages((prev) => prev.map((m) => (m.ts === assistantTs && m.role === 'assistant' ? { ...m, content: `ERROR: ${msg}` } : m)));
     } finally {
       setSending(false);
+      requestAnimationFrame(() => composerRef.current?.focus());
     }
   };
 
@@ -1596,6 +1599,7 @@ export default function AgentChatPage() {
             <div className="flex items-end gap-3">
               <div className="flex-1 relative">
                 <textarea
+                  ref={composerRef}
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   onKeyDown={(e) => {
