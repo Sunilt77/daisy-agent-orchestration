@@ -287,6 +287,47 @@ async function getToolInputSchemaForRecord(tool: any): Promise<any> {
   };
 }
 
+function normalizeToolInputSchema(schema: any) {
+  if (!schema || typeof schema !== 'object') {
+    return { type: 'object', properties: {}, required: [], additionalProperties: true };
+  }
+  return {
+    type: typeof schema.type === 'string' ? schema.type : 'object',
+    properties: schema.properties && typeof schema.properties === 'object' ? schema.properties : {},
+    required: Array.isArray(schema.required) ? schema.required.map((value: any) => String(value)) : [],
+    additionalProperties: schema.additionalProperties !== false,
+  };
+}
+
+function summarizeInputSchemaForPrompt(schema: any, maxProps = 6) {
+  const normalized = normalizeToolInputSchema(schema);
+  const properties = normalized.properties || {};
+  const entries = Object.entries(properties).slice(0, maxProps);
+  const fieldSummary = entries.map(([name, value]: [string, any]) => {
+    const type = String(value?.type || 'string');
+    const enumSummary = Array.isArray(value?.enum) && value.enum.length
+      ? ` enum:${value.enum.slice(0, 4).map((entry: any) => String(entry)).join('|')}`
+      : '';
+    return `${name}:${type}${enumSummary}`;
+  }).join(', ');
+  const requiredSummary = normalized.required.length ? ` required:${normalized.required.join(',')}` : '';
+  const propertySummary = fieldSummary ? ` schema:${fieldSummary}` : '';
+  return `${requiredSummary}${propertySummary}`;
+}
+
+function validateArgsAgainstInputSchema(args: any, schema: any) {
+  const normalized = normalizeToolInputSchema(schema);
+  const payload = args && typeof args === 'object' ? args : {};
+  const missing = normalized.required.filter((key: string) => {
+    const value = payload[key];
+    return value == null || (typeof value === 'string' && value.trim() === '');
+  });
+  return {
+    ok: missing.length === 0,
+    missing,
+  };
+}
+
 
 // Initialize AgentOps
 if (process.env.AGENTOPS_API_KEY) {
@@ -2903,14 +2944,18 @@ function summarizeToolArgsForPrompt(args: any, maxChars = 500): string {
   }
 }
 
-function describeToolForPrompt(tool: any): string {
+function describeToolForPrompt(tool: any, schema?: any): string {
   let requiredArgsText = '';
-  try {
-    const cfg = tool.config ? JSON.parse(tool.config) : {};
-    if (Array.isArray(cfg?.requiredArgs) && cfg.requiredArgs.length) {
-      requiredArgsText = ` args:${cfg.requiredArgs.map((x: any) => String(x)).join(',')}`;
-    }
-  } catch {}
+  if (schema) {
+    requiredArgsText = summarizeInputSchemaForPrompt(schema);
+  } else {
+    try {
+      const cfg = tool.config ? JSON.parse(tool.config) : {};
+      if (Array.isArray(cfg?.requiredArgs) && cfg.requiredArgs.length) {
+        requiredArgsText = ` required:${cfg.requiredArgs.map((x: any) => String(x)).join(',')}`;
+      }
+    } catch {}
+  }
   const name = String(tool?.name || 'tool');
   const description = compactPromptText(tool?.description || 'No description provided.', 110);
   return `- ${name}: ${description}${requiredArgsText}`;
@@ -8726,6 +8771,7 @@ async function runAgent(
 
         const toolByName = new Map<string, any>();
         const mcpToolByPrefix = new Map<string, any>();
+        const toolSchemaByName = new Map<string, any>();
         for (const tool of scopedTools) {
             toolByName.set(tool.name, tool);
         }
@@ -8800,7 +8846,13 @@ async function runAgent(
                     
                     const mcpTools = await withTimeout(client.listTools(), 8000, 'MCP listTools');
                     for (const mcpTool of mcpTools.tools) {
-                        mcpToolDescriptions += `- ${prefix}_${mcpTool.name}: ${compactPromptText(mcpTool.description || 'MCP tool', 110)}\n`;
+                        const aliasedName = `${prefix}_${mcpTool.name}`;
+                        const inputSchema = normalizeToolInputSchema(mcpTool.inputSchema);
+                        toolSchemaByName.set(aliasedName, inputSchema);
+                        mcpToolDescriptions += `${describeToolForPrompt({
+                          name: aliasedName,
+                          description: mcpTool.description || 'MCP tool',
+                        }, inputSchema)}\n`;
                     }
                     console.log(`✓ Connected to MCP tool ${tool.name}, found ${mcpTools.tools.length} tools`);
 
@@ -8817,10 +8869,16 @@ async function runAgent(
             }
         }
 
-        const scopedToolDescriptions = scopedTools
-          .filter(t => t.type !== 'mcp')
-          .map((t: any) => describeToolForPrompt(t))
-          .join('\n');
+        const nonMcpTools = scopedTools.filter((t) => t.type !== 'mcp');
+        const scopedToolDescriptions = (
+          await Promise.all(
+            nonMcpTools.map(async (t: any) => {
+              const schema = normalizeToolInputSchema(await getToolInputSchemaForRecord(t));
+              toolSchemaByName.set(String(t.name), schema);
+              return describeToolForPrompt(t, schema);
+            }),
+          )
+        ).join('\n');
         const toolDescriptions = scopedToolDescriptions + (mcpToolDescriptions ? '\n' + mcpToolDescriptions : '');
         const toolContext = (toolsEnabled && scopedTools.length > 0) ? toolDescriptions : 'No tools are available for this agent.';
 
@@ -8833,6 +8891,8 @@ async function runAgent(
 
             You have access to the following tools:
             ${toolContext}
+
+            Before calling any tool, verify that every required argument is present. If a required field is missing, do not call the tool yet. Ask for the missing field or choose a different valid path.
 
             If you need to use a tool, respond with a JSON object in this format:
             { "tool": "tool_name", "args": { "arg_name": "value" }, "thought": "Why I am using this tool" }
@@ -9070,7 +9130,6 @@ async function runAgent(
 
             if (action.tool) {
                 logCallback({ type: 'thought', agent: agent.name, message: action.thought });
-                logCallback({ type: 'tool_call', agent: agent.name, tool: action.tool, args: action.args });
 
                 if (!toolsEnabled) {
                     const disabledMsg = 'Tools are disabled for this agent. Continue without tools.';
@@ -9081,6 +9140,23 @@ async function runAgent(
                 }
 
                 const normalizedArgs = action.args && typeof action.args === 'object' ? action.args : {};
+                const actionToolName = String(action.tool);
+                const inputSchema = toolSchemaByName.get(actionToolName) || null;
+                if (inputSchema) {
+                    const validation = validateArgsAgainstInputSchema(normalizedArgs, inputSchema);
+                    if (!validation.ok) {
+                        const missingMsg = `Tool "${actionToolName}" is missing required arguments: ${validation.missing.join(', ')}. Ask for the missing values or repair the tool call before invoking it.`;
+                        logCallback({ type: 'warning', agent: agent.name, message: missingMsg });
+                        appendScratchpadEntry([
+                          '[Tool Validation]',
+                          missingMsg,
+                          `Args attempted: ${summarizeToolArgsForPrompt(normalizedArgs)}`,
+                        ].join('\n'));
+                        iterations++;
+                        continue;
+                    }
+                }
+                logCallback({ type: 'tool_call', agent: agent.name, tool: action.tool, args: action.args });
                 const signature = `${String(action.tool)}::${JSON.stringify(normalizedArgs, Object.keys(normalizedArgs).sort())}`;
                 const signatureCount = (toolSignatureCounts.get(signature) || 0) + 1;
                 toolSignatureCounts.set(signature, signatureCount);
