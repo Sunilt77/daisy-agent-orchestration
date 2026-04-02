@@ -83,6 +83,9 @@ type MessageDebug = {
   usage: DebugUsage;
   timeline: DebugStep[];
 };
+type ExecutionTimelineResponse = {
+  timeline?: Array<{ stage?: string; status?: string; duration_ms?: number; error?: string | null; at?: string }>;
+};
 type FeedbackState = {
   status: 'saving' | 'saved' | 'error';
   rating?: 'up' | 'down';
@@ -273,6 +276,9 @@ function buildOrchestrationSteps(delegation: LiveDelegation, orchestration?: Orc
 
 function OrchestrationTimeline({ delegation, orchestration }: { delegation: LiveDelegation; orchestration?: OrchestrationEvent[] }) {
   const steps = buildOrchestrationSteps(delegation, orchestration);
+  const [expandedExecutionId, setExpandedExecutionId] = useState<number | null>(null);
+  const [timelineByExecution, setTimelineByExecution] = useState<Record<number, ExecutionTimelineResponse>>({});
+  const [loadingExecutionId, setLoadingExecutionId] = useState<number | null>(null);
   const toneClass = (tone: OrchestrationStep['tone']) => {
     if (tone === 'supervisor') return 'border-indigo-200 bg-indigo-50 text-indigo-700';
     if (tone === 'synthesis') return 'border-violet-200 bg-violet-50 text-violet-700';
@@ -285,6 +291,26 @@ function OrchestrationTimeline({ delegation, orchestration }: { delegation: Live
     if (tone === 'synthesis') return <Sparkles size={12} />;
     if (tone === 'error') return <AlertTriangle size={12} />;
     return <Bot size={12} />;
+  };
+
+  const toggleStepDetails = async (executionId: number) => {
+    if (!executionId) return;
+    if (expandedExecutionId === executionId) {
+      setExpandedExecutionId(null);
+      return;
+    }
+    setExpandedExecutionId(executionId);
+    if (timelineByExecution[executionId]) return;
+    setLoadingExecutionId(executionId);
+    try {
+      const res = await fetch(`/api/agent-executions/${executionId}/timeline`);
+      const data = await safeJson(res) as ExecutionTimelineResponse;
+      if (res.ok) {
+        setTimelineByExecution((prev) => ({ ...prev, [executionId]: data || {} }));
+      }
+    } finally {
+      setLoadingExecutionId((current) => (current === executionId ? null : current));
+    }
   };
 
   return (
@@ -312,12 +338,53 @@ function OrchestrationTimeline({ delegation, orchestration }: { delegation: Live
                   <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{step.status}</span>
                 ) : null}
                 {step.executionId ? (
-                  <Link to={`/agent-executions/${step.executionId}`} className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800">
-                    View
-                  </Link>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => void toggleStepDetails(step.executionId!)}
+                      className="text-[10px] font-semibold text-slate-500 hover:text-slate-800"
+                    >
+                      {expandedExecutionId === step.executionId ? 'Hide Details' : 'Inspect'}
+                    </button>
+                    <Link to={`/agent-executions/${step.executionId}`} className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800">
+                      View
+                    </Link>
+                  </>
                 ) : null}
               </div>
               <div className="mt-1 text-[12px] leading-relaxed text-slate-600">{step.detail}</div>
+              {step.executionId && expandedExecutionId === step.executionId && (
+                <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50/90 px-3 py-3">
+                  {loadingExecutionId === step.executionId ? (
+                    <div className="text-[11px] font-semibold text-slate-500">Loading specialist activity…</div>
+                  ) : (
+                    <div className="space-y-2">
+                      {Array.isArray(timelineByExecution[step.executionId]?.timeline) && timelineByExecution[step.executionId]!.timeline!.length > 0 ? (
+                        timelineByExecution[step.executionId]!.timeline!.slice(-6).map((entry, entryIdx) => (
+                          <div key={`${step.executionId}-${entryIdx}`} className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-500">
+                                {String(entry.stage || 'stage').replace(/_/g, ' ')}
+                              </span>
+                              {entry.status ? (
+                                <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{entry.status}</span>
+                              ) : null}
+                              {entry.duration_ms != null ? (
+                                <span className="text-[10px] text-slate-400">{entry.duration_ms}ms</span>
+                              ) : null}
+                            </div>
+                            {entry.error ? (
+                              <div className="mt-1 text-[11px] leading-relaxed text-red-600">{entry.error}</div>
+                            ) : null}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-[11px] font-semibold text-slate-500">No recent specialist activity was recorded yet.</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         ))}
