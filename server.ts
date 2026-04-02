@@ -789,8 +789,30 @@ function getDelegationCandidatesForAgent(currentAgent: any): any[] {
   `).all(currentId) as any[];
 }
 
-function buildDelegationOrchestrationEvents(parentExecutionId: number, delegations: any[], supervisorStatus: string) {
+async function buildDelegationOrchestrationEvents(parentExecutionId: number, delegations: any[], supervisorStatus: string) {
   const rows = Array.isArray(delegations) ? delegations : [];
+  const childExecutionIds = Array.from(new Set(
+    rows
+      .map((row) => Number(row?.child_execution_id || 0))
+      .filter((id) => Number.isFinite(id) && id > 0),
+  ));
+  const latestToolByExecutionId = new Map<number, { toolName: string; status: string }>();
+  if (childExecutionIds.length) {
+    const toolRows = await getPrisma().orchestratorToolExecution.findMany({
+      where: { agentExecutionId: { in: childExecutionIds } },
+      orderBy: { id: 'desc' },
+      select: { agentExecutionId: true, toolName: true, status: true },
+    });
+    for (const toolRow of toolRows) {
+      const execId = Number(toolRow.agentExecutionId || 0);
+      if (execId > 0 && !latestToolByExecutionId.has(execId)) {
+        latestToolByExecutionId.set(execId, {
+          toolName: String(toolRow.toolName || 'tool'),
+          status: String(toolRow.status || 'unknown'),
+        });
+      }
+    }
+  }
   const events: any[] = [
     {
       key: `supervisor-dispatch-${parentExecutionId}`,
@@ -846,6 +868,24 @@ function buildDelegationOrchestrationEvents(parentExecutionId: number, delegatio
           parent_execution_id: row.parent_execution_id || parentExecutionId,
           at: row.updated_at || row.created_at || new Date().toISOString(),
         });
+
+        const latestTool = latestToolByExecutionId.get(Number(row.child_execution_id || 0));
+        if (latestTool?.toolName) {
+          const toolEventType = latestTool.status === 'failed' ? 'specialist_retrying' : 'waiting_on_tool';
+          events.push({
+            key: `${toolEventType}-${row.id}-${latestTool.toolName}`,
+            type: toolEventType,
+            actor: row.agent_name || `Agent ${row.agent_id}`,
+            label: latestTool.status === 'failed' ? 'Retrying' : `Using ${latestTool.toolName}`,
+            detail: latestTool.status === 'failed'
+              ? `${row.agent_name || `Agent ${row.agent_id}`} hit an issue while using ${latestTool.toolName} and is attempting recovery.`
+              : `${row.agent_name || `Agent ${row.agent_id}`} is currently using ${latestTool.toolName}.`,
+            status: latestTool.status,
+            execution_id: row.child_execution_id || null,
+            parent_execution_id: row.parent_execution_id || parentExecutionId,
+            at: row.updated_at || row.created_at || new Date().toISOString(),
+          });
+        }
       }
     }
 
@@ -10401,7 +10441,7 @@ app.get('/api/agent-executions/:id/stream', async (req, res) => {
       select: { id: true, toolName: true, status: true, durationMs: true, createdAt: true },
     });
     const delegations = await getDelegationRows(execId);
-    const orchestration = buildDelegationOrchestrationEvents(execId, delegations, String(exec.status || 'running'));
+    const orchestration = await buildDelegationOrchestrationEvents(execId, delegations, String(exec.status || 'running'));
     res.write(`event: update\ndata: ${JSON.stringify({ execution: exec, tools, delegations, orchestration })}\n\n`);
     if (exec.status !== 'running') {
       res.write(`event: done\ndata: ${JSON.stringify({ status: exec.status })}\n\n`);
@@ -10432,7 +10472,7 @@ app.get('/api/agent-executions/:id/timeline', async (req, res) => {
     error: row.error,
   }));
   const delegationRows = await getDelegationRows(execId);
-  const orchestration = buildDelegationOrchestrationEvents(execId, delegationRows, String(exec.status || 'unknown'));
+  const orchestration = await buildDelegationOrchestrationEvents(execId, delegationRows, String(exec.status || 'unknown'));
   const timeline = [
     { stage: 'queued', status: 'completed', at: exec.created_at },
     { stage: 'running', status: exec.status === 'running' ? 'running' : 'completed', at: exec.created_at },

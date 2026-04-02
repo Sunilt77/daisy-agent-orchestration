@@ -228,7 +228,7 @@ function buildOrchestrationSteps(delegation: LiveDelegation, orchestration?: Orc
       tone:
         event.type === 'supervisor_decision' || event.type === 'handoff_sent' || event.type === 'specialist_queued' ? 'supervisor'
         : event.type === 'supervisor_resumed' ? 'synthesis'
-        : event.status === 'failed' ? 'error'
+        : event.type === 'specialist_retrying' || event.status === 'failed' ? 'error'
         : 'delegate',
       status: event.status,
       executionId: Number(event.execution_id || event.child_execution_id || 0) || null,
