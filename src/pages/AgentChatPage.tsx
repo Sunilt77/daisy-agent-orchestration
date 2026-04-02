@@ -226,7 +226,7 @@ function buildOrchestrationSteps(delegation: LiveDelegation, orchestration?: Orc
       label: event.label,
       detail: compactDelegationText(event.detail, 220),
       tone:
-        event.type === 'supervisor_decision' || event.type === 'handoff_sent' ? 'supervisor'
+        event.type === 'supervisor_decision' || event.type === 'handoff_sent' || event.type === 'specialist_queued' ? 'supervisor'
         : event.type === 'supervisor_resumed' ? 'synthesis'
         : event.status === 'failed' ? 'error'
         : 'delegate',

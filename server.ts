@@ -819,6 +819,34 @@ function buildDelegationOrchestrationEvents(parentExecutionId: number, delegatio
         child_execution_id: row.child_execution_id || null,
         at: row.created_at || new Date().toISOString(),
       });
+
+      if (row.status === 'queued') {
+        events.push({
+          key: `specialist-queued-${row.id}`,
+          type: 'specialist_queued',
+          actor: row.agent_name || `Agent ${row.agent_id}`,
+          label: 'Queued',
+          detail: `${row.agent_name || `Agent ${row.agent_id}`} is queued to take ownership of the delegated task.`,
+          status: row.status,
+          execution_id: row.child_execution_id || null,
+          parent_execution_id: row.parent_execution_id || parentExecutionId,
+          at: row.created_at || new Date().toISOString(),
+        });
+      }
+
+      if (row.status === 'running') {
+        events.push({
+          key: `specialist-started-${row.id}`,
+          type: 'specialist_started',
+          actor: row.agent_name || `Agent ${row.agent_id}`,
+          label: 'Started',
+          detail: `${row.agent_name || `Agent ${row.agent_id}`} accepted the handoff and is now working on it.`,
+          status: row.status,
+          execution_id: row.child_execution_id || null,
+          parent_execution_id: row.parent_execution_id || parentExecutionId,
+          at: row.updated_at || row.created_at || new Date().toISOString(),
+        });
+      }
     }
 
     events.push({
@@ -832,6 +860,22 @@ function buildDelegationOrchestrationEvents(parentExecutionId: number, delegatio
       parent_execution_id: row.parent_execution_id || parentExecutionId,
       at: row.updated_at || row.created_at || new Date().toISOString(),
     });
+
+    if (String(row?.role || '') === 'delegate' && (row.status === 'completed' || row.status === 'failed' || row.status === 'canceled')) {
+      events.push({
+        key: `supervisor-resumed-${row.id}`,
+        type: 'supervisor_resumed',
+        actor: 'Supervisor',
+        label: 'Supervisor resumed',
+        detail: row.status === 'completed'
+          ? `Supervisor received ${row.agent_name || `Agent ${row.agent_id}`}'s result and resumed orchestration.`
+          : `Supervisor resumed after ${row.agent_name || `Agent ${row.agent_id}`}'s delegated step ended with status ${row.status}.`,
+        status: row.status,
+        execution_id: row.parent_execution_id || parentExecutionId,
+        child_execution_id: row.child_execution_id || null,
+        at: row.updated_at || row.created_at || new Date().toISOString(),
+      });
+    }
   }
 
   return events;
