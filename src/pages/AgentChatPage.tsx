@@ -156,6 +156,104 @@ function parseDelegationsToLive(delegations: any[], parentExecutionId: number, s
   };
 }
 
+function compactDelegationText(value?: string, max = 220) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text.length > max ? `${text.slice(0, max - 1).trim()}…` : text;
+}
+
+function buildDelegationStatusCopy(delegation: LiveDelegation) {
+  const delegateRows = delegation.delegates.filter((d) => d.role === 'delegate');
+  const completed = delegateRows.filter((d) => d.status === 'completed');
+  const running = delegateRows.filter((d) => d.status === 'running');
+  const failed = delegateRows.filter((d) => d.status === 'failed');
+
+  if (delegation.supervisorStatus === 'running') {
+    if (running.length > 0) {
+      return `Specialists are working: ${running.map((d) => d.agentName).join(', ')}.`;
+    }
+    if (delegateRows.length > 0) {
+      return `Supervisor is coordinating ${delegateRows.length} specialist${delegateRows.length === 1 ? '' : 's'}.`;
+    }
+    return 'Supervisor is preparing the handoff.';
+  }
+
+  if (completed.length > 0 && failed.length === 0) {
+    return `Specialist handoff complete. ${completed.length} delegate result${completed.length === 1 ? '' : 's'} returned to the supervisor.`;
+  }
+
+  if (completed.length > 0 && failed.length > 0) {
+    return `Partial handoff complete. ${completed.length} delegate result${completed.length === 1 ? '' : 's'} succeeded and ${failed.length} failed.`;
+  }
+
+  if (failed.length > 0) {
+    return `Delegation ended with ${failed.length} failed specialist step${failed.length === 1 ? '' : 's'}.`;
+  }
+
+  return `Delegation ${delegation.supervisorStatus}.`;
+}
+
+function DelegationHandoffFeed({ delegation }: { delegation: LiveDelegation }) {
+  const items = delegation.delegates.filter((d) => d.role === 'delegate' || d.role === 'synthesis');
+  if (!items.length) return null;
+
+  return (
+    <div className="mt-3 rounded-2xl border border-indigo-200/70 bg-indigo-50/70 overflow-hidden">
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-indigo-100 bg-white/60">
+        <GitBranch size={13} className="text-indigo-500" />
+        <span className="text-[11px] font-black text-indigo-700 uppercase tracking-[0.2em]">Handoff Feed</span>
+      </div>
+      <div className="divide-y divide-indigo-100/80">
+        {items.map((item, idx) => {
+          const preview = compactDelegationText(item.result || item.error || '');
+          const statusTone =
+            item.status === 'completed' ? 'text-emerald-700 bg-emerald-50 border-emerald-200' :
+            item.status === 'failed' ? 'text-red-700 bg-red-50 border-red-200' :
+            item.status === 'canceled' ? 'text-amber-700 bg-amber-50 border-amber-200' :
+            item.status === 'running' ? 'text-indigo-700 bg-indigo-50 border-indigo-200' :
+            'text-slate-600 bg-slate-50 border-slate-200';
+          return (
+            <div key={`${item.agentId}-${idx}-${item.title}`} className="px-4 py-3">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5">
+                  <DelegationStatusIcon status={item.status} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[12px] font-bold text-slate-900">{item.agentName}</span>
+                    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-black uppercase tracking-widest ${statusTone}`}>
+                      {item.role === 'synthesis' ? 'synthesis' : item.status}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 text-[11px] font-semibold text-slate-500">{item.title}</div>
+                  {preview && (
+                    <div className={`mt-2 rounded-xl border px-3 py-2 text-[11px] leading-relaxed ${
+                      item.error ? 'border-red-200 bg-red-50 text-red-700' : 'border-slate-200 bg-white text-slate-700'
+                    }`}>
+                      {preview}
+                    </div>
+                  )}
+                  {!preview && item.status === 'running' && (
+                    <div className="mt-2 text-[11px] text-slate-500">Working on the delegated task…</div>
+                  )}
+                </div>
+                {item.executionId ? (
+                  <Link
+                    to={`/agent-executions/${item.executionId}`}
+                    className="shrink-0 text-[10px] font-semibold text-indigo-600 hover:text-indigo-800"
+                  >
+                    View
+                  </Link>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ─── Delegation Tree Visualizer ───────────────────────────────────────────────
 function DelegationStatusIcon({ status }: { status: string }) {
   if (status === 'completed') return <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />;
@@ -621,7 +719,11 @@ export default function AgentChatPage() {
         const updateAssistantMessage = (updater: (m: ChatMessage) => ChatMessage) => {
           setMessages((prev) => prev.map((m) => (m.ts === assistantTs && m.role === 'assistant' ? updater(m) : m)));
         };
-        updateAssistantMessage((m) => ({ ...m, delegation: liveDelegation, content: `Supervisor run started. Execution #${parentExecutionId}` }));
+        updateAssistantMessage((m) => ({
+          ...m,
+          delegation: liveDelegation,
+          content: `Supervisor run started. ${buildDelegationStatusCopy(liveDelegation)} Execution #${parentExecutionId}.`,
+        }));
 
         await new Promise<void>((resolve) => {
           const es = new EventSource(`/api/agent-executions/${parentExecutionId}/stream`);
@@ -646,7 +748,7 @@ export default function AgentChatPage() {
               updateAssistantMessage((m) => ({
                 ...m,
                 delegation: { ...liveDelegation },
-                content: `Coordinating ${liveDelegation.delegates.length} agents… Execution #${parentExecutionId}`,
+                content: `${buildDelegationStatusCopy(liveDelegation)} Execution #${parentExecutionId}.`,
               }));
             } catch { /* ignore */ }
           });
@@ -666,7 +768,10 @@ export default function AgentChatPage() {
           usage: { prompt_tokens: Number(tData?.execution?.prompt_tokens || 0), completion_tokens: Number(tData?.execution?.completion_tokens || 0), cost: Number(tData?.execution?.total_cost || 0) },
           timeline: Array.isArray(tData?.timeline) ? tData.timeline : [],
         } : undefined;
-        updateAssistantMessage((m) => ({ ...m, content: finalReply, delegation: finalDelegation, debug }));
+        const decoratedReply = finalReply.trim()
+          ? `${buildDelegationStatusCopy(finalDelegation)}\n\n${finalReply}`
+          : buildDelegationStatusCopy(finalDelegation);
+        updateAssistantMessage((m) => ({ ...m, content: decoratedReply, delegation: finalDelegation, debug }));
         return;
       }
 
@@ -1161,7 +1266,10 @@ export default function AgentChatPage() {
 
                   {/* Delegation tree */}
                   {m.role === 'assistant' && m.delegation && (
-                    <DelegationTree delegation={m.delegation} agents={agents} />
+                    <>
+                      <DelegationHandoffFeed delegation={m.delegation} />
+                      <DelegationTree delegation={m.delegation} agents={agents} />
+                    </>
                   )}
 
                   {/* Tool trace panel */}
