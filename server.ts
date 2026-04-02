@@ -315,6 +315,94 @@ function summarizeInputSchemaForPrompt(schema: any, maxProps = 6) {
   return `${requiredSummary}${propertySummary}`;
 }
 
+function getJsonSchemaTypeMatches(value: any, expectedType: string) {
+  switch (expectedType) {
+    case 'string':
+      return typeof value === 'string';
+    case 'number':
+      return typeof value === 'number' && Number.isFinite(value);
+    case 'integer':
+      return typeof value === 'number' && Number.isInteger(value);
+    case 'boolean':
+      return typeof value === 'boolean';
+    case 'array':
+      return Array.isArray(value);
+    case 'object':
+      return !!value && typeof value === 'object' && !Array.isArray(value);
+    case 'null':
+      return value === null;
+    default:
+      return true;
+  }
+}
+
+function coercePrimitiveForSchema(value: any, schema: any) {
+  const expectedType = String(schema?.type || '');
+  if (value == null) return value;
+  if (expectedType === 'string') return typeof value === 'string' ? value : String(value);
+  if (expectedType === 'number') {
+    if (typeof value === 'number') return value;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : value;
+  }
+  if (expectedType === 'integer') {
+    if (typeof value === 'number' && Number.isInteger(value)) return value;
+    const parsed = Number(value);
+    return Number.isInteger(parsed) ? parsed : value;
+  }
+  if (expectedType === 'boolean') {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'true') return true;
+      if (normalized === 'false') return false;
+    }
+    return value;
+  }
+  return value;
+}
+
+function validateValueAgainstSchema(value: any, schema: any, path: string): string[] {
+  if (!schema || typeof schema !== 'object') return [];
+  const errors: string[] = [];
+  const normalized = normalizeToolInputSchema(schema);
+  const expectedType = String(schema.type || normalized.type || '');
+  const coerced = coercePrimitiveForSchema(value, schema);
+
+  if (expectedType && !getJsonSchemaTypeMatches(coerced, expectedType)) {
+    errors.push(`${path} should be ${expectedType}`);
+    return errors;
+  }
+
+  if (Array.isArray(schema.enum) && schema.enum.length > 0 && !schema.enum.includes(coerced)) {
+    errors.push(`${path} must be one of: ${schema.enum.map((entry: any) => String(entry)).join(', ')}`);
+  }
+
+  if (expectedType === 'object') {
+    const objectValue = coerced && typeof coerced === 'object' && !Array.isArray(coerced) ? coerced : {};
+    const required = Array.isArray(schema.required) ? schema.required.map((entry: any) => String(entry)) : normalized.required;
+    for (const key of required) {
+      const nextValue = objectValue[key];
+      if (nextValue == null || (typeof nextValue === 'string' && nextValue.trim() === '')) {
+        errors.push(`${path}.${key} is required`);
+      }
+    }
+    const properties = schema.properties && typeof schema.properties === 'object' ? schema.properties : normalized.properties;
+    for (const [key, propertySchema] of Object.entries(properties)) {
+      if (!(key in objectValue)) continue;
+      errors.push(...validateValueAgainstSchema(objectValue[key], propertySchema, `${path}.${key}`));
+    }
+  }
+
+  if (expectedType === 'array' && Array.isArray(coerced) && schema.items && typeof schema.items === 'object') {
+    coerced.forEach((entry, index) => {
+      errors.push(...validateValueAgainstSchema(entry, schema.items, `${path}[${index}]`));
+    });
+  }
+
+  return errors;
+}
+
 function validateArgsAgainstInputSchema(args: any, schema: any) {
   const normalized = normalizeToolInputSchema(schema);
   const payload = args && typeof args === 'object' ? args : {};
@@ -322,9 +410,11 @@ function validateArgsAgainstInputSchema(args: any, schema: any) {
     const value = payload[key];
     return value == null || (typeof value === 'string' && value.trim() === '');
   });
+  const issues = validateValueAgainstSchema(payload, normalized, 'args');
   return {
-    ok: missing.length === 0,
+    ok: missing.length === 0 && issues.length === 0,
     missing,
+    issues,
   };
 }
 
@@ -9145,7 +9235,11 @@ async function runAgent(
                 if (inputSchema) {
                     const validation = validateArgsAgainstInputSchema(normalizedArgs, inputSchema);
                     if (!validation.ok) {
-                        const missingMsg = `Tool "${actionToolName}" is missing required arguments: ${validation.missing.join(', ')}. Ask for the missing values or repair the tool call before invoking it.`;
+                        const details = [
+                          validation.missing.length ? `missing required arguments: ${validation.missing.join(', ')}` : '',
+                          validation.issues.length ? `schema issues: ${validation.issues.join('; ')}` : '',
+                        ].filter(Boolean).join(' | ');
+                        const missingMsg = `Tool "${actionToolName}" failed validation: ${details}. Ask for the missing values or repair the tool call before invoking it.`;
                         logCallback({ type: 'warning', agent: agent.name, message: missingMsg });
                         appendScratchpadEntry([
                           '[Tool Validation]',
