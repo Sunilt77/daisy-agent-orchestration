@@ -789,6 +789,54 @@ function getDelegationCandidatesForAgent(currentAgent: any): any[] {
   `).all(currentId) as any[];
 }
 
+function buildDelegationOrchestrationEvents(parentExecutionId: number, delegations: any[], supervisorStatus: string) {
+  const rows = Array.isArray(delegations) ? delegations : [];
+  const events: any[] = [
+    {
+      key: `supervisor-dispatch-${parentExecutionId}`,
+      type: 'supervisor_decision',
+      actor: 'Supervisor',
+      label: 'Dispatch',
+      detail: supervisorStatus === 'running'
+        ? 'Supervisor is coordinating specialist handoffs.'
+        : `Supervisor finished with status ${supervisorStatus}.`,
+      status: supervisorStatus,
+      execution_id: parentExecutionId,
+      at: rows[0]?.created_at || new Date().toISOString(),
+    },
+  ];
+
+  for (const row of rows) {
+    if (String(row?.role || '') === 'delegate') {
+      events.push({
+        key: `handoff-sent-${row.id}`,
+        type: 'handoff_sent',
+        actor: 'Supervisor',
+        label: `Handoff to ${row.agent_name || `Agent ${row.agent_id}`}`,
+        detail: String(row.task || row.title || 'Delegated task').trim() || 'Delegated task',
+        status: row.status || 'queued',
+        execution_id: row.parent_execution_id || parentExecutionId,
+        child_execution_id: row.child_execution_id || null,
+        at: row.created_at || new Date().toISOString(),
+      });
+    }
+
+    events.push({
+      key: `specialist-returned-${row.id}`,
+      type: String(row?.role || '') === 'synthesis' ? 'supervisor_resumed' : 'specialist_returned',
+      actor: row.agent_name || `Agent ${row.agent_id}`,
+      label: String(row?.role || '') === 'synthesis' ? 'Synthesis' : 'Specialist response',
+      detail: String(row.result || row.error || (row.status === 'running' ? 'Working on delegated task…' : 'No response returned yet.')).trim(),
+      status: row.status || 'queued',
+      execution_id: row.child_execution_id || null,
+      parent_execution_id: row.parent_execution_id || parentExecutionId,
+      at: row.updated_at || row.created_at || new Date().toISOString(),
+    });
+  }
+
+  return events;
+}
+
 function buildDelegationRosterContext(currentAgent: any): string {
   const candidates = getDelegationCandidatesForAgent(currentAgent);
   if (!candidates.length) {
@@ -10309,7 +10357,8 @@ app.get('/api/agent-executions/:id/stream', async (req, res) => {
       select: { id: true, toolName: true, status: true, durationMs: true, createdAt: true },
     });
     const delegations = await getDelegationRows(execId);
-    res.write(`event: update\ndata: ${JSON.stringify({ execution: exec, tools, delegations })}\n\n`);
+    const orchestration = buildDelegationOrchestrationEvents(execId, delegations, String(exec.status || 'running'));
+    res.write(`event: update\ndata: ${JSON.stringify({ execution: exec, tools, delegations, orchestration })}\n\n`);
     if (exec.status !== 'running') {
       res.write(`event: done\ndata: ${JSON.stringify({ status: exec.status })}\n\n`);
       clearInterval(timer);
@@ -10339,6 +10388,7 @@ app.get('/api/agent-executions/:id/timeline', async (req, res) => {
     error: row.error,
   }));
   const delegationRows = await getDelegationRows(execId);
+  const orchestration = buildDelegationOrchestrationEvents(execId, delegationRows, String(exec.status || 'unknown'));
   const timeline = [
     { stage: 'queued', status: 'completed', at: exec.created_at },
     { stage: 'running', status: exec.status === 'running' ? 'running' : 'completed', at: exec.created_at },
@@ -10359,7 +10409,7 @@ app.get('/api/agent-executions/:id/timeline', async (req, res) => {
     })),
     { stage: 'finished', status: exec.status, at: exec.created_at },
   ];
-  res.json({ execution: exec, timeline, delegations: delegationRows, tools: toolRows });
+  res.json({ execution: exec, timeline, delegations: delegationRows, tools: toolRows, orchestration });
 });
 
 app.post('/api/agent-executions/:id/retry', async (req, res) => {

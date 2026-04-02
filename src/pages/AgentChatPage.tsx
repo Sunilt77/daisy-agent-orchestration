@@ -45,6 +45,18 @@ type LiveDelegation = {
   delegates: DelegationStatus[];
   startedAt: number;
 };
+type OrchestrationEvent = {
+  key: string;
+  type: string;
+  actor: string;
+  label: string;
+  detail: string;
+  status?: string;
+  execution_id?: number | null;
+  parent_execution_id?: number | null;
+  child_execution_id?: number | null;
+  at?: string;
+};
 type ChatAttachment = {
   id: string;
   kind: 'image' | 'audio' | 'pdf' | 'file';
@@ -60,6 +72,7 @@ type ChatMessage = {
   debug?: MessageDebug;
   trace?: TraceEvent[];
   delegation?: LiveDelegation;
+  orchestration?: OrchestrationEvent[];
   attachments?: ChatAttachment[];
 };
 type DebugUsage = { prompt_tokens?: number; completion_tokens?: number; cost?: number } | null;
@@ -205,7 +218,22 @@ type OrchestrationStep = {
   executionId?: number | null;
 };
 
-function buildOrchestrationSteps(delegation: LiveDelegation): OrchestrationStep[] {
+function buildOrchestrationSteps(delegation: LiveDelegation, orchestration?: OrchestrationEvent[]): OrchestrationStep[] {
+  if (Array.isArray(orchestration) && orchestration.length > 0) {
+    return orchestration.map((event) => ({
+      key: event.key,
+      actor: event.actor,
+      label: event.label,
+      detail: compactDelegationText(event.detail, 220),
+      tone:
+        event.type === 'supervisor_decision' || event.type === 'handoff_sent' ? 'supervisor'
+        : event.type === 'supervisor_resumed' ? 'synthesis'
+        : event.status === 'failed' ? 'error'
+        : 'delegate',
+      status: event.status,
+      executionId: Number(event.execution_id || event.child_execution_id || 0) || null,
+    }));
+  }
   const steps: OrchestrationStep[] = [
     {
       key: `supervisor-${delegation.parentExecutionId}`,
@@ -243,8 +271,8 @@ function buildOrchestrationSteps(delegation: LiveDelegation): OrchestrationStep[
   return steps;
 }
 
-function OrchestrationTimeline({ delegation }: { delegation: LiveDelegation }) {
-  const steps = buildOrchestrationSteps(delegation);
+function OrchestrationTimeline({ delegation, orchestration }: { delegation: LiveDelegation; orchestration?: OrchestrationEvent[] }) {
+  const steps = buildOrchestrationSteps(delegation, orchestration);
   const toneClass = (tone: OrchestrationStep['tone']) => {
     if (tone === 'supervisor') return 'border-indigo-200 bg-indigo-50 text-indigo-700';
     if (tone === 'synthesis') return 'border-violet-200 bg-violet-50 text-violet-700';
@@ -872,6 +900,7 @@ export default function AgentChatPage() {
               updateAssistantMessage((m) => ({
                 ...m,
                 delegation: { ...liveDelegation },
+                orchestration: Array.isArray(payload?.orchestration) ? payload.orchestration : m.orchestration,
                 content: `${buildDelegationStatusCopy(liveDelegation)} Execution #${parentExecutionId}.`,
               }));
             } catch { /* ignore */ }
@@ -886,6 +915,7 @@ export default function AgentChatPage() {
         const executionStatus = String(tData?.execution?.status || 'unknown');
         const finalReply = String(tData?.execution?.output || `Supervisor execution #${parentExecutionId} finished with status ${executionStatus}.`);
         const finalDelegation = parseDelegationsToLive(delegationRows, parentExecutionId, executionStatus);
+        const orchestration = Array.isArray(tData?.orchestration) ? tData.orchestration : [];
         const debug: MessageDebug | undefined = (debugMode || showToolTrace) ? {
           executionId: parentExecutionId,
           status: executionStatus,
@@ -895,7 +925,7 @@ export default function AgentChatPage() {
         const decoratedReply = finalReply.trim()
           ? `${buildDelegationStatusCopy(finalDelegation)}\n\n${finalReply}`
           : buildDelegationStatusCopy(finalDelegation);
-        updateAssistantMessage((m) => ({ ...m, content: decoratedReply, delegation: finalDelegation, debug }));
+        updateAssistantMessage((m) => ({ ...m, content: decoratedReply, delegation: finalDelegation, orchestration, debug }));
         return;
       }
 
@@ -1391,7 +1421,7 @@ export default function AgentChatPage() {
                   {/* Delegation tree */}
                   {m.role === 'assistant' && m.delegation && (
                     <>
-                      <OrchestrationTimeline delegation={m.delegation} />
+                      <OrchestrationTimeline delegation={m.delegation} orchestration={m.orchestration} />
                       <DelegationHandoffFeed delegation={m.delegation} />
                       <DelegationTree delegation={m.delegation} agents={agents} />
                     </>
