@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { Activity, ArrowLeft, Radio, Square, GitBranch, Bot, Wrench, Cpu, DollarSign, Sparkles } from 'lucide-react';
+import { Activity, ArrowLeft, Radio, Square, GitBranch, Bot, Wrench, Cpu, DollarSign, RotateCcw, Search } from 'lucide-react';
 
 type Execution = {
   id: number;
@@ -82,6 +82,9 @@ export default function AgentExecutionPage() {
   const [tools, setTools] = useState<any[]>([]);
   const [live, setLive] = useState(false);
   const [error, setError] = useState('');
+  const [timelineStatusFilter, setTimelineStatusFilter] = useState<'all' | 'running' | 'completed' | 'failed'>('all');
+  const [delegationFilter, setDelegationFilter] = useState<'all' | 'delegate' | 'synthesis'>('all');
+  const [activityQuery, setActivityQuery] = useState('');
   const esRef = useRef<EventSource | null>(null);
 
   const load = async () => {
@@ -146,6 +149,36 @@ export default function AgentExecutionPage() {
       failed: delegations.filter((row) => row.status === 'failed' || row.status === 'canceled').length,
     };
   }, [delegations]);
+  const filteredTimeline = useMemo(() => {
+    const q = activityQuery.trim().toLowerCase();
+    return timeline.filter((step) => {
+      const normalizedStatus = String(step.status || '').toLowerCase();
+      const matchesStatus = timelineStatusFilter === 'all'
+        || (timelineStatusFilter === 'running' && ['running', 'queued', 'pending'].includes(normalizedStatus))
+        || (timelineStatusFilter === 'completed' && normalizedStatus === 'completed')
+        || (timelineStatusFilter === 'failed' && ['failed', 'canceled'].includes(normalizedStatus));
+      if (!matchesStatus) return false;
+      if (!q) return true;
+      return `${step.stage || ''} ${step.status || ''}`.toLowerCase().includes(q);
+    });
+  }, [activityQuery, timeline, timelineStatusFilter]);
+  const filteredDelegations = useMemo(() => {
+    const q = activityQuery.trim().toLowerCase();
+    return delegations.filter((delegation) => {
+      const matchesRole = delegationFilter === 'all'
+        || (delegationFilter === 'synthesis' && delegation.role === 'synthesis')
+        || (delegationFilter === 'delegate' && delegation.role !== 'synthesis');
+      if (!matchesRole) return false;
+      if (!q) return true;
+      return `${delegation.title || ''} ${delegation.agent_name || ''} ${delegation.task || ''} ${delegation.status || ''}`.toLowerCase().includes(q);
+    });
+  }, [activityQuery, delegationFilter, delegations]);
+  const filteredTools = useMemo(() => {
+    const q = activityQuery.trim().toLowerCase();
+    if (!q) return tools;
+    return tools.filter((tool) => `${tool.tool_name || ''} ${tool.status || ''}`.toLowerCase().includes(q));
+  }, [activityQuery, tools]);
+  const hasDetailFilters = timelineStatusFilter !== 'all' || delegationFilter !== 'all' || Boolean(activityQuery.trim());
 
   if (!Number.isFinite(execId) || execId <= 0) {
     return <div className="text-sm text-red-600">Invalid execution id.</div>;
@@ -182,6 +215,51 @@ export default function AgentExecutionPage() {
       </div>
 
       {error && <div className="text-sm text-red-600">{error}</div>}
+
+      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1.5fr)_repeat(2,minmax(0,0.75fr))_auto]">
+          <div className="relative">
+            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              value={activityQuery}
+              onChange={(e) => setActivityQuery(e.target.value)}
+              placeholder="Search timeline, delegations, and tool activity..."
+              className="w-full rounded-xl border border-slate-300 bg-white pl-9 pr-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+          <select
+            value={timelineStatusFilter}
+            onChange={(e) => setTimelineStatusFilter(e.target.value as 'all' | 'running' | 'completed' | 'failed')}
+            className="ui-select"
+          >
+            <option value="all">All Timeline</option>
+            <option value="running">Running</option>
+            <option value="completed">Completed</option>
+            <option value="failed">Failed</option>
+          </select>
+          <select
+            value={delegationFilter}
+            onChange={(e) => setDelegationFilter(e.target.value as 'all' | 'delegate' | 'synthesis')}
+            className="ui-select"
+          >
+            <option value="all">All Delegations</option>
+            <option value="delegate">Delegates Only</option>
+            <option value="synthesis">Synthesis Only</option>
+          </select>
+          <button
+            onClick={() => {
+              setTimelineStatusFilter('all');
+              setDelegationFilter('all');
+              setActivityQuery('');
+            }}
+            disabled={!hasDetailFilters}
+            className="inline-flex items-center justify-center gap-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-45"
+          >
+            <RotateCcw size={14} />
+            Reset
+          </button>
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="telemetry-tile p-4">
@@ -305,7 +383,7 @@ export default function AgentExecutionPage() {
           <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 font-medium text-slate-700">Timeline</div>
             <div className="p-4 space-y-2">
-              {timeline.length ? timeline.map((step, idx) => (
+              {filteredTimeline.length ? filteredTimeline.map((step, idx) => (
                 <div key={`${step.stage}-${idx}`} className="flex items-center justify-between text-xs border border-slate-100 rounded-lg px-3 py-2">
                   <div className="text-slate-700">{step.stage}</div>
                   <div className="flex items-center gap-2">
@@ -318,7 +396,7 @@ export default function AgentExecutionPage() {
                     <span className="font-mono text-slate-500">{step.duration_ms != null ? `${step.duration_ms}ms` : '-'}</span>
                   </div>
                 </div>
-              )) : <div className="text-sm text-slate-500">No timeline available.</div>}
+              )) : <div className="text-sm text-slate-500">No timeline steps match current filters.</div>}
             </div>
           </div>
         </div>
@@ -329,7 +407,7 @@ export default function AgentExecutionPage() {
               <GitBranch size={16} /> Delegation Tree
             </div>
             <div className="p-4 space-y-3">
-              {delegations.length ? delegations.map((delegation) => (
+              {filteredDelegations.length ? filteredDelegations.map((delegation) => (
                 <div key={delegation.id} className="rounded-lg border border-slate-200 p-3 bg-slate-50/70">
                   <div className="flex items-start justify-between gap-3">
                     <div>
@@ -361,7 +439,7 @@ export default function AgentExecutionPage() {
                     </div>
                   ) : null}
                 </div>
-              )) : <div className="text-sm text-slate-500">No delegations recorded for this execution.</div>}
+              )) : <div className="text-sm text-slate-500">No delegations match current filters.</div>}
             </div>
           </div>
 
@@ -370,7 +448,7 @@ export default function AgentExecutionPage() {
               <Wrench size={16} /> Tool Activity
             </div>
             <div className="p-4 space-y-2">
-              {tools.length ? tools.map((tool: any) => (
+              {filteredTools.length ? filteredTools.map((tool: any) => (
                 <div key={tool.id} className="flex items-center justify-between text-xs border border-slate-100 rounded-lg px-3 py-2">
                   <div className="text-slate-700">{tool.tool_name}</div>
                   <div className="flex items-center gap-2">
@@ -378,7 +456,7 @@ export default function AgentExecutionPage() {
                     <span className="font-mono text-slate-500">{tool.duration_ms != null ? `${tool.duration_ms}ms` : '-'}</span>
                   </div>
                 </div>
-              )) : <div className="text-sm text-slate-500">No tool activity recorded.</div>}
+              )) : <div className="text-sm text-slate-500">No tool activity matches current filters.</div>}
             </div>
           </div>
         </div>

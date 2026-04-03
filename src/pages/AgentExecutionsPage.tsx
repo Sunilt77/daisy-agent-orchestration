@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Activity, Search, Link2 } from 'lucide-react';
+import { Activity, Search, Link2, RotateCcw, CheckCircle2, AlertTriangle, Radio } from 'lucide-react';
 import Pagination from '../components/Pagination';
 
 type AgentExecutionRow = {
@@ -29,6 +29,13 @@ function statusClass(status?: string) {
   return 'bg-emerald-100 text-emerald-700';
 }
 
+function executionKindLabel(kind?: string) {
+  if (kind === 'delegated_parent') return 'Supervisor';
+  if (kind === 'delegated_child') return 'Delegate';
+  if (kind === 'delegated_synthesis') return 'Synthesis';
+  return 'Standard';
+}
+
 export default function AgentExecutionsPage() {
   const [rows, setRows] = useState<AgentExecutionRow[]>([]);
   const [page, setPage] = useState(1);
@@ -43,6 +50,13 @@ export default function AgentExecutionsPage() {
 
   const statusParam = useMemo(() => status.trim().toLowerCase(), [status]);
   const queryParam = useMemo(() => query.trim(), [query]);
+  const hasFilters = Boolean(statusParam || executionKind || queryParam);
+  const pageInsights = useMemo(() => {
+    const running = rows.filter((row) => ['running', 'pending'].includes(String(row.status || '').toLowerCase())).length;
+    const failed = rows.filter((row) => ['failed', 'canceled'].includes(String(row.status || '').toLowerCase())).length;
+    const completed = rows.filter((row) => String(row.status || '').toLowerCase() === 'completed').length;
+    return { running, failed, completed };
+  }, [rows]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -133,6 +147,90 @@ export default function AgentExecutionsPage() {
             <option value="delegated_synthesis">Synthesis</option>
           </select>
         </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {[
+            {
+              label: 'All',
+              active: !status && !executionKind,
+              onClick: () => { setStatus(''); setExecutionKind(''); },
+            },
+            {
+              label: 'Running',
+              active: status === 'running',
+              onClick: () => setStatus('running'),
+            },
+            {
+              label: 'Failed',
+              active: status === 'failed',
+              onClick: () => setStatus('failed'),
+            },
+            {
+              label: 'Supervisors',
+              active: executionKind === 'delegated_parent',
+              onClick: () => setExecutionKind('delegated_parent'),
+            },
+            {
+              label: 'Delegates',
+              active: executionKind === 'delegated_child',
+              onClick: () => setExecutionKind('delegated_child'),
+            },
+          ].map((chip) => (
+            <button
+              key={chip.label}
+              type="button"
+              onClick={chip.onClick}
+              className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${
+                chip.active
+                  ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                  : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            disabled={!hasFilters}
+            onClick={() => {
+              setStatus('');
+              setExecutionKind('');
+              setQuery('');
+            }}
+            className="ml-auto inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-50 disabled:opacity-45"
+          >
+            <RotateCcw size={12} />
+            Reset
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Visible</div>
+          <div className="mt-1 text-2xl font-black text-slate-900">{rows.length}</div>
+          <div className="text-xs text-slate-500 mt-1">of {total} total results</div>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between">
+            <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Running</div>
+            <Radio size={14} className="text-cyan-600" />
+          </div>
+          <div className="mt-1 text-2xl font-black text-cyan-700">{pageInsights.running}</div>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between">
+            <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Failed</div>
+            <AlertTriangle size={14} className="text-rose-600" />
+          </div>
+          <div className="mt-1 text-2xl font-black text-rose-700">{pageInsights.failed}</div>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between">
+            <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Completed</div>
+            <CheckCircle2 size={14} className="text-emerald-600" />
+          </div>
+          <div className="mt-1 text-2xl font-black text-emerald-700">{pageInsights.completed}</div>
+        </div>
       </div>
 
       {error && <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 text-sm px-3 py-2">{error}</div>}
@@ -140,6 +238,7 @@ export default function AgentExecutionsPage() {
       <section className="bg-white rounded-xl border border-slate-200 overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 font-medium text-slate-700 flex items-center gap-2">
           <Activity size={16} /> Execution List
+          <span className="ml-auto text-xs text-slate-500">{loading ? 'Loading...' : `${rows.length} rows`}</span>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-left text-slate-600">
@@ -173,7 +272,7 @@ export default function AgentExecutionsPage() {
                         {row.status || 'unknown'}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-xs text-slate-600">{kind}</td>
+                    <td className="px-4 py-3 text-xs text-slate-600">{executionKindLabel(kind)}</td>
                     <td className="px-4 py-3 max-w-[360px] truncate" title={task || 'No task'}>
                       {task || <span className="text-slate-400">No task</span>}
                     </td>
