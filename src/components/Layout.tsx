@@ -57,35 +57,6 @@ const NAV_ITEMS: NavItem[] = [
   { icon: ListChecks, label: 'Task Control', path: '/task-control', section: 'Infrastructure', hint: 'Emergency stop controls' },
 ];
 
-const PAGE_META: Record<string, { title: string; subtitle: string }> = {
-  '/': { title: 'Operations Dashboard', subtitle: 'Live command center for platform health and orchestration readiness.' },
-  '/projects': { title: 'Projects', subtitle: 'Organize orchestration scope, tenancy, and traceability by project.' },
-  '/platform': { title: 'Platform Admin', subtitle: 'Configure platform plans, governance, and shared policy controls.' },
-  '/traces': { title: 'Traces', subtitle: 'Inspect run execution trails, failures, and latency hotspots.' },
-  '/agents': { title: 'Agents', subtitle: 'Build, tune, and operate specialist and supervisor agents.' },
-  '/agent-executions': { title: 'Agent Executions', subtitle: 'Monitor execution timelines, retries, and output quality.' },
-  '/agent-chat': { title: 'Agent Chat', subtitle: 'Run realtime conversational sessions with selected agents.' },
-  '/voice': { title: 'Voice Console', subtitle: 'Operate low-latency speech agents with diagnostics and controls.' },
-  '/workflows': { title: 'Workflows', subtitle: 'Design graph automation with loops, branches, and webhooks.' },
-  '/crews': { title: 'Crews', subtitle: 'Coordinate multi-agent crews with routing and quorum policies.' },
-  '/tools': { title: 'Tools', subtitle: 'Build, test, and assign runtime tools for agent execution.' },
-  '/knowledgebase': { title: 'Knowledgebase', subtitle: 'Manage retrieval sources and document context for grounding.' },
-  '/mcps': { title: 'MCP Registry', subtitle: 'Publish, bundle, and route MCP capabilities across the platform.' },
-  '/providers': { title: 'LLM Providers', subtitle: 'Manage provider credentials, models, and failover targets.' },
-  '/pricing': { title: 'Pricing', subtitle: 'Track and tune model pricing assumptions for cost visibility.' },
-  '/credentials': { title: 'Credentials', subtitle: 'Store and govern secrets used by tools and providers.' },
-  '/task-control': { title: 'Task Control', subtitle: 'Issue emergency stop/cancel controls for active runtime jobs.' },
-};
-
-function getPageMeta(pathname: string) {
-  if (PAGE_META[pathname]) return PAGE_META[pathname];
-  if (pathname.startsWith('/crew/')) return { title: 'Crew Runtime', subtitle: 'Manage crew tasks, execution state, and routing behavior.' };
-  if (pathname.startsWith('/agent-executions/')) return { title: 'Execution Detail', subtitle: 'Detailed execution timeline, logs, and diagnostics.' };
-  if (pathname.startsWith('/projects/') && pathname.endsWith('/traces')) return { title: 'Project Traces', subtitle: 'Project-scoped traces, errors, and outcome analytics.' };
-  if (pathname.startsWith('/traces/')) return { title: 'Trace Detail', subtitle: 'End-to-end event timeline for a single platform run.' };
-  return { title: 'AgentOps Console', subtitle: 'Unified operations surface for agentic orchestration.' };
-}
-
 export default function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation();
   const { user, logout } = useAuth();
@@ -131,7 +102,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   }, [location.pathname]);
 
   const sections: Array<NavItem['section']> = ['Operations', 'Agents', 'Infrastructure'];
-  const pageMeta = getPageMeta(location.pathname);
   const filteredCommandItems = useMemo(() => {
     const query = commandQuery.trim().toLowerCase();
     if (!query) return NAV_ITEMS;
@@ -280,33 +250,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
       <main className="command-canvas flex-1 relative overflow-hidden">
         <div className="scanline" />
-        <header className="topbar-glass fixed z-30 left-0 right-0 lg:left-auto lg:right-0" style={{ paddingLeft: sidebarHidden ? 0 : (sidebarCollapsed ? 92 : 300) }}>
-          <div className="h-16 px-4 sm:px-6 lg:px-8 flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setSidebarHidden((v) => !v)}
-              className="layout-chip"
-              title={sidebarHidden ? 'Show Navigation' : 'Hide Navigation'}
-            >
-              {sidebarHidden ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
-            </button>
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-black text-slate-900 truncate">{pageMeta.title}</div>
-              <div className="text-xs text-slate-500 truncate">{pageMeta.subtitle}</div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setCommandOpen(true)}
-              className="layout-chip hidden sm:flex items-center gap-2 px-3"
-              title="Open Command Palette"
-            >
-              <Search size={14} />
-              <span className="text-xs font-semibold text-slate-600">Search</span>
-              <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded border border-slate-200">⌘K</span>
-            </button>
-          </div>
-        </header>
-
         <AnimatePresence mode="wait">
           <motion.div
             key={location.pathname}
@@ -316,7 +259,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             transition={{ duration: 0.32, ease: 'easeOut' }}
             className="h-full w-full overflow-auto overflow-x-hidden"
           >
-            <div className="app-content-shell p-4 pt-24 sm:p-6 sm:pt-24 lg:p-8 lg:pt-24 xl:p-10 xl:pt-24 rise-in">
+            <div className="app-content-shell p-4 sm:p-6 lg:p-8 xl:p-10 rise-in">
               <div className="w-full max-w-(--app-max-width) mx-auto">
                 {children}
               </div>
