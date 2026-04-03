@@ -82,6 +82,11 @@ type AccessControlsStore = {
   tenants: Record<string, AccessPolicy>;
 };
 
+type EmbeddingConfig = {
+  provider: 'google' | 'openai' | 'anthropic';
+  model: string;
+};
+
 const DEFAULT_PLATFORM_SETTINGS = {
   daily_message_cap: 1000,
   batch_size: 50,
@@ -126,6 +131,28 @@ function getPlatformSettings() {
 function sanitizeIdList(input: any): number[] {
   if (!Array.isArray(input)) return [];
   return Array.from(new Set(input.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0)));
+}
+
+function resolveDefaultEmbeddingConfig(): EmbeddingConfig {
+  const googleEnvKey = (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || '').trim();
+  if (googleEnvKey) {
+    return { provider: 'google', model: 'text-embedding-004' };
+  }
+  const openaiEnvKey = (process.env.OPENAI_API_KEY || '').trim();
+  if (openaiEnvKey) {
+    return { provider: 'openai', model: 'text-embedding-3-small' };
+  }
+
+  try {
+    const provider = db.prepare(
+      'SELECT provider FROM llm_providers WHERE COALESCE(TRIM(api_key), \'\') <> \'\' ORDER BY is_default DESC, id ASC LIMIT 1',
+    ).get() as any;
+    const value = String(provider?.provider || '').toLowerCase();
+    if (value === 'google') return { provider: 'google', model: 'text-embedding-004' };
+    if (value === 'openai') return { provider: 'openai', model: 'text-embedding-3-small' };
+  } catch {}
+
+  throw new HttpError(400, 'No embedding provider key configured. Set GOOGLE_API_KEY (or GEMINI_API_KEY) or OPENAI_API_KEY.');
 }
 
 function normalizeAccessPolicy(input: any, fallback?: AccessPolicy): AccessPolicy {
@@ -540,6 +567,38 @@ function mergeRunMaxMetricsTags(existingTags: any, delta: MaxMetricsDelta) {
   metrics.updated_at = new Date().toISOString();
   base.metrics = metrics;
   return base;
+}
+
+async function resolveUserProjectId(
+  prisma: ReturnType<typeof getPrisma>,
+  orgId: string,
+  requestedProjectId: string,
+): Promise<string> {
+  const raw = String(requestedProjectId || '').trim();
+  if (!raw) throw new HttpError(400, 'projectId is required');
+
+  const directProject = await prisma.project.findFirst({
+    where: { id: raw, orgId },
+    select: { id: true },
+  });
+  if (directProject) return directProject.id;
+
+  const orchestratorId = Number(raw);
+  if (Number.isFinite(orchestratorId) && orchestratorId > 0) {
+    const localProject = await prisma.orchestratorProject.findUnique({
+      where: { id: orchestratorId },
+      select: { platformProjectId: true },
+    });
+    if (localProject?.platformProjectId) {
+      const mappedProject = await prisma.project.findFirst({
+        where: { id: localProject.platformProjectId, orgId },
+        select: { id: true },
+      });
+      if (mappedProject) return mappedProject.id;
+    }
+  }
+
+  throw new HttpError(404, 'Project not found');
 }
 
 export function registerPlatformRoutes(app: Express) {
@@ -1701,7 +1760,8 @@ export function registerPlatformRoutes(app: Express) {
 
       const where: any = { project: { orgId: user.orgId } };
       if (projectId) {
-        where.projectId = projectId;
+        const resolvedProjectId = await resolveUserProjectId(prisma, user.orgId, String(projectId));
+        where.projectId = resolvedProjectId;
       }
 
       const documents = await prisma.document.findMany({
@@ -1720,13 +1780,7 @@ export function registerPlatformRoutes(app: Express) {
       const user = req.user!;
       const { projectId } = req.body;
 
-      if (!projectId) throw new HttpError(400, 'projectId is required');
-
-      // Verify project belongs to user's org
-      const project = await prisma.project.findFirst({
-        where: { id: projectId, orgId: user.orgId }
-      });
-      if (!project) throw new HttpError(404, 'Project not found');
+      const resolvedProjectId = await resolveUserProjectId(prisma, user.orgId, String(projectId || ''));
 
       // Handle file upload
       const multer = (await import('multer')).default();
@@ -1742,15 +1796,17 @@ export function registerPlatformRoutes(app: Express) {
 
         // Get or create default index for project
         let index = await prisma.knowledgebaseIndex.findFirst({
-          where: { projectId, name: 'Default Index' }
+          where: { projectId: resolvedProjectId, name: 'Default Index' }
         });
 
         if (!index) {
           const { createKnowledgebaseIndex } = await import('../utils/documentProcessing.js');
-          const indexId = await createKnowledgebaseIndex(projectId, 'Default Index', 'Default knowledgebase index', {
-            provider: 'google',
-            model: 'text-embedding-004'
-          });
+          const indexId = await createKnowledgebaseIndex(
+            resolvedProjectId,
+            'Default Index',
+            'Default knowledgebase index',
+            resolveDefaultEmbeddingConfig(),
+          );
           index = await prisma.knowledgebaseIndex.findUnique({ where: { id: indexId } });
         }
 
@@ -1758,7 +1814,7 @@ export function registerPlatformRoutes(app: Express) {
 
         // Process document
         const docId = await processDocument(
-          projectId,
+          resolvedProjectId,
           file.path,
           {
             name: req.body.name || file.originalname,
@@ -1803,7 +1859,8 @@ export function registerPlatformRoutes(app: Express) {
 
       const where: any = { project: { orgId: user.orgId } };
       if (projectId) {
-        where.projectId = projectId;
+        const resolvedProjectId = await resolveUserProjectId(prisma, user.orgId, String(projectId));
+        where.projectId = resolvedProjectId;
       }
 
       const indexes = await prisma.knowledgebaseIndex.findMany({
@@ -1811,7 +1868,31 @@ export function registerPlatformRoutes(app: Express) {
         include: { project: { select: { name: true } } },
         orderBy: { createdAt: 'desc' }
       });
-      res.json(indexes);
+      const projectIds = Array.from(new Set(indexes.map((index) => String(index.projectId)).filter(Boolean)));
+      const statsByProject: Record<string, { documentCount: number; chunkCount: number; totalSize: number }> = {};
+      if (projectIds.length > 0) {
+        const docs = await prisma.document.findMany({
+          where: { projectId: { in: projectIds } },
+          select: {
+            projectId: true,
+            fileSize: true,
+            _count: { select: { chunks: true } },
+          },
+        });
+        for (const doc of docs) {
+          const key = String(doc.projectId);
+          const bucket = statsByProject[key] || { documentCount: 0, chunkCount: 0, totalSize: 0 };
+          bucket.documentCount += 1;
+          bucket.chunkCount += Number(doc._count?.chunks || 0);
+          bucket.totalSize += Number(doc.fileSize || 0);
+          statsByProject[key] = bucket;
+        }
+      }
+
+      res.json(indexes.map((index) => ({
+        ...index,
+        stats: statsByProject[String(index.projectId)] || { documentCount: 0, chunkCount: 0, totalSize: 0 },
+      })));
     } catch (e) {
       next(e);
     }
@@ -1822,19 +1903,10 @@ export function registerPlatformRoutes(app: Express) {
       const user = req.user!;
       const { projectId, name, description } = req.body;
 
-      if (!projectId) throw new HttpError(400, 'projectId is required');
-
-      // Verify project belongs to user's org
-      const project = await prisma.project.findFirst({
-        where: { id: projectId, orgId: user.orgId }
-      });
-      if (!project) throw new HttpError(404, 'Project not found');
+      const resolvedProjectId = await resolveUserProjectId(prisma, user.orgId, String(projectId || ''));
 
       const { createKnowledgebaseIndex } = await import('../utils/documentProcessing.js');
-      const indexId = await createKnowledgebaseIndex(projectId, name, description, {
-        provider: 'google',
-        model: 'text-embedding-004'
-      });
+      const indexId = await createKnowledgebaseIndex(resolvedProjectId, name, description, resolveDefaultEmbeddingConfig());
 
       res.json({ id: indexId });
     } catch (e) {

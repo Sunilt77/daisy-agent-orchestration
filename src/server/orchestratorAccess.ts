@@ -11,6 +11,43 @@ export const LOCAL_ACCESS_SUBSYSTEM = {
   ownership: 'local_only',
 } as const;
 
+let accessTablesEnsured = false;
+
+function ensureAccessTables() {
+  if (accessTablesEnsured) return;
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS resource_owners (
+      resource_type TEXT NOT NULL,
+      resource_id INTEGER NOT NULL,
+      owner_user_id TEXT NOT NULL,
+      owner_org_id TEXT,
+      visibility TEXT NOT NULL DEFAULT 'private',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (resource_type, resource_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS resource_shares (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      resource_type TEXT NOT NULL,
+      resource_id INTEGER NOT NULL,
+      shared_with_user_id TEXT,
+      shared_with_org_id TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_resource_owners_owner_lookup
+      ON resource_owners(resource_type, owner_user_id, owner_org_id, visibility);
+
+    CREATE INDEX IF NOT EXISTS idx_resource_shares_resource_lookup
+      ON resource_shares(resource_type, resource_id);
+
+    CREATE INDEX IF NOT EXISTS idx_resource_shares_subject_lookup
+      ON resource_shares(resource_type, shared_with_user_id, shared_with_org_id);
+  `);
+  accessTablesEnsured = true;
+}
+
 export type OrchestratorAccessScope = {
   user: AuthedUser;
   isAdmin: boolean;
@@ -139,6 +176,7 @@ export async function resolveOrchestratorAccessScope(req: Request): Promise<Orch
 }
 
 function getAccessibleResourceIds(resourceType: string, user: AuthedUser): Set<number> {
+  ensureAccessTables();
   const rows = db.prepare(`
     SELECT resource_id
     FROM resource_owners
@@ -160,6 +198,7 @@ function getAccessibleResourceIds(resourceType: string, user: AuthedUser): Set<n
 }
 
 export function assignResourceOwner(resourceType: string, resourceId: number, user: AuthedUser, visibility: 'private' | 'org' = 'private') {
+  ensureAccessTables();
   db.prepare(`
     INSERT INTO resource_owners (
       resource_type, resource_id, owner_user_id, owner_org_id, visibility, updated_at
@@ -173,6 +212,7 @@ export function assignResourceOwner(resourceType: string, resourceId: number, us
 }
 
 function getResourceOwnerRow(resourceType: string, resourceId: number) {
+  ensureAccessTables();
   return db.prepare(`
     SELECT resource_type, resource_id, owner_user_id, owner_org_id, visibility
     FROM resource_owners
@@ -189,6 +229,7 @@ export function requireManageableResource(scope: OrchestratorAccessScope, resour
 }
 
 export function getResourceAccess(resourceType: string, resourceId: number) {
+  ensureAccessTables();
   const owner = getResourceOwnerRow(resourceType, resourceId);
   const shares = db.prepare(`
     SELECT id, shared_with_user_id, shared_with_org_id, created_at
@@ -200,6 +241,7 @@ export function getResourceAccess(resourceType: string, resourceId: number) {
 }
 
 export function setResourceAccess(resourceType: string, resourceId: number, user: AuthedUser, payload: any) {
+  ensureAccessTables();
   const visibility = payload?.visibility === 'org' ? 'org' : 'private';
   assignResourceOwner(resourceType, resourceId, user, visibility);
   deleteResourceAccess(resourceType, resourceId, { deleteOwner: false });
@@ -218,6 +260,7 @@ export function deleteResourceAccess(
   resourceId: number,
   options: { deleteOwner?: boolean } = {},
 ) {
+  ensureAccessTables();
   db.prepare('DELETE FROM resource_shares WHERE resource_type = ? AND resource_id = ?').run(resourceType, resourceId);
   if (options.deleteOwner !== false) {
     db.prepare('DELETE FROM resource_owners WHERE resource_type = ? AND resource_id = ?').run(resourceType, resourceId);

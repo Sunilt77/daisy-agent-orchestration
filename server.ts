@@ -5347,10 +5347,30 @@ app.post('/api/projects', requireUser, async (req, res) => {
   const { name, description } = req.body;
   try {
     const scope = await resolveOrchestratorAccessScope(req);
-    if (!scope.isAdmin) return res.status(403).json({ error: 'Only platform admin can create orchestrator projects right now.' });
-    const created = await getPrisma().orchestratorProject.create({
-      data: { name, description: description || null },
-    });
+    const prisma = getPrisma();
+    let created: any;
+    if (!scope.isAdmin) {
+      // For regular users, auto-create a platform project in their org and link it.
+      const platformProject = await prisma.project.create({
+        data: {
+          orgId: req.user!.orgId,
+          name: String(name || '').trim() || 'Untitled Project',
+          description: description || null,
+        },
+      });
+      created = await prisma.orchestratorProject.create({
+        data: {
+          name: String(name || '').trim() || platformProject.name,
+          description: description || null,
+          platformProjectId: platformProject.id,
+        },
+      });
+      assignResourceOwner('project', Number(created.id), req.user!);
+    } else {
+      created = await prisma.orchestratorProject.create({
+        data: { name, description: description || null },
+      });
+    }
     await refreshPersistentMirror();
     res.json({ id: created.id });
   } catch (e: any) {
@@ -8578,6 +8598,69 @@ async function runKnowledgeSearch(config: any, args: any): Promise<string> {
   }
 }
 
+function evaluateArithmeticExpression(input: string): number {
+  const expr = String(input || '').trim();
+  if (!expr) throw new Error('Expression is required');
+  // Allow only arithmetic-safe characters.
+  if (!/^[\d+\-*/().\s]+$/.test(expr)) {
+    throw new Error('Expression contains invalid characters');
+  }
+  // Reject accidental operators that create invalid JavaScript forms.
+  if (/[*/]{2,}|[+\-]{3,}/.test(expr)) {
+    throw new Error('Expression contains invalid operator sequence');
+  }
+  const result = Function(`"use strict"; return (${expr});`)();
+  if (typeof result !== 'number' || !Number.isFinite(result)) {
+    throw new Error('Expression did not evaluate to a finite number');
+  }
+  return result;
+}
+
+async function runSearchTool(args: any): Promise<string> {
+  const rawQuery = args?.query ?? args?.q ?? args?.text ?? '';
+  const query = String(rawQuery || '').trim();
+  if (!query) return '[Search Error] query is required.';
+  const endpoint = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+  const response = await fetch(endpoint, {
+    headers: { 'User-Agent': 'AgentOrch/1.0 (+search-tool)' },
+  });
+  if (!response.ok) {
+    return `[Search Error] DuckDuckGo request failed with status ${response.status}.`;
+  }
+  const payload = await response.json().catch(() => ({} as any));
+  const abstractText = String(payload?.AbstractText || '').trim();
+  const relatedTopics = Array.isArray(payload?.RelatedTopics) ? payload.RelatedTopics : [];
+  const relatedSnippets = relatedTopics
+    .flatMap((topic: any) => {
+      if (topic?.Text) return [String(topic.Text)];
+      if (Array.isArray(topic?.Topics)) {
+        return topic.Topics.map((nested: any) => String(nested?.Text || '')).filter(Boolean);
+      }
+      return [];
+    })
+    .filter(Boolean)
+    .slice(0, 3);
+  if (!abstractText && !relatedSnippets.length) {
+    return `[Search Results] No direct summary found for "${query}".`;
+  }
+  return [
+    `[Search Results for "${query}"]`,
+    abstractText ? `Summary: ${abstractText}` : null,
+    relatedSnippets.length ? `Related:\n- ${relatedSnippets.join('\n- ')}` : null,
+  ].filter(Boolean).join('\n\n');
+}
+
+async function runCalculatorTool(args: any): Promise<string> {
+  const expression = String(args?.expression ?? args?.expr ?? args?.input ?? '').trim();
+  if (!expression) return '[Calculator Error] expression is required.';
+  try {
+    const value = evaluateArithmeticExpression(expression);
+    return JSON.stringify({ expression, result: value });
+  } catch (error: any) {
+    return `[Calculator Error] ${error?.message || 'Invalid expression'}`;
+  }
+}
+
 async function executeTool(toolName: string, args: any, mcpClients?: Map<string, Client>, toolRecord?: any, execContext?: ToolExecutionContext): Promise<string> {
   args = enrichArgsWithAttachments(args);
   console.log(`Executing tool ${toolName} with args:`, args);
@@ -8632,13 +8715,7 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
 
   const tool = toolRecord || db.prepare('SELECT * FROM tools WHERE name = ?').get(toolName);
   if (!tool) {
-    if (toolName.toLowerCase().includes('search')) {
-      return `[Mock Search Result] Found information about "${JSON.stringify(args)}". The weather is sunny. The stock price is up.`;
-    }
-    if (toolName.toLowerCase().includes('calc')) {
-      return `[Mock Calculator] Result: 42`;
-    }
-    return `[Mock Tool Output] Executed ${toolName} successfully.`;
+    return `[Tool Error] Tool "${toolName}" was not found.`;
   }
 
   let config: any = {};
@@ -8724,11 +8801,11 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
   }
 
   if (tool.type === 'search') {
-    return `[Mock Search Result] Found information about "${JSON.stringify(args)}". The weather is sunny. The stock price is up.`;
+    return await runSearchTool(args);
   }
 
   if (tool.type === 'calculator') {
-    return `[Mock Calculator] Result: 42`;
+    return await runCalculatorTool(args);
   }
 
   if (tool.type === 'knowledge_search') {

@@ -170,7 +170,7 @@ export function registerOrchestratorConfigRoutes({
     }
   });
 
-  app.get('/api/providers', async (_req, res) => {
+  app.get('/api/providers', requireUser, async (_req, res) => {
     try {
       const localProviders = (db.prepare('SELECT id, name, provider, api_base, api_key, is_default FROM llm_providers ORDER BY id ASC').all() as any[])
         .map((row) => ({
@@ -201,7 +201,7 @@ export function registerOrchestratorConfigRoutes({
     }
   });
 
-  app.post('/api/providers', async (req, res) => {
+  app.post('/api/providers', requireUser, async (req, res) => {
     const { name, provider, api_base, api_key, is_default } = req.body;
     const prisma = getPrisma();
     try {
@@ -241,7 +241,7 @@ export function registerOrchestratorConfigRoutes({
     }
   });
 
-  app.put('/api/providers/:id', async (req, res) => {
+  app.put('/api/providers/:id', requireUser, async (req, res) => {
     const { name, provider, api_base, api_key, is_default } = req.body;
     const prisma = getPrisma();
     try {
@@ -271,7 +271,7 @@ export function registerOrchestratorConfigRoutes({
     }
   });
 
-  app.delete('/api/providers/:id', async (req, res) => {
+  app.delete('/api/providers/:id', requireUser, async (req, res) => {
     try {
       await getPrisma().orchestratorLlmProvider.delete({ where: { id: Number(req.params.id) } });
       await refreshPersistentMirror();
