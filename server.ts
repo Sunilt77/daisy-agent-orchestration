@@ -53,6 +53,7 @@ import {
   waitForJob as waitForRuntimeJob,
   enqueueJob as enqueueRuntimeJob,
 } from './src/orchestrator/runtimeStore';
+import { acceptedExecutionResponse, shouldWaitForExecution } from './src/runtime/httpExecution';
 import { spawn } from 'child_process';
 import rateLimit from 'express-rate-limit';
 import { randomUUID } from 'node:crypto';
@@ -5578,10 +5579,10 @@ app.post('/api/workflows/:id/execute', requireUser, async (req, res) => {
     const input = req.body?.input ?? {};
     const triggerType = String(req.body?.trigger_type || workflow.trigger_type || 'manual');
     const runId = await createWorkflowRun(id, triggerType, input, workflow.graph);
-    const shouldWait = req.query.wait === 'true' || req.body?.wait === true;
+    const shouldWait = shouldWaitForExecution(req);
     if (!shouldWait) {
       const jobId = await enqueueJob('run_workflow', { workflowId: id, runId, userId });
-      return res.status(202).json({ run_id: runId, job_id: jobId, status: 'pending' });
+      return acceptedExecutionResponse(res, { run_id: runId, job_id: jobId });
     }
     await persistWorkflowRun(runId, 'running', null, []);
     const result = await runWorkflowExecution(runId, userId);
@@ -5611,10 +5612,10 @@ app.post('/api/workflows/:id/webhook', async (req, res) => {
       message: typeof req.body?.message === 'string' ? req.body.message : undefined,
     };
     const runId = await createWorkflowRun(id, 'webhook', input, workflow.graph);
-    const shouldWait = req.query.wait === 'true' || req.body?.wait === true;
+    const shouldWait = shouldWaitForExecution(req);
     if (!shouldWait) {
       const jobId = await enqueueJob('run_workflow', { workflowId: id, runId, userId: null });
-      return res.status(202).json({ run_id: runId, job_id: jobId, status: 'pending' });
+      return acceptedExecutionResponse(res, { run_id: runId, job_id: jobId });
     }
     await persistWorkflowRun(runId, 'running', null, []);
     const result = await runWorkflowExecution(runId, null);
@@ -5975,6 +5976,10 @@ app.post('/api/agents/:id/run', localRunLimiter, async (req, res) => {
           initiatedBy: 'direct_agent_api',
         });
 
+        if (!shouldWaitForExecution(req)) {
+          return acceptedExecutionResponse(res, { job_id: jobId });
+        }
+
         const result = await waitForJob(jobId, 120000);
         res.json(result);
     } catch (e: any) {
@@ -6036,9 +6041,9 @@ app.post('/api/agents/:id/delegate', localRunLimiter, async (req, res) => {
     });
     void workflow.catch(() => undefined);
 
-    const shouldWait = req.query.wait === 'true' || wait === true;
+    const shouldWait = shouldWaitForExecution(req) || wait === true;
     if (!shouldWait) {
-      return res.status(202).json({ parent_execution_id: parentExecutionId, status: 'running' });
+      return acceptedExecutionResponse(res, { parent_execution_id: parentExecutionId, status: 'running' });
     }
 
     const timeoutMs = typeof waitMs === 'number' && waitMs > 0 ? waitMs : 120000;
@@ -6058,7 +6063,7 @@ app.post('/api/agents/:id/delegate', localRunLimiter, async (req, res) => {
       await sleep(intervalMs);
     }
 
-    res.status(202).json({ parent_execution_id: parentExecutionId, status: 'running' });
+    acceptedExecutionResponse(res, { parent_execution_id: parentExecutionId, status: 'running' });
 });
 
 app.post('/api/agents/:id/chat', requireUser, localRunLimiter, async (req, res) => {
@@ -10315,8 +10320,8 @@ app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
     userId,
   });
 
-  const shouldWait = req.query.wait === 'true' || wait === true;
-  if (!shouldWait) return res.json({ executionId, jobId, status: 'pending' });
+  const shouldWait = shouldWaitForExecution(req) || wait === true;
+  if (!shouldWait) return acceptedExecutionResponse(res, { execution_id: Number(executionId), job_id: jobId });
 
   const timeoutMs = typeof waitMs === 'number' && waitMs > 0 ? waitMs : 120000;
   const intervalMs = typeof pollMs === 'number' && pollMs > 0 ? Math.min(pollMs, 5000) : 1500;
@@ -10524,6 +10529,9 @@ app.post('/api/agent-executions/:id/retry', async (req, res) => {
     initiatedBy: 'retry_agent_execution',
     retryOfExecutionId: execId,
   });
+  if (!shouldWaitForExecution(req)) {
+    return acceptedExecutionResponse(res, { job_id: jobId });
+  }
   const result = await waitForJob(jobId, 120000);
   res.json({ success: true, retry_of: execId, ...result });
 });
@@ -10541,6 +10549,9 @@ app.post('/api/agent-executions/:id/resume', async (req, res) => {
     initiatedBy: 'resume_agent_execution',
     retryOfExecutionId: execId,
   });
+  if (!shouldWaitForExecution(req)) {
+    return acceptedExecutionResponse(res, { job_id: jobId });
+  }
   const result = await waitForJob(jobId, 120000);
   res.json({ success: true, resumed_from: execId, ...result });
 });

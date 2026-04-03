@@ -1,4 +1,5 @@
 import type express from 'express';
+import { acceptedExecutionResponse, shouldWaitForExecution } from '../runtime/httpExecution';
 
 type CancelToken = { canceled: boolean; reason?: string };
 
@@ -74,7 +75,7 @@ export function registerRuntimeControlRoutes({
     const newExec = await prisma.orchestratorCrewExecution.create({
       data: {
         crewId: crew?.id ?? null,
-        status: 'running',
+        status: 'pending',
         logs: JSON.stringify([]),
         initialInput: exec.initialInput || '',
         retryOf: executionId,
@@ -83,16 +84,19 @@ export function registerRuntimeControlRoutes({
     const newExecutionId = newExec.id;
 
     db.prepare('INSERT INTO crew_executions (id, crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(newExecutionId, crew?.id ?? (hasValidCrewId ? crewId : null), 'running', JSON.stringify([]), exec.initialInput || '', executionId);
+      .run(newExecutionId, crew?.id ?? (hasValidCrewId ? crewId : null), 'pending', JSON.stringify([]), exec.initialInput || '', executionId);
 
     if (crew?.id) {
-      await enqueueJob('run_crew', {
+      const jobId = await enqueueJob('run_crew', {
         crewId: Number(crew.id),
         executionId: newExecutionId,
         initialInput: exec.initialInput || '',
         initiatedBy: 'retry_crew_execution',
         retryOfExecutionId: executionId,
       });
+      if (!shouldWaitForExecution(req)) {
+        return acceptedExecutionResponse(res, { execution_id: newExecutionId, job_id: jobId });
+      }
     } else {
       await prisma.orchestratorCrewExecutionLog.create({
         data: {
@@ -102,7 +106,7 @@ export function registerRuntimeControlRoutes({
         },
       });
     }
-    res.json({ success: true, executionId: newExecutionId, retry_of: executionId });
+    res.json({ success: true, executionId: newExecutionId, retry_of: executionId, status: 'pending' });
   });
 
   app.post('/api/executions/:id/resume', async (req, res) => {
@@ -121,7 +125,7 @@ export function registerRuntimeControlRoutes({
     const newExec = await prisma.orchestratorCrewExecution.create({
       data: {
         crewId: crew?.id ?? null,
-        status: 'running',
+        status: 'pending',
         logs: JSON.stringify([]),
         initialInput: exec.initialInput || '',
         retryOf: executionId,
@@ -130,16 +134,19 @@ export function registerRuntimeControlRoutes({
     const newExecutionId = newExec.id;
 
     db.prepare('INSERT INTO crew_executions (id, crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(newExecutionId, crew?.id ?? (hasValidCrewId ? crewId : null), 'running', JSON.stringify([]), exec.initialInput || '', executionId);
+      .run(newExecutionId, crew?.id ?? (hasValidCrewId ? crewId : null), 'pending', JSON.stringify([]), exec.initialInput || '', executionId);
 
     if (crew?.id) {
-      await enqueueJob('run_crew', {
+      const jobId = await enqueueJob('run_crew', {
         crewId: Number(crew.id),
         executionId: newExecutionId,
         initialInput: exec.initialInput || '',
         initiatedBy: 'resume_crew_execution',
         retryOfExecutionId: executionId,
       });
+      if (!shouldWaitForExecution(req)) {
+        return acceptedExecutionResponse(res, { execution_id: newExecutionId, job_id: jobId });
+      }
     } else {
       await prisma.orchestratorCrewExecutionLog.create({
         data: {
@@ -149,7 +156,7 @@ export function registerRuntimeControlRoutes({
         },
       });
     }
-    res.json({ success: true, executionId: newExecutionId, resumed_from: executionId });
+    res.json({ success: true, executionId: newExecutionId, resumed_from: executionId, status: 'pending' });
   });
 
   app.post('/api/agent-executions/:id/cancel', async (req, res) => {
