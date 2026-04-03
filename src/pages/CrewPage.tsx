@@ -509,6 +509,15 @@ export default function CrewPage() {
   const selectedThreadMessage = useMemo(() => (
     threadMessages.find((message) => Number(message.executionId || 0) === Number(selectedThreadExecutionId || 0)) || null
   ), [selectedThreadExecutionId, threadMessages]);
+  const crewInsights = useMemo(() => {
+    const assignedAgentCount = new Set(tasks.map((task) => Number(task.agent_id)).filter((value) => Number.isFinite(value))).size;
+    return {
+      tasks: tasks.length,
+      assignedAgents: assignedAgentCount,
+      threadMessages: threadMessages.length,
+      linkedRuns: threadLinkedExecutionIds.length,
+    };
+  }, [tasks, threadMessages.length, threadLinkedExecutionIds.length]);
 
   const handleExposeToggle = async (nextValue: boolean) => {
     if (!crew) return;
@@ -595,6 +604,33 @@ export default function CrewPage() {
 
   return (
     <div className="space-y-8">
+      {!isEditingCrew && (
+        <div className="swarm-hero p-6">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h1 className="text-3xl font-black text-white">{crew.name}</h1>
+              <p className="text-slate-300 mt-1">Run coordinated multi-agent workflows with live logs, routing policy controls, and thread continuity.</p>
+            </div>
+            <div className="rounded-full bg-white/10 border border-white/15 px-3 py-1 text-xs font-semibold text-white">
+              {isRunning ? 'Execution Live' : 'Ready'}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-5">
+            {[
+              { label: 'Tasks', value: crewInsights.tasks },
+              { label: 'Assigned Agents', value: crewInsights.assignedAgents },
+              { label: 'Thread Messages', value: crewInsights.threadMessages },
+              { label: 'Linked Runs', value: crewInsights.linkedRuns },
+            ].map((item) => (
+              <div key={item.label} className="telemetry-tile p-4">
+                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">{item.label}</div>
+                <div className="mt-2 text-2xl font-black text-white">{item.value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center gap-4 mb-6">
         <Link to="/" className="p-2 hover:bg-slate-100 rounded-full text-slate-500">
           <ArrowLeft size={20} />
