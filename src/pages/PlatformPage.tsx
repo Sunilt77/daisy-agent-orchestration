@@ -289,6 +289,8 @@ export default function PlatformPage() {
   const [tenantAccessDraft, setTenantAccessDraft] = useState<AccessPolicy>({ agents_mode: 'all', tools_mode: 'all', mcp_mode: 'all', allowed_agent_ids: [], allowed_tool_ids: [], allowed_mcp_tool_ids: [], allowed_mcp_bundle_ids: [] });
   const [selectedTenant, setSelectedTenant] = useState<string>('');
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
+  const [planSearch, setPlanSearch] = useState('');
+  const [planStatusFilter, setPlanStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [planForm, setPlanForm] = useState<Omit<Plan, 'id'>>(EMPTY_PLAN);
   const [tenantPolicyTenantId, setTenantPolicyTenantId] = useState<string>('');
   const [tenantPolicyDraft, setTenantPolicyDraft] = useState<Record<string, string>>({});
@@ -715,6 +717,17 @@ export default function PlatformPage() {
       );
     });
   }, [learningInsights.preferences, learningQuery, learningScope]);
+
+  const filteredPlans = useMemo(() => {
+    const q = planSearch.trim().toLowerCase();
+    return plans.filter((plan) => {
+      const isActive = plan.is_active !== false;
+      if (planStatusFilter === 'active' && !isActive) return false;
+      if (planStatusFilter === 'inactive' && isActive) return false;
+      if (!q) return true;
+      return [plan.name, plan.description || '', plan.id].some((value) => String(value || '').toLowerCase().includes(q));
+    });
+  }, [plans, planSearch, planStatusFilter]);
 
   return (
     <div className="space-y-7">
@@ -1631,6 +1644,43 @@ export default function PlatformPage() {
           <input className="ui-input" type="number" placeholder="Max tools" value={planForm.max_linked_tools || 0} onChange={(e) => setPlanForm((p) => ({ ...p, max_linked_tools: Number(e.target.value || 0) }))} />
           <input className="ui-input" type="number" placeholder="Max MCP bundles" value={planForm.max_linked_mcp_bundles || 0} onChange={(e) => setPlanForm((p) => ({ ...p, max_linked_mcp_bundles: Number(e.target.value || 0) }))} />
         </div>
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <div className="relative w-72">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              value={planSearch}
+              onChange={(e) => setPlanSearch(e.target.value)}
+              className="w-full pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-lg"
+              placeholder="Search plans..."
+            />
+          </div>
+          {[
+            { key: 'all', label: `All (${plans.length})` },
+            { key: 'active', label: `Active (${plans.filter((p) => p.is_active !== false).length})` },
+            { key: 'inactive', label: `Inactive (${plans.filter((p) => p.is_active === false).length})` },
+          ].map((chip) => (
+            <button
+              key={chip.key}
+              onClick={() => setPlanStatusFilter(chip.key as typeof planStatusFilter)}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                planStatusFilter === chip.key ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+          <button
+            onClick={() => { setPlanSearch(''); setPlanStatusFilter('all'); }}
+            disabled={!planSearch.trim() && planStatusFilter === 'all'}
+            className="ml-auto inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:hover:bg-white"
+          >
+            <RotateCcw size={11} />
+            Reset
+          </button>
+          <div className="w-full text-xs text-slate-500">
+            <span className="font-semibold text-slate-700">{filteredPlans.length}</span> visible of <span className="font-semibold text-slate-700">{plans.length}</span>
+          </div>
+        </div>
         <div className="table-shell">
           <table className="w-full text-sm">
             <thead>
@@ -1645,7 +1695,9 @@ export default function PlatformPage() {
             <tbody>
               {plans.length === 0 ? (
                 <tr><td colSpan={5} className="px-3 py-3 text-slate-500">No plans yet.</td></tr>
-              ) : plans.map((p) => (
+              ) : filteredPlans.length === 0 ? (
+                <tr><td colSpan={5} className="px-3 py-3 text-slate-500">No plans match the current filters.</td></tr>
+              ) : filteredPlans.map((p) => (
                 <tr key={p.id} className="border-t border-slate-100">
                   <td className="px-3 py-2 font-semibold text-slate-900">{p.name}</td>
                   <td className="px-3 py-2">{p.daily_message_cap}</td>
