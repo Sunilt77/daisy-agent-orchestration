@@ -49,7 +49,7 @@ interface Crew {
   id: number;
   name: string;
   description: string;
-  process: 'sequential' | 'hierarchical';
+  process: 'sequential' | 'hierarchical' | 'parallel';
   is_exposed: boolean;
   learning_enabled?: boolean;
   coordinator_agent_id?: number | null;
@@ -85,7 +85,7 @@ export default function CrewsPage() {
   const [crewsPage, setCrewsPage] = useState(1);
   const [crewsPageSize, setCrewsPageSize] = useState(8);
   const [crewSearch, setCrewSearch] = useState('');
-  const [processFilter, setProcessFilter] = useState<'all' | 'sequential' | 'hierarchical'>('all');
+  const [processFilter, setProcessFilter] = useState<'all' | 'sequential' | 'hierarchical' | 'parallel'>('all');
   const [exposureFilter, setExposureFilter] = useState<'all' | 'exposed' | 'local'>('all');
   const [crewSortMode, setCrewSortMode] = useState<'name' | 'size' | 'process'>('size');
   const [crewView, setCrewView] = useState<'grid' | 'list'>('grid');
@@ -96,7 +96,7 @@ export default function CrewsPage() {
   const [formData, setFormData] = useState({
     name: '',
     description: '',
-    process: 'sequential' as 'sequential' | 'hierarchical',
+    process: 'sequential' as 'sequential' | 'hierarchical' | 'parallel',
     agentIds: [] as number[],
     coordinator_agent_id: null as number | null,
     is_exposed: false,
@@ -136,7 +136,7 @@ export default function CrewsPage() {
   const [buildEvents, setBuildEvents] = useState<{message: string, type: 'status' | 'error' | 'done', id?: number}[]>([]);
   const [autoBuildProvider, setAutoBuildProvider] = useState('google');
   const [autoBuildModel, setAutoBuildModel] = useState('');
-  const [autoBuildProcessPreference, setAutoBuildProcessPreference] = useState<'auto' | 'sequential' | 'hierarchical'>('auto');
+  const [autoBuildProcessPreference, setAutoBuildProcessPreference] = useState<'auto' | 'sequential' | 'hierarchical' | 'parallel'>('auto');
   const [autoBuildProjectId, setAutoBuildProjectId] = useState('');
 
   const crewConfigOptions: Array<{ key: CrewOptionalConfig; label: string }> = [
@@ -474,10 +474,12 @@ export default function CrewsPage() {
 
   const crewInsights = useMemo(() => {
     const hierarchical = crews.filter((crew) => crew.process === 'hierarchical').length;
+    const parallel = crews.filter((crew) => crew.process === 'parallel').length;
     const exposed = crews.filter((crew) => crew.is_exposed).length;
     const totalAgentsAssigned = crews.reduce((sum, crew) => sum + crew.agents.length, 0);
     return {
       hierarchical,
+      parallel,
       exposed,
       totalAgentsAssigned,
       avgTeamSize: crews.length ? (totalAgentsAssigned / crews.length).toFixed(1) : '0.0',
@@ -678,7 +680,7 @@ export default function CrewsPage() {
             <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-600">Crew Strategy</div>
             <h3 className="mt-2 text-xl font-black text-slate-900">Use hierarchical crews for coordinator plus specialist teams.</h3>
             <p className="mt-2 text-sm leading-6 text-slate-600">
-              Sequential crews are great for fixed handoff chains. Hierarchical crews are better when one coordinator should route work to specialists with different tool or MCP ownership and then synthesize the final answer.
+              Sequential crews are great for fixed handoff chains. Parallel crews are best for independent workstreams. Hierarchical crews are best when one coordinator should route specialist delegations and synthesize the final answer.
             </p>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 lg:w-[640px]">
@@ -691,6 +693,10 @@ export default function CrewsPage() {
               <div className="mt-2 text-sm text-slate-700">Best for supervisor routing, parallel specialist work, and final synthesis from delegated child runs.</div>
             </div>
             <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Parallel</div>
+              <div className="mt-2 text-sm text-slate-700">Best for independent specialist tasks that run concurrently and merge into one synthesized output.</div>
+            </div>
+            <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
               <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Setup Tip</div>
               <div className="mt-2 text-sm text-slate-700">Mark one agent as `supervisor`, attach domain integrations to specialists, and let the crew coordinator orchestrate.</div>
             </div>
@@ -698,10 +704,11 @@ export default function CrewsPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
         {[
           { label: 'Total Crews', value: crews.length.toString() },
           { label: 'Hierarchical', value: crewInsights.hierarchical.toString() },
+          { label: 'Parallel', value: crewInsights.parallel.toString() },
           { label: 'Exposed', value: crewInsights.exposed.toString() },
           { label: 'Avg Team Size', value: crewInsights.avgTeamSize },
         ].map((item) => (
@@ -726,10 +733,11 @@ export default function CrewsPage() {
           <select
             className="rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
             value={processFilter}
-            onChange={(e) => setProcessFilter(e.target.value as 'all' | 'sequential' | 'hierarchical')}
+            onChange={(e) => setProcessFilter(e.target.value as 'all' | 'sequential' | 'hierarchical' | 'parallel')}
           >
             <option value="all">All Processes</option>
             <option value="hierarchical">Hierarchical</option>
+            <option value="parallel">Parallel</option>
             <option value="sequential">Sequential</option>
           </select>
           <select
@@ -811,7 +819,11 @@ export default function CrewsPage() {
                   <div className="flex items-center gap-3 mb-1">
                     <h3 className="text-xl font-bold text-slate-900 truncate">{crew.name}</h3>
                     <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
-                      crew.process === 'hierarchical' ? 'bg-amber-100 text-amber-700' : 'bg-indigo-100 text-indigo-700'
+                      crew.process === 'hierarchical'
+                        ? 'bg-amber-100 text-amber-700'
+                        : crew.process === 'parallel'
+                          ? 'bg-cyan-100 text-cyan-700'
+                          : 'bg-indigo-100 text-indigo-700'
                     }`}>
                       {crew.process}
                     </span>
@@ -1001,15 +1013,16 @@ export default function CrewsPage() {
                             <select
                                 className="w-full px-4 py-3 border border-slate-200 rounded-2xl focus:ring-4 focus:ring-purple-500/10 outline-none bg-slate-50/50 font-bold text-slate-700 transition-all appearance-none"
                                 value={autoBuildProcessPreference}
-                                onChange={(e) => setAutoBuildProcessPreference(e.target.value as 'auto' | 'sequential' | 'hierarchical')}
+                                onChange={(e) => setAutoBuildProcessPreference(e.target.value as 'auto' | 'sequential' | 'hierarchical' | 'parallel')}
                                 disabled={isBuilding}
                             >
                                 <option value="auto">Auto Decide</option>
                                 <option value="sequential">Sequential</option>
+                                <option value="parallel">Parallel</option>
                                 <option value="hierarchical">Hierarchical</option>
                             </select>
                             <p className="text-[11px] text-slate-500">
-                              Hierarchical crews create a coordinator/supervisor. Sequential crews pass work step by step.
+                              Parallel crews run independent specialists together. Hierarchical crews create a coordinator/supervisor. Sequential crews pass work step by step.
                             </p>
                           </div>
 
@@ -1152,7 +1165,7 @@ export default function CrewsPage() {
                         className="w-full ui-select !rounded-2xl !bg-slate-50 !border-slate-200 focus:!bg-white !font-bold text-slate-900 appearance-none"
                         value={formData.process}
                         onChange={e => {
-                          const nextProcess = e.target.value as 'sequential' | 'hierarchical';
+                          const nextProcess = e.target.value as 'sequential' | 'hierarchical' | 'parallel';
                           setFormData((prev) => ({
                             ...prev,
                             process: nextProcess,
@@ -1163,6 +1176,7 @@ export default function CrewsPage() {
                         }}
                       >
                         <option value="sequential">Sequential Loop</option>
+                        <option value="parallel">Parallel Fan-Out</option>
                         <option value="hierarchical">Hierarchical Stack</option>
                       </select>
                     </div>
@@ -1219,7 +1233,7 @@ export default function CrewsPage() {
                         ))}
                     </select>
                     <p className="text-[11px] text-slate-500">
-                      For hierarchical crews, this agent drives planning and final synthesis.
+                      For hierarchical and parallel crews, this agent can drive final synthesis.
                     </p>
                   </div>
 
@@ -1242,15 +1256,23 @@ export default function CrewsPage() {
                   <div className={`rounded-2xl border px-4 py-3 ${
                     formData.process === 'hierarchical'
                       ? 'bg-amber-50 border-amber-200 text-amber-800'
-                      : 'bg-indigo-50 border-indigo-200 text-indigo-800'
+                      : formData.process === 'parallel'
+                        ? 'bg-cyan-50 border-cyan-200 text-cyan-800'
+                        : 'bg-indigo-50 border-indigo-200 text-indigo-800'
                   }`}>
                     <div className="text-xs font-bold uppercase tracking-wider mb-1">
-                      {formData.process === 'hierarchical' ? 'Hierarchical Handshake' : 'Sequential Handshake'}
+                      {formData.process === 'hierarchical'
+                        ? 'Hierarchical Handshake'
+                        : formData.process === 'parallel'
+                          ? 'Parallel Handshake'
+                          : 'Sequential Handshake'}
                     </div>
                     <div className="text-sm">
                       {formData.process === 'hierarchical'
                         ? 'Coordinator plans/delegates, then synthesizes a cumulative final answer from all agent outputs.'
-                        : 'Agents run in selected order. Each step receives the previous step output and contributes to one final cumulative answer.'}
+                        : formData.process === 'parallel'
+                          ? 'Agents run concurrently as independent specialists, then one synthesis step merges all outputs into a final answer.'
+                          : 'Agents run in selected order. Each step receives the previous step output and contributes to one final cumulative answer.'}
                     </div>
                   </div>
 

@@ -594,6 +594,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 
 const JOB_CONCURRENCY = Number(process.env.JOB_CONCURRENCY) || 2;
 const JOB_TIMEOUT_MS = Number(process.env.JOB_TIMEOUT_MS) || 120000;
+const CREW_PARALLEL_TASK_CONCURRENCY = Math.max(1, Number(process.env.CREW_PARALLEL_TASK_CONCURRENCY) || 3);
 const JOB_PRIORITY = {
   CRITICAL: 300,
   HIGH: 200,
@@ -616,6 +617,13 @@ function readTenantKey(rawValue: unknown, fallback: string = 'global') {
   const value = String(rawValue ?? '').trim();
   if (!value) return fallback;
   return value.slice(0, 120);
+}
+
+function normalizeCrewProcess(value: unknown): 'sequential' | 'hierarchical' | 'parallel' {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'hierarchical') return 'hierarchical';
+  if (normalized === 'parallel') return 'parallel';
+  return 'sequential';
 }
 
 function getCancelToken(map: Map<number, CancelToken>, id: number) {
@@ -7552,7 +7560,7 @@ app.post('/api/crews/autobuild', async (req, res) => {
         if (!design.agents || !Array.isArray(design.agents)) throw new Error("Invalid design: 'agents' array is missing");
         if (!design.tasks || !Array.isArray(design.tasks)) throw new Error("Invalid design: 'tasks' array is missing");
 
-        const normalizedProcess = design.process === 'hierarchical' ? 'hierarchical' : 'sequential';
+        const normalizedProcess = normalizeCrewProcess(design.process);
         const normalizedAgents = design.agents.map((agentDef: any, idx: number) => ({
             ...agentDef,
             temp_id: String(agentDef?.temp_id || `agent_${idx + 1}`),
@@ -7885,7 +7893,7 @@ app.post('/api/crews/from-template', requireUser, async (req, res) => {
 
 app.post('/api/crews', requireUser, async (req, res) => {
   const { name, description, process, agentIds, project_id, is_exposed, learning_enabled, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id } = req.body;
-  const normalizedProcess = process === 'hierarchical' ? 'hierarchical' : 'sequential';
+  const normalizedProcess = normalizeCrewProcess(process);
   const normalizedAgentIds = Array.isArray(agentIds)
     ? Array.from(new Set(agentIds.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id))))
     : [];
@@ -7936,13 +7944,18 @@ app.post('/api/crews', requireUser, async (req, res) => {
       await prisma.orchestratorTask.createMany({
         data: orderedAgents.map((agent: any, i: number) => {
           const isCoordinatorStep = normalizedProcess === 'hierarchical' && i === 0;
+          const isParallelStep = normalizedProcess === 'parallel';
           return {
             description: isCoordinatorStep
               ? 'Plan and coordinate the objective. Break work into delegated sub-goals and provide explicit handoff instructions for downstream agents.'
-              : `Execute step ${i + 1} as ${agent.role || 'specialist'} and provide a structured handoff for the next agent.`,
+              : isParallelStep
+                ? `Execute parallel workstream ${i + 1} as ${agent.role || 'specialist'} and return an independently complete contribution for synthesis.`
+                : `Execute step ${i + 1} as ${agent.role || 'specialist'} and provide a structured handoff for the next agent.`,
             expectedOutput: isCoordinatorStep
               ? 'A coordination plan with delegated objectives and success criteria.'
-              : 'Concrete output for this step, plus concise handoff notes for downstream synthesis.',
+              : isParallelStep
+                ? 'Standalone specialist output suitable for final synthesis with other parallel contributors.'
+                : 'Concrete output for this step, plus concise handoff notes for downstream synthesis.',
             agentId: agent.id,
             crewId,
           };
@@ -7958,7 +7971,7 @@ app.post('/api/crews', requireUser, async (req, res) => {
 
 app.put('/api/crews/:id', requireUser, async (req, res) => {
   const { name, description, process, agentIds, project_id, is_exposed, learning_enabled, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id } = req.body;
-    const normalizedProcess = process === 'hierarchical' ? 'hierarchical' : 'sequential';
+    const normalizedProcess = normalizeCrewProcess(process);
     const normalizedAgentIds = Array.isArray(agentIds)
       ? Array.from(new Set(agentIds.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id))))
       : [];
@@ -10082,10 +10095,12 @@ async function runCrewExecution(
             let plannerInputs: string[] | null = null;
             let plannerAgentForHierarchy: any | null = null;
             const taskOutputs: Array<{ agentName: string; agentRole: string; task: string; output: string }> = [];
+            const parallelFailures: Array<{ step: number; agentName: string; task: string; error: string }> = [];
             const startedAt = Date.now();
             const maxRuntimeMs = normalizeNumber(crewRow?.max_runtime_ms);
             const maxCostUsd = normalizeNumber(crewRow?.max_cost_usd);
             const maxToolCalls = normalizeNumber(crewRow?.max_tool_calls);
+            const isParallelProcess = process === 'parallel';
             
             // Helper to append logs safely
             let pendingCrewLogWrite = Promise.resolve();
@@ -10294,133 +10309,96 @@ async function runCrewExecution(
                 }
             }
 
-            for (let i = 0; i < tasks.length; i++) {
-                if (maxRuntimeMs && (Date.now() - startedAt) > maxRuntimeMs) {
-                    cancelToken.canceled = true;
-                    cancelToken.reason = `Guardrail: max runtime ${maxRuntimeMs}ms exceeded`;
-                }
-                if (cancelToken.canceled) {
-                    appendLog({ type: 'canceled', message: cancelToken.reason || 'Execution canceled' });
-                    await flushCrewLogWrites();
-                    await syncCrewExecutionStatus({
-                      db,
-                      prisma,
-                      executionId: Number(executionId),
-                      status: 'canceled',
-                    });
-                    span.setStatus({ code: SpanStatusCode.OK, message: 'canceled' });
-                    return;
-                }
-                const task = tasks[i];
-                const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(task.agent_id) as any;
-                if (!agent) {
-                    throw new Error(`Agent not found for task ${task?.id ?? i + 1}`);
-                }
-                
-                appendLog({ type: 'start', agent: agent.name, task: task.description });
-
-                const recentOutputsText = taskOutputs
-                  .slice(-2)
-                  .map((entry, idx) => `#${taskOutputs.length - 1 + idx}\nAgent: ${entry.agentName} (${entry.agentRole})\nTask: ${entry.task}\nOutput:\n${entry.output}`)
-                  .join('\n\n');
-                const handoffContext =
-                  process === 'sequential'
-                    ? (lastOutput ? `Previous agent output:\n${lastOutput}\n` : context)
-                    : `${context}${lastOutput ? `\n[Handoff]\nPrevious agent output:\n${lastOutput}\n` : ''}${recentOutputsText ? `\nRecent Upstream Outputs:\n${recentOutputsText}\n` : ''}`;
-
-                const taskDescriptionParts: string[] = [String(task.description || '')];
-                if (crewGuidance) {
-                    taskDescriptionParts.push(`Crew Guidance:\n${crewGuidance}`);
-                }
-                const planned = plannerInputs && plannerInputs[i] ? String(plannerInputs[i]) : '';
-                if (i === 0 && initialInput) {
-                    taskDescriptionParts.push(`User Input:\n${initialInput}`);
-                }
-                if (planned) {
-                    taskDescriptionParts.push(`Planner Input:\n${planned}`);
-                } else if (lastOutput) {
-                    taskDescriptionParts.push(`Previous Agent Output:\n${lastOutput}`);
-                }
-                const handoffPacket = {
-                  objective: initialInput || '',
-                  process,
-                  step: i + 1,
-                  total_steps: tasks.length,
-                  assigned_agent: { id: agent.id, name: agent.name, role: agent.role },
-                  upstream: taskOutputs.slice(-3).map((entry) => ({
-                    agent: entry.agentName,
-                    role: entry.agentRole,
-                    task: entry.task,
-                    output: entry.output,
-                  })),
-                };
-                taskDescriptionParts.push(`Handoff Packet (JSON):\n${JSON.stringify(handoffPacket, null, 2)}`);
-                const taskWithInput = {
-                    ...task,
-                    description: taskDescriptionParts.filter(Boolean).join('\n\n'),
-                };
-
-                // runAgent is already instrumented, so it will create a child span
-                const guardrailLogCallback = (log: any) => {
-                  appendLog(log);
-                  if (log?.type === 'tool_call') {
-                    executionToolCalls += 1;
-                    if (maxToolCalls && executionToolCalls > maxToolCalls) {
+            if (isParallelProcess && tasks.length > 0) {
+                appendLog({
+                  type: 'thought',
+                  agent: 'system',
+                  message: `Launching ${tasks.length} tasks in parallel with concurrency ${CREW_PARALLEL_TASK_CONCURRENCY}.`,
+                });
+                let queueCursor = 0;
+                const runParallelWorker = async () => {
+                  while (queueCursor < tasks.length) {
+                    const taskIndex = queueCursor;
+                    queueCursor += 1;
+                    const task = tasks[taskIndex];
+                    if (maxRuntimeMs && (Date.now() - startedAt) > maxRuntimeMs) {
                       cancelToken.canceled = true;
-                      cancelToken.reason = `Guardrail: max tool calls ${maxToolCalls} exceeded`;
+                      cancelToken.reason = `Guardrail: max runtime ${maxRuntimeMs}ms exceeded`;
+                    }
+                    if (cancelToken.canceled) return;
+                    const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(task.agent_id) as any;
+                    if (!agent) {
+                      parallelFailures.push({
+                        step: taskIndex + 1,
+                        agentName: `Agent ${task?.agent_id ?? 'unknown'}`,
+                        task: String(task?.description || ''),
+                        error: `Agent not found for task ${task?.id ?? taskIndex + 1}`,
+                      });
+                      appendLog({ type: 'error', message: `Agent not found for task ${task?.id ?? taskIndex + 1}` });
+                      continue;
+                    }
+                    appendLog({ type: 'start', agent: agent.name, task: task.description, mode: 'parallel' });
+                    const taskDescriptionParts: string[] = [String(task.description || '')];
+                    if (crewGuidance) taskDescriptionParts.push(`Crew Guidance:\n${crewGuidance}`);
+                    if (initialInput) taskDescriptionParts.push(`User Input:\n${initialInput}`);
+                    taskDescriptionParts.push('Parallel Mode: focus on your specialization and return a standalone output for final synthesis.');
+                    const taskWithInput = { ...task, description: taskDescriptionParts.filter(Boolean).join('\n\n') };
+                    const guardrailLogCallback = (log: any) => {
+                      appendLog(log);
+                      if (log?.type === 'tool_call') {
+                        executionToolCalls += 1;
+                        if (maxToolCalls && executionToolCalls > maxToolCalls) {
+                          cancelToken.canceled = true;
+                          cancelToken.reason = `Guardrail: max tool calls ${maxToolCalls} exceeded`;
+                        }
+                      }
+                    };
+                    try {
+                      const result = await runAgent(
+                        agent,
+                        taskWithInput,
+                        context,
+                        guardrailLogCallback,
+                        invocation ?? { initiatedBy: 'crew_kickoff' },
+                        { retryOfExecutionId: runMeta?.retryOfExecutionId ?? null }
+                      );
+                      taskOutputs.push({
+                        agentName: String(agent.name || `Agent ${agent.id}`),
+                        agentRole: String(agent.role || 'specialist'),
+                        task: String(task.description || ''),
+                        output: String(result.text || ''),
+                      });
+                      executionPromptTokens += result.usage.prompt_tokens;
+                      executionCompletionTokens += result.usage.completion_tokens;
+                      executionCost += result.usage.cost;
+                      appendLog({ type: 'finish', agent: agent.name, result: result.text, usage: result.usage, mode: 'parallel' });
+                      if (maxCostUsd && executionCost > maxCostUsd) {
+                        cancelToken.canceled = true;
+                        cancelToken.reason = `Guardrail: max cost $${maxCostUsd} exceeded`;
+                      }
+                    } catch (error: any) {
+                      const message = formatExecutionError(error, 'Parallel task failed');
+                      parallelFailures.push({
+                        step: taskIndex + 1,
+                        agentName: String(agent.name || `Agent ${agent.id}`),
+                        task: String(task.description || ''),
+                        error: message,
+                      });
+                      appendLog({ type: 'error', agent: agent.name, task: task.description, message, mode: 'parallel' });
                     }
                   }
                 };
-                const result = await runAgent(
-                  agent,
-                  taskWithInput,
-                  handoffContext,
-                  guardrailLogCallback,
-                  invocation ?? { initiatedBy: 'crew_kickoff' },
-                  { retryOfExecutionId: runMeta?.retryOfExecutionId ?? null }
-                );
-                
-                if (process === 'sequential') {
-                    lastOutput = result.text;
-                } else {
-                    context += `\nOutput from ${agent.role} on task "${task.description}":\n${result.text}\n`;
-                    lastOutput = result.text;
+                const workerCount = Math.min(tasks.length, CREW_PARALLEL_TASK_CONCURRENCY);
+                await Promise.all(Array.from({ length: workerCount }, () => runParallelWorker()));
+                if (parallelFailures.length) {
+                  appendLog({
+                    type: 'crew_parallel_summary',
+                    total_tasks: tasks.length,
+                    successful_tasks: taskOutputs.length,
+                    failed_tasks: parallelFailures.length,
+                    failures: parallelFailures,
+                  });
                 }
-                taskOutputs.push({
-                  agentName: String(agent.name || `Agent ${agent.id}`),
-                  agentRole: String(agent.role || 'specialist'),
-                  task: String(task.description || ''),
-                  output: String(result.text || ''),
-                });
-
-                if (process !== 'hierarchical' && i === 0 && tasks.length > 1) {
-                    try {
-                        const parsed = JSON.parse(result.text);
-                        const plan = Array.isArray(parsed?.plan) ? parsed.plan : null;
-                        if (plan && plan.length) {
-                            plannerInputs = plan.map((p: any) => String(p));
-                            appendLog({ type: 'planner_handoff', plan: plannerInputs });
-                        } else if (parsed?.next_input) {
-                            plannerInputs = [String(parsed.next_input)];
-                            appendLog({ type: 'planner_handoff', plan: plannerInputs });
-                        }
-                    } catch {
-                        // Ignore planner JSON if it's not valid
-                    }
-                }
-                
-                // Track usage
-                executionPromptTokens += result.usage.prompt_tokens;
-                executionCompletionTokens += result.usage.completion_tokens;
-                executionCost += result.usage.cost;
-                if (maxCostUsd && executionCost > maxCostUsd) {
-                  cancelToken.canceled = true;
-                  cancelToken.reason = `Guardrail: max cost $${maxCostUsd} exceeded`;
-                }
-
-                appendLog({ type: 'finish', agent: agent.name, result: result.text, usage: result.usage });
-                
-                // Update execution stats progressively
                 await syncCrewExecutionMetrics({
                   db,
                   prisma,
@@ -10429,6 +10407,158 @@ async function runCrewExecution(
                   completionTokens: executionCompletionTokens,
                   totalCost: executionCost,
                 });
+                if (cancelToken.canceled) {
+                  appendLog({ type: 'canceled', message: cancelToken.reason || 'Execution canceled' });
+                  await flushCrewLogWrites();
+                  await syncCrewExecutionStatus({
+                    db,
+                    prisma,
+                    executionId: Number(executionId),
+                    status: 'canceled',
+                  });
+                  span.setStatus({ code: SpanStatusCode.OK, message: 'canceled' });
+                  return;
+                }
+                if (!taskOutputs.length && parallelFailures.length) {
+                  throw new Error(`All parallel tasks failed (${parallelFailures.length}/${tasks.length}).`);
+                }
+            } else {
+              for (let i = 0; i < tasks.length; i++) {
+                  if (maxRuntimeMs && (Date.now() - startedAt) > maxRuntimeMs) {
+                      cancelToken.canceled = true;
+                      cancelToken.reason = `Guardrail: max runtime ${maxRuntimeMs}ms exceeded`;
+                  }
+                  if (cancelToken.canceled) {
+                      appendLog({ type: 'canceled', message: cancelToken.reason || 'Execution canceled' });
+                      await flushCrewLogWrites();
+                      await syncCrewExecutionStatus({
+                        db,
+                        prisma,
+                        executionId: Number(executionId),
+                        status: 'canceled',
+                      });
+                      span.setStatus({ code: SpanStatusCode.OK, message: 'canceled' });
+                      return;
+                  }
+                  const task = tasks[i];
+                  const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(task.agent_id) as any;
+                  if (!agent) {
+                      throw new Error(`Agent not found for task ${task?.id ?? i + 1}`);
+                  }
+                  
+                  appendLog({ type: 'start', agent: agent.name, task: task.description });
+
+                  const recentOutputsText = taskOutputs
+                    .slice(-2)
+                    .map((entry, idx) => `#${taskOutputs.length - 1 + idx}\nAgent: ${entry.agentName} (${entry.agentRole})\nTask: ${entry.task}\nOutput:\n${entry.output}`)
+                    .join('\n\n');
+                  const handoffContext =
+                    process === 'sequential'
+                      ? (lastOutput ? `Previous agent output:\n${lastOutput}\n` : context)
+                      : `${context}${lastOutput ? `\n[Handoff]\nPrevious agent output:\n${lastOutput}\n` : ''}${recentOutputsText ? `\nRecent Upstream Outputs:\n${recentOutputsText}\n` : ''}`;
+
+                  const taskDescriptionParts: string[] = [String(task.description || '')];
+                  if (crewGuidance) {
+                      taskDescriptionParts.push(`Crew Guidance:\n${crewGuidance}`);
+                  }
+                  const planned = plannerInputs && plannerInputs[i] ? String(plannerInputs[i]) : '';
+                  if (i === 0 && initialInput) {
+                      taskDescriptionParts.push(`User Input:\n${initialInput}`);
+                  }
+                  if (planned) {
+                      taskDescriptionParts.push(`Planner Input:\n${planned}`);
+                  } else if (lastOutput) {
+                      taskDescriptionParts.push(`Previous Agent Output:\n${lastOutput}`);
+                  }
+                  const handoffPacket = {
+                    objective: initialInput || '',
+                    process,
+                    step: i + 1,
+                    total_steps: tasks.length,
+                    assigned_agent: { id: agent.id, name: agent.name, role: agent.role },
+                    upstream: taskOutputs.slice(-3).map((entry) => ({
+                      agent: entry.agentName,
+                      role: entry.agentRole,
+                      task: entry.task,
+                      output: entry.output,
+                    })),
+                  };
+                  taskDescriptionParts.push(`Handoff Packet (JSON):\n${JSON.stringify(handoffPacket, null, 2)}`);
+                  const taskWithInput = {
+                      ...task,
+                      description: taskDescriptionParts.filter(Boolean).join('\n\n'),
+                  };
+
+                  // runAgent is already instrumented, so it will create a child span
+                  const guardrailLogCallback = (log: any) => {
+                    appendLog(log);
+                    if (log?.type === 'tool_call') {
+                      executionToolCalls += 1;
+                      if (maxToolCalls && executionToolCalls > maxToolCalls) {
+                        cancelToken.canceled = true;
+                        cancelToken.reason = `Guardrail: max tool calls ${maxToolCalls} exceeded`;
+                      }
+                    }
+                  };
+                  const result = await runAgent(
+                    agent,
+                    taskWithInput,
+                    handoffContext,
+                    guardrailLogCallback,
+                    invocation ?? { initiatedBy: 'crew_kickoff' },
+                    { retryOfExecutionId: runMeta?.retryOfExecutionId ?? null }
+                  );
+                  
+                  if (process === 'sequential') {
+                      lastOutput = result.text;
+                  } else {
+                      context += `\nOutput from ${agent.role} on task "${task.description}":\n${result.text}\n`;
+                      lastOutput = result.text;
+                  }
+                  taskOutputs.push({
+                    agentName: String(agent.name || `Agent ${agent.id}`),
+                    agentRole: String(agent.role || 'specialist'),
+                    task: String(task.description || ''),
+                    output: String(result.text || ''),
+                  });
+
+                  if (process !== 'hierarchical' && i === 0 && tasks.length > 1) {
+                      try {
+                          const parsed = JSON.parse(result.text);
+                          const plan = Array.isArray(parsed?.plan) ? parsed.plan : null;
+                          if (plan && plan.length) {
+                              plannerInputs = plan.map((p: any) => String(p));
+                              appendLog({ type: 'planner_handoff', plan: plannerInputs });
+                          } else if (parsed?.next_input) {
+                              plannerInputs = [String(parsed.next_input)];
+                              appendLog({ type: 'planner_handoff', plan: plannerInputs });
+                          }
+                      } catch {
+                          // Ignore planner JSON if it's not valid
+                      }
+                  }
+                  
+                  // Track usage
+                  executionPromptTokens += result.usage.prompt_tokens;
+                  executionCompletionTokens += result.usage.completion_tokens;
+                  executionCost += result.usage.cost;
+                  if (maxCostUsd && executionCost > maxCostUsd) {
+                    cancelToken.canceled = true;
+                    cancelToken.reason = `Guardrail: max cost $${maxCostUsd} exceeded`;
+                  }
+
+                  appendLog({ type: 'finish', agent: agent.name, result: result.text, usage: result.usage });
+                  
+                  // Update execution stats progressively
+                  await syncCrewExecutionMetrics({
+                    db,
+                    prisma,
+                    executionId: Number(executionId),
+                    promptTokens: executionPromptTokens,
+                    completionTokens: executionCompletionTokens,
+                    totalCost: executionCost,
+                  });
+              }
             }
 
             // Always synthesize a cumulative crew answer so users get a real multi-agent final output.
@@ -10442,7 +10572,12 @@ async function runCrewExecution(
                 const synthesisContext = `${context}\n\nCollected Task Outputs:\n${synthesisSource}`;
                 const synthesisAgent = process === 'hierarchical'
                   ? (plannerAgentForHierarchy || db.prepare('SELECT * FROM agents WHERE id = ?').get(tasks[0]?.agent_id))
-                  : db.prepare('SELECT * FROM agents WHERE id = ?').get(tasks[tasks.length - 1]?.agent_id);
+                  : process === 'parallel'
+                    ? (
+                        db.prepare('SELECT * FROM agents WHERE id = ?').get(Number(crewRow?.coordinator_agent_id || 0)) ||
+                        db.prepare('SELECT * FROM agents WHERE id = ?').get(tasks[0]?.agent_id)
+                      )
+                    : db.prepare('SELECT * FROM agents WHERE id = ?').get(tasks[tasks.length - 1]?.agent_id);
 
                 appendLog({
                   type: 'thought',

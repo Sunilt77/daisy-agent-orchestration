@@ -558,6 +558,7 @@ export default function CrewPage() {
                 onChange={e => setEditCrew({...editCrew, process: e.target.value})}
               >
                 <option value="sequential">Sequential</option>
+                <option value="parallel">Parallel</option>
                 <option value="hierarchical">Hierarchical</option>
               </select>
             </div>
