@@ -6,6 +6,8 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends openssl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
+RUN npm install -g meta-ads-mcp@1.1.0
+
 COPY package*.json ./
 COPY prisma ./prisma
 
@@ -26,6 +28,8 @@ ENV NODE_ENV=production
 RUN apt-get update \
   && apt-get install -y --no-install-recommends openssl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g meta-ads-mcp@1.1.0
 
 RUN addgroup --system --gid 1001 nodejs \
   && adduser --system --uid 1001 --ingroup nodejs appuser
