@@ -965,6 +965,7 @@ type AgentOptionalConfig =
   const [agentSearch, setAgentSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'running' | 'idle'>('all');
   const [architectureFilter, setArchitectureFilter] = useState<'all' | 'supervisor' | 'specialist'>('all');
+  const [exposureFilter, setExposureFilter] = useState<'all' | 'exposed' | 'private'>('all');
   const [sortMode, setSortMode] = useState<'name' | 'activity' | 'cost'>('activity');
   const [agentView, setAgentView] = useState<'grid' | 'list'>('grid');
   const [visibleAgentConfigs, setVisibleAgentConfigs] = useState<AgentOptionalConfig[]>([]);
@@ -1014,6 +1015,7 @@ type AgentOptionalConfig =
       if (typeof persisted.agentSearch === 'string') setAgentSearch(persisted.agentSearch);
       if (persisted.statusFilter === 'all' || persisted.statusFilter === 'running' || persisted.statusFilter === 'idle') setStatusFilter(persisted.statusFilter);
       if (persisted.architectureFilter === 'all' || persisted.architectureFilter === 'supervisor' || persisted.architectureFilter === 'specialist') setArchitectureFilter(persisted.architectureFilter);
+      if (persisted.exposureFilter === 'all' || persisted.exposureFilter === 'exposed' || persisted.exposureFilter === 'private') setExposureFilter(persisted.exposureFilter);
       if (persisted.sortMode === 'name' || persisted.sortMode === 'activity' || persisted.sortMode === 'cost') setSortMode(persisted.sortMode);
       if (persisted.agentView === 'grid' || persisted.agentView === 'list') setAgentView(persisted.agentView);
       if (typeof persisted.isCreating === 'boolean') setIsCreating(persisted.isCreating);
@@ -1038,6 +1040,7 @@ type AgentOptionalConfig =
       agentSearch,
       statusFilter,
       architectureFilter,
+      exposureFilter,
       sortMode,
       agentView,
       isCreating,
@@ -1048,7 +1051,7 @@ type AgentOptionalConfig =
       autoBuildArchitecture,
       autoBuildProjectId,
     });
-  }, [stateReady, formData, agentsPage, agentsPageSize, agentSearch, statusFilter, architectureFilter, sortMode, agentView, isCreating, editingId, autoBuildGoal, autoBuildProvider, autoBuildModel, autoBuildArchitecture, autoBuildProjectId]);
+  }, [stateReady, formData, agentsPage, agentsPageSize, agentSearch, statusFilter, architectureFilter, exposureFilter, sortMode, agentView, isCreating, editingId, autoBuildGoal, autoBuildProvider, autoBuildModel, autoBuildArchitecture, autoBuildProjectId]);
 
   useEffect(() => {
     fetchAgents();
@@ -1070,6 +1073,10 @@ type AgentOptionalConfig =
     setAgentsPage(1);
   }, [agents.length]);
 
+  useEffect(() => {
+    setAgentsPage(1);
+  }, [agentSearch, statusFilter, architectureFilter, exposureFilter, sortMode]);
+
   const filteredAgents = useMemo(() => {
     const normalizedQuery = agentSearch.trim().toLowerCase();
     const filtered = agents.filter((agent) => {
@@ -1084,7 +1091,8 @@ type AgentOptionalConfig =
       ].filter(Boolean).some((value) => String(value).toLowerCase().includes(normalizedQuery));
       const matchesStatus = statusFilter === 'all' || (statusFilter === 'running' ? isRunning : !isRunning);
       const matchesArchitecture = architectureFilter === 'all' || architecture === architectureFilter;
-      return matchesQuery && matchesStatus && matchesArchitecture;
+      const matchesExposure = exposureFilter === 'all' || (exposureFilter === 'exposed' ? agent.is_exposed : !agent.is_exposed);
+      return matchesQuery && matchesStatus && matchesArchitecture && matchesExposure;
     });
 
     const sorted = [...filtered].sort((a, b) => {
@@ -1096,7 +1104,7 @@ type AgentOptionalConfig =
     });
 
     return sorted;
-  }, [agents, agentSearch, statusFilter, architectureFilter, sortMode]);
+  }, [agents, agentSearch, statusFilter, architectureFilter, exposureFilter, sortMode]);
 
   const pagedAgents = useMemo(() => {
     const start = (agentsPage - 1) * agentsPageSize;
@@ -1177,7 +1185,7 @@ type AgentOptionalConfig =
   }, [autoBuildProvider, isAutoBuilding, providers]);
 
   const autoBuildAgent = async () => {
-      if (!autoBuildGoal) return;
+      if (!autoBuildGoal || autoBuildGoal.trim().length > 900) return;
       setIsBuilding(true);
       setBuildError('');
       setBuildEvents([]);
@@ -1717,12 +1725,33 @@ type AgentOptionalConfig =
   const supervisorCount = useMemo(() => agents.filter((agent) => agent.agent_role === 'supervisor').length, [agents]);
   const specialistCount = useMemo(() => agents.filter((agent) => agent.agent_role !== 'supervisor').length, [agents]);
   const appOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+  const autoBuildGoalTooLong = autoBuildGoal.trim().length > 900;
+  const hasAgentFilters = agentSearch.trim().length > 0 || statusFilter !== 'all' || architectureFilter !== 'all' || exposureFilter !== 'all' || sortMode !== 'activity';
   const resetAgentFilters = () => {
     setAgentSearch('');
     setStatusFilter('all');
     setArchitectureFilter('all');
+    setExposureFilter('all');
     setSortMode('activity');
   };
+
+  const autoBuildTemplates = [
+    {
+      label: 'Growth Supervisor',
+      goal: 'Create a supervisor agent that coordinates SEO, content, and analytics specialists and synthesizes a weekly growth strategy.',
+      architecture: 'supervisor' as const,
+    },
+    {
+      label: 'Support Specialist',
+      goal: 'Create a specialist support agent that triages user issues, drafts precise answers, and flags escalation risks.',
+      architecture: 'specialist' as const,
+    },
+    {
+      label: 'Ops Copilot',
+      goal: 'Create an operations agent that audits workflows daily, detects bottlenecks, and suggests prioritized fixes with clear actions.',
+      architecture: 'auto' as const,
+    },
+  ];
 
   return (
     <div>
@@ -1782,7 +1811,7 @@ type AgentOptionalConfig =
       </motion.div>
 
       <div className="mb-6 rounded-3xl border border-slate-200 bg-white/85 p-4 shadow-sm backdrop-blur">
-        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1.5fr)_repeat(3,minmax(0,0.7fr))_auto]">
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1.4fr)_repeat(4,minmax(0,0.62fr))_auto]">
           <div className="relative">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
@@ -1809,6 +1838,15 @@ type AgentOptionalConfig =
             <option value="all">All Architectures</option>
             <option value="supervisor">Supervisors</option>
             <option value="specialist">Specialists</option>
+          </select>
+          <select
+            className="rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+            value={exposureFilter}
+            onChange={(e) => setExposureFilter(e.target.value as 'all' | 'exposed' | 'private')}
+          >
+            <option value="all">All Exposure</option>
+            <option value="exposed">Exposed</option>
+            <option value="private">Private</option>
           </select>
           <select
             className="rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
@@ -1844,16 +1882,21 @@ type AgentOptionalConfig =
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {[
-            { label: 'All', onClick: () => { setStatusFilter('all'); setArchitectureFilter('all'); } },
-            { label: 'Running', onClick: () => setStatusFilter('running') },
-            { label: 'Supervisors', onClick: () => setArchitectureFilter('supervisor') },
-            { label: 'Specialists', onClick: () => setArchitectureFilter('specialist') },
+            { label: 'All', active: statusFilter === 'all' && architectureFilter === 'all' && exposureFilter === 'all', onClick: () => { setStatusFilter('all'); setArchitectureFilter('all'); setExposureFilter('all'); } },
+            { label: 'Running', active: statusFilter === 'running', onClick: () => setStatusFilter('running') },
+            { label: 'Supervisors', active: architectureFilter === 'supervisor', onClick: () => setArchitectureFilter('supervisor') },
+            { label: 'Specialists', active: architectureFilter === 'specialist', onClick: () => setArchitectureFilter('specialist') },
+            { label: 'Exposed', active: exposureFilter === 'exposed', onClick: () => setExposureFilter('exposed') },
           ].map((chip) => (
             <button
               key={chip.label}
               type="button"
               onClick={chip.onClick}
-              className="px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50"
+              className={`px-3 py-1.5 rounded-full border text-xs font-semibold transition-colors ${
+                chip.active
+                  ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+              }`}
             >
               {chip.label}
             </button>
@@ -1861,7 +1904,8 @@ type AgentOptionalConfig =
           <button
             type="button"
             onClick={resetAgentFilters}
-            className="ml-auto px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50"
+            disabled={!hasAgentFilters}
+            className="ml-auto px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-45"
           >
             Reset Filters
           </button>
@@ -1921,9 +1965,28 @@ type AgentOptionalConfig =
                       <p className="text-slate-600 mb-4 text-sm">
                           Describe the agent you need, and the AI Architect will choose or honor a supervisor/specialist architecture, then design the role, goal, and system prompt.
                       </p>
+                      <div className="mb-4 flex flex-wrap items-center gap-2">
+                        {autoBuildTemplates.map((template) => (
+                          <button
+                            key={template.label}
+                            type="button"
+                            onClick={() => {
+                              setAutoBuildGoal(template.goal);
+                              setAutoBuildArchitecture(template.architecture);
+                            }}
+                            disabled={isBuilding}
+                            className="rounded-full border border-purple-200 bg-purple-50 px-3 py-1.5 text-xs font-semibold text-purple-700 hover:bg-purple-100 disabled:opacity-60"
+                          >
+                            {template.label}
+                          </button>
+                        ))}
+                      </div>
                       
                       <div className="mb-4">
-                          <label className="block text-sm font-medium text-slate-700 mb-1">Agent's Purpose</label>
+                          <div className="mb-1 flex items-center justify-between">
+                            <label className="block text-sm font-medium text-slate-700">Agent's Purpose</label>
+                            <span className={`text-[11px] ${autoBuildGoalTooLong ? 'text-red-600 font-semibold' : 'text-slate-500'}`}>{autoBuildGoal.trim().length}/900</span>
+                          </div>
                           <textarea
                               className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none h-32 resize-none"
                               placeholder="e.g. A senior technical writer that specializes in creating clear API documentation for various programming languages."
@@ -1970,23 +2033,32 @@ type AgentOptionalConfig =
                       </div>
 
                       <div className="mb-4">
-                        <label className="block text-sm font-medium text-slate-700 mb-1">Architecture</label>
-                        <select
-                            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none bg-white"
-                            value={autoBuildArchitecture}
-                            onChange={(e) => setAutoBuildArchitecture(e.target.value as 'auto' | 'specialist' | 'supervisor')}
-                            disabled={isBuilding}
-                        >
-                            <option value="auto">Auto Decide</option>
-                            <option value="specialist">Specialist</option>
-                            <option value="supervisor">Supervisor</option>
-                        </select>
-                        <p className="text-xs text-slate-500 mt-1">
-                          Supervisor agents coordinate delegates and synthesize outputs. Specialist agents execute focused work directly.
-                        </p>
+                        <label className="block text-sm font-medium text-slate-700 mb-2">Architecture</label>
+                        <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                          {[
+                            { value: 'auto', title: 'Auto Decide', note: 'Pick based on your prompt.' },
+                            { value: 'specialist', title: 'Specialist', note: 'Single focused execution.' },
+                            { value: 'supervisor', title: 'Supervisor', note: 'Delegates and synthesizes.' },
+                          ].map((option) => (
+                            <button
+                              key={option.value}
+                              type="button"
+                              onClick={() => setAutoBuildArchitecture(option.value as 'auto' | 'specialist' | 'supervisor')}
+                              disabled={isBuilding}
+                              className={`rounded-xl border px-3 py-3 text-left transition-colors ${
+                                autoBuildArchitecture === option.value
+                                  ? 'border-purple-300 bg-purple-50 text-purple-900'
+                                  : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                              }`}
+                            >
+                              <div className="text-sm font-semibold">{option.title}</div>
+                              <div className="mt-1 text-xs text-slate-500">{option.note}</div>
+                            </button>
+                          ))}
+                        </div>
                       </div>
 
-                      <div className="mb-4">
+                    <div className="mb-4">
                         <label className="block text-sm font-medium text-slate-700 mb-1">Project (Optional)</label>
                         <select
                             className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none bg-white"
@@ -1999,6 +2071,9 @@ type AgentOptionalConfig =
                                 <option key={p.id} value={p.id}>{p.name}</option>
                             ))}
                         </select>
+                    </div>
+                    <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+                      Build plan: <span className="font-semibold text-slate-800">{autoBuildArchitecture}</span> architecture, provider <span className="font-semibold text-slate-800">{autoBuildProvider || 'unset'}</span>, model <span className="font-semibold text-slate-800">{autoBuildModel || 'unset'}</span>{autoBuildProjectId ? `, project #${autoBuildProjectId}` : ', no project'}.
                     </div>
 
                       {buildEvents.length > 0 && (
@@ -2033,6 +2108,11 @@ type AgentOptionalConfig =
                               {buildError}
                           </div>
                       )}
+                      {autoBuildGoalTooLong && (
+                          <div className="mb-4 p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-200">
+                              Purpose text is too long. Keep it under 900 characters for reliable generation.
+                          </div>
+                      )}
 
                       <div className="flex justify-end gap-3 mt-4">
                           <button
@@ -2047,7 +2127,7 @@ type AgentOptionalConfig =
                           </button>
                           <button
                               onClick={autoBuildAgent}
-                              disabled={isBuilding || !autoBuildGoal.trim()}
+                              disabled={isBuilding || !autoBuildGoal.trim() || autoBuildGoalTooLong}
                               className="bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white px-6 py-2 rounded-lg font-bold shadow-md transition-all active:scale-95 flex items-center gap-2"
                           >
                               {isBuilding ? (
