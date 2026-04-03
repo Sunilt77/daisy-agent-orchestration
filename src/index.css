@@ -115,9 +115,24 @@
     font-family: "Orbitron", "Exo 2", sans-serif;
     letter-spacing: 0.02em;
   }
+
+  input, select, textarea, button {
+    font-family: "Exo 2", "Segoe UI", sans-serif;
+  }
 }
 
 @layer components {
+  .layout-chip {
+    @apply h-8 rounded-lg border border-slate-200 bg-white/80 px-2 text-slate-600 shadow-sm hover:text-slate-900 hover:bg-white transition-colors inline-flex items-center justify-center;
+  }
+
+  .topbar-glass {
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.92), rgba(255,255,255,0.78));
+    border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+    backdrop-filter: blur(18px);
+  }
+
   .glass-card {
     @apply backdrop-blur-xl border shadow-xl;
     background: linear-gradient(155deg, rgba(255,255,255,0.86), rgba(247,251,253,0.72));
@@ -144,9 +159,9 @@
     overflow: hidden;
     isolation: isolate;
     background:
-      radial-gradient(1100px 720px at 92% -5%, rgba(59,130,246,0.12), transparent 55%),
-      radial-gradient(820px 620px at -8% 104%, rgba(14,165,233,0.09), transparent 58%),
-      linear-gradient(180deg, rgba(255,255,255,0.65), rgba(248,251,253,0.72));
+      radial-gradient(1100px 720px at 92% -5%, rgba(59,130,246,0.1), transparent 55%),
+      radial-gradient(820px 620px at -8% 104%, rgba(14,165,233,0.08), transparent 58%),
+      linear-gradient(180deg, rgba(255,255,255,0.84), rgba(248,251,253,0.86));
   }
 
   .app-shell::after {
@@ -174,7 +189,7 @@
       radial-gradient(circle at 28% 72%, rgba(245,158,11,0.09) 0 2px, transparent 3px);
     background-size: 220px 220px, 260px 260px, 280px 280px, 240px 240px;
     animation: node-drift 13s ease-in-out infinite;
-    opacity: 0.7;
+    opacity: 0.42;
     z-index: 0;
   }
 
@@ -218,8 +233,8 @@
   .command-canvas {
     position: relative;
     background:
-      radial-gradient(900px 480px at 100% 0%, rgba(96,165,250,0.08), transparent 60%),
-      radial-gradient(760px 380px at 0% 100%, rgba(94,234,212,0.08), transparent 60%);
+      radial-gradient(900px 480px at 100% 0%, rgba(96,165,250,0.06), transparent 60%),
+      radial-gradient(760px 380px at 0% 100%, rgba(94,234,212,0.06), transparent 60%);
   }
 
   .command-canvas::before {
@@ -242,9 +257,9 @@
     height: 18%;
     pointer-events: none;
     background: linear-gradient(180deg, transparent 0%, rgba(56, 189, 248, 0.26) 42%, transparent 100%);
-    animation: scanline 9s linear infinite;
+    animation: scanline 12s linear infinite;
     mix-blend-mode: screen;
-    opacity: 0.75;
+    opacity: 0.3;
   }
 
   .rise-in {
@@ -365,5 +380,11 @@
 
   .card-surface {
     @apply rounded-2xl border border-slate-200 bg-white/86 shadow-sm backdrop-blur;
+  }
+}
+
+@media (max-width: 1024px) {
+  .app-content-shell {
+    padding-top: 6.2rem !important;
   }
 }

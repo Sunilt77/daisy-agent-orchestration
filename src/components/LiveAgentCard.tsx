@@ -1,6 +1,6 @@
-import React, { useMemo } from 'react';
-import { Brain, Activity, Clock, DollarSign, Loader2 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import React from 'react';
+import { Brain, Activity, DollarSign, Loader2 } from 'lucide-react';
+import { motion } from 'motion/react';
 
 interface Agent {
   id: number;
@@ -24,118 +24,79 @@ interface LiveAgentCardProps {
 export const LiveAgentCard: React.FC<LiveAgentCardProps> = ({ agent, onClick, variant = 'default' }) => {
   const isRunning = agent.status === 'running' || (agent.running_count ?? 0) > 0;
   const totalTokens = (agent.stats?.prompt_tokens ?? 0) + (agent.stats?.completion_tokens ?? 0);
+  const activeRuns = Math.max(0, agent.running_count ?? (isRunning ? 1 : 0));
+  const roleLabel = (agent.role || 'Specialist').trim();
   const isDashboard = variant === 'dashboard';
-  const roleTone = (agent.role || '').toLowerCase().includes('supervisor')
-    ? 'text-violet-200 border-violet-400/30 bg-violet-500/15'
-    : 'text-cyan-100 border-cyan-400/30 bg-cyan-500/15';
-  const shellClass = isDashboard
-    ? 'border-white/10 bg-slate-950/88 shadow-[0_18px_65px_rgba(15,23,42,0.42)] backdrop-blur-xl'
-    : 'glass-card';
-  const hoverClass = isDashboard
-    ? 'hover:border-brand-300/40 hover:bg-slate-950/94'
-    : 'hover:border-brand-200/60';
 
   return (
     <motion.div
       layout
       onClick={onClick}
-      initial={{ opacity: 0, y: 20 }}
+      initial={{ opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
-      whileHover={{ y: -4, transition: { duration: 0.2 } }}
-      className={`relative group cursor-pointer rounded-[1.75rem] border p-6 transition-all duration-300 overflow-hidden ${shellClass} ${
-        isRunning ? 'ring-2 ring-brand-400/50 shadow-[0_20px_80px_rgba(39,110,241,0.22)]' : hoverClass
-      }`}
+      whileHover={{ y: -3 }}
+      className={`relative rounded-3xl border p-5 transition-all duration-200 ${
+        isDashboard
+          ? 'bg-slate-950/85 border-slate-800 text-slate-100 shadow-[0_24px_50px_rgba(15,23,42,0.45)]'
+          : 'panel-chrome border-slate-200/80'
+      } ${onClick ? 'cursor-pointer' : ''}`}
     >
-      <div className="absolute inset-x-0 top-0 h-24 bg-[radial-gradient(circle_at_top_right,rgba(120,255,214,0.18),transparent_55%)] opacity-90" />
-      <div className="absolute -right-10 top-4 h-28 w-28 rounded-full border border-white/10 bg-white/5 blur-xl" />
-      <div className="absolute right-5 top-5 metric-orbit opacity-70" />
-
-      <div className="absolute top-0 right-0 p-4 opacity-[0.06] group-hover:opacity-[0.12] transition-opacity">
-        <Brain size={88} />
-      </div>
-
-      <div className="relative z-10">
-        <div className="flex justify-between items-start mb-6">
-          <div className={`p-3 rounded-2xl border transition-colors ${
-            isRunning
-              ? 'bg-brand-500/20 text-brand-100 border-brand-300/30 animate-pulse-subtle'
-              : 'bg-white/10 text-white border-white/10'
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.2em] ${
+            isDashboard ? 'border-slate-700 text-slate-300 bg-slate-900/50' : 'border-slate-200 text-slate-500 bg-white/70'
           }`}>
-            <Brain size={24} />
+            <Brain size={11} />
+            {roleLabel}
           </div>
-          
-          <AnimatePresence>
-            {isRunning && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.8 }}
-                className="flex items-center gap-2 px-3 py-1 bg-emerald-400/15 text-emerald-100 border border-emerald-300/20 rounded-full text-[11px] font-bold uppercase tracking-[0.24em]"
-              >
-                <Loader2 size={12} className="animate-spin" />
-                Working
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-
-        <div className="mb-6">
-          <div className="flex items-center gap-2 mb-2">
-            <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.24em] ${roleTone}`}>
-              {agent.role || 'Specialist'}
-            </span>
-            <span className="text-[10px] uppercase tracking-[0.28em] text-slate-400">
-              {isRunning ? 'Mesh Linked' : 'Standby'}
-            </span>
-          </div>
-          <h3 className="text-xl font-bold text-white group-hover:text-brand-100 transition-colors mb-1">
+          <h3 className={`mt-3 text-lg font-black truncate ${isDashboard ? 'text-white' : 'text-slate-900'}`}>
             {agent.name}
           </h3>
-          <p className="text-slate-400 text-sm font-medium">
-            {isRunning ? 'Streaming work through the active swarm lane.' : 'Ready to absorb a new delegated workload.'}
+          <p className={`mt-1 text-xs ${isDashboard ? 'text-slate-400' : 'text-slate-500'}`}>
+            {isRunning ? 'Processing active workload' : 'Ready for new assignments'}
           </p>
         </div>
 
-        <div className="network-grid mb-5">
-          <span className={`h-3 rounded-full ${isRunning ? 'bg-brand-300' : 'bg-white/20'}`} />
-          <span className="h-3 rounded-full bg-white/15" />
-          <span className={`h-3 rounded-full ${totalTokens > 0 ? 'bg-cyan-300' : 'bg-white/15'}`} />
-          <span className="h-3 rounded-full bg-white/10" />
-          <span className={`h-3 rounded-full ${agent.stats?.total_cost ? 'bg-emerald-300' : 'bg-white/10'}`} />
-          <span className="h-3 rounded-full bg-white/10" />
-          <span className={`h-3 rounded-full ${(agent.running_count ?? 0) > 1 ? 'bg-violet-300' : 'bg-white/10'}`} />
-          <span className="h-3 rounded-full bg-white/15" />
-          <span className={`h-3 rounded-full ${isRunning ? 'bg-white/80' : 'bg-white/15'}`} />
-        </div>
-
-        <div className="grid grid-cols-2 gap-3 pt-5 border-t border-white/10">
-          <div className="space-y-1">
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.24em] flex items-center gap-1">
-              <Activity size={10} /> Usage
-            </div>
-            <div className="text-sm font-mono font-semibold text-white">
-              {totalTokens.toLocaleString()}
-            </div>
-          </div>
-          <div className="space-y-1 text-right">
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.24em] flex items-center gap-1 justify-end">
-              <DollarSign size={10} /> Cost
-            </div>
-            <div className="text-sm font-mono font-semibold text-emerald-300">
-              ${(agent.stats?.total_cost ?? 0).toFixed(4)}
-            </div>
-          </div>
-        </div>
-
-        <div className="mt-4 flex items-center justify-between text-[11px] text-slate-400">
-          <span>Runs in flight</span>
-          <span className="font-mono text-white">{Math.max(0, agent.running_count ?? (isRunning ? 1 : 0))}</span>
+        <div className={`inline-flex items-center gap-2 px-2.5 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-[0.18em] ${
+          isRunning
+            ? (isDashboard ? 'bg-emerald-500/20 text-emerald-200 border border-emerald-400/30' : 'bg-emerald-50 text-emerald-700 border border-emerald-200')
+            : (isDashboard ? 'bg-slate-800 text-slate-300 border border-slate-700' : 'bg-slate-100 text-slate-600 border border-slate-200')
+        }`}>
+          {isRunning && <Loader2 size={11} className="animate-spin" />}
+          {isRunning ? 'Active' : 'Idle'}
         </div>
       </div>
 
-      {isRunning && (
-        <div className="absolute inset-0 rounded-[1.75rem] pointer-events-none border border-brand-300/40 animate-pulse-subtle opacity-70" />
-      )}
+      <div className={`mt-4 grid grid-cols-3 gap-2 rounded-2xl border p-3 ${
+        isDashboard ? 'border-slate-800 bg-slate-900/60' : 'border-slate-200 bg-white/70'
+      }`}>
+        <div>
+          <div className={`text-[10px] uppercase tracking-[0.18em] font-bold ${isDashboard ? 'text-slate-400' : 'text-slate-500'}`}>
+            <Activity size={10} className="inline mr-1" />
+            Tokens
+          </div>
+          <div className={`mt-1 text-sm font-semibold font-mono ${isDashboard ? 'text-white' : 'text-slate-900'}`}>
+            {totalTokens.toLocaleString()}
+          </div>
+        </div>
+        <div>
+          <div className={`text-[10px] uppercase tracking-[0.18em] font-bold ${isDashboard ? 'text-slate-400' : 'text-slate-500'}`}>
+            <DollarSign size={10} className="inline mr-1" />
+            Cost
+          </div>
+          <div className={`mt-1 text-sm font-semibold font-mono ${isDashboard ? 'text-emerald-200' : 'text-emerald-700'}`}>
+            ${(agent.stats?.total_cost ?? 0).toFixed(4)}
+          </div>
+        </div>
+        <div>
+          <div className={`text-[10px] uppercase tracking-[0.18em] font-bold ${isDashboard ? 'text-slate-400' : 'text-slate-500'}`}>
+            Runs
+          </div>
+          <div className={`mt-1 text-sm font-semibold font-mono ${isDashboard ? 'text-white' : 'text-slate-900'}`}>
+            {activeRuns}
+          </div>
+        </div>
+      </div>
     </motion.div>
   );
 };

@@ -35,7 +35,10 @@ const VoicePage = lazy(() => import('./pages/VoicePage'));
 
 const PageLoader = () => (
   <div className="flex h-64 w-full items-center justify-center">
-    <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent" />
+    <div className="panel-chrome rounded-2xl px-5 py-4 flex items-center gap-3 text-slate-700">
+      <div className="h-6 w-6 animate-spin rounded-full border-[3px] border-indigo-500 border-t-transparent" />
+      <span className="text-sm font-semibold">Loading workspace...</span>
+    </div>
   </div>
 );
 

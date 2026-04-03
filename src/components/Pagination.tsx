@@ -41,15 +41,15 @@ export default function Pagination({
   const pageItems = buildPageItems(currentPage, totalPages);
 
   return (
-    <div className={`flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${className}`}>
+    <div className={`panel-chrome rounded-2xl px-3 py-2.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${className}`}>
       <div className="text-xs text-slate-500">
-        Showing <span className="font-medium text-slate-700">{start}</span>–<span className="font-medium text-slate-700">{end}</span> of{' '}
-        <span className="font-medium text-slate-700">{total}</span>
+        Showing <span className="font-semibold text-slate-800">{start}</span>–<span className="font-semibold text-slate-800">{end}</span> of{' '}
+        <span className="font-semibold text-slate-800">{total}</span>
       </div>
       <div className="flex items-center gap-2">
         {onPageSizeChange && (
           <select
-            className="ui-select !py-1 !text-xs !border-slate-200"
+            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 shadow-sm"
             value={pageSize}
             onChange={(e) => onPageSizeChange(Number(e.target.value))}
           >
@@ -65,7 +65,7 @@ export default function Pagination({
             type="button"
             onClick={() => onPageChange(Math.max(1, currentPage - 1))}
             disabled={currentPage <= 1}
-            className="px-2 py-1 text-xs border border-slate-200 rounded-md disabled:opacity-50 hover:bg-slate-50"
+            className="px-2.5 py-1.5 text-xs font-semibold border border-slate-200 rounded-lg disabled:opacity-50 hover:bg-slate-50 text-slate-700"
           >
             Prev
           </button>
@@ -79,9 +79,9 @@ export default function Pagination({
                 key={item}
                 type="button"
                 onClick={() => onPageChange(Number(item))}
-                className={`px-2 py-1 text-xs border rounded-md ${
+                className={`px-2.5 py-1.5 text-xs font-semibold border rounded-lg ${
                   item === currentPage
-                    ? 'bg-indigo-600 text-white border-indigo-600'
+                    ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
                     : 'border-slate-200 text-slate-600 hover:bg-slate-50'
                 }`}
               >
@@ -93,7 +93,7 @@ export default function Pagination({
             type="button"
             onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
             disabled={currentPage >= totalPages}
-            className="px-2 py-1 text-xs border border-slate-200 rounded-md disabled:opacity-50 hover:bg-slate-50"
+            className="px-2.5 py-1.5 text-xs font-semibold border border-slate-200 rounded-lg disabled:opacity-50 hover:bg-slate-50 text-slate-700"
           >
             Next
           </button>
