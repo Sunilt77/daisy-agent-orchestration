@@ -243,7 +243,10 @@ export function registerRuntimeControlRoutes({
   app.get('/api/task-control', async (_req, res) => {
     try {
       const prisma = getPrisma();
-      const [runningAgentExecs, runningCrewExecs, pendingJobsRaw, failedAgentExecs, failedCrewExecs] = await Promise.all([
+      const now = Date.now();
+      const lookbackHours = 24;
+      const since = new Date(now - lookbackHours * 60 * 60 * 1000);
+      const [runningAgentExecs, runningCrewExecs, pendingJobsRaw, failedAgentExecs, failedCrewExecs, recentJobs] = await Promise.all([
         prisma.orchestratorAgentExecution.findMany({
           where: { status: 'running' },
           include: { agent: { select: { name: true, role: true } } },
@@ -270,8 +273,29 @@ export function registerRuntimeControlRoutes({
           include: { crew: { select: { name: true } } },
           orderBy: { createdAt: 'desc' },
           take: 20
-        })
+        }),
+        prisma.orchestratorJobQueue.findMany({
+          where: { createdAt: { gte: since } },
+          orderBy: { id: 'desc' },
+          take: 2000,
+          select: {
+            id: true,
+            type: true,
+            status: true,
+            createdAt: true,
+            startedAt: true,
+            finishedAt: true,
+            attempts: true,
+          },
+        }),
       ]);
+
+      const percentile = (values: number[], pct: number) => {
+        if (!values.length) return 0;
+        const sorted = [...values].sort((a, b) => a - b);
+        const rank = Math.min(sorted.length - 1, Math.max(0, Math.ceil((pct / 100) * sorted.length) - 1));
+        return Math.round(sorted[rank]);
+      };
 
       const runningAgentExecutions = runningAgentExecs.map((ae: any) => ({
         id: ae.id,
@@ -315,12 +339,61 @@ export function registerRuntimeControlRoutes({
         crew_name: ce.crew?.name
       }));
 
+      const terminalStatuses = new Set(['completed', 'failed', 'canceled']);
+      const terminalJobs = recentJobs.filter((row: any) => terminalStatuses.has(String(row.status || '').toLowerCase()));
+      const failedJobs = terminalJobs.filter((row: any) => String(row.status || '').toLowerCase() === 'failed');
+      const queueWaitMsValues = terminalJobs
+        .map((row: any) => {
+          if (!row.startedAt || !row.createdAt) return null;
+          return Math.max(0, row.startedAt.getTime() - row.createdAt.getTime());
+        })
+        .filter((value: number | null): value is number => Number.isFinite(value));
+      const runDurationMsValues = terminalJobs
+        .map((row: any) => {
+          if (!row.startedAt || !row.finishedAt) return null;
+          return Math.max(0, row.finishedAt.getTime() - row.startedAt.getTime());
+        })
+        .filter((value: number | null): value is number => Number.isFinite(value));
+
+      const jobsByType: Record<string, number> = {};
+      for (const row of recentJobs) {
+        const key = String(row.type || 'unknown');
+        jobsByType[key] = (jobsByType[key] || 0) + 1;
+      }
+
+      const throughputPerMinute = Number((terminalJobs.length / (lookbackHours * 60)).toFixed(3));
+      const failureRatePct = terminalJobs.length ? Number(((failedJobs.length / terminalJobs.length) * 100).toFixed(2)) : 0;
+      const maxAttempts = recentJobs.length
+        ? Math.max(...recentJobs.map((row: any) => Number(row.attempts || 0)))
+        : 0;
+
       res.json({
         runningAgentExecutions,
         runningCrewExecutions,
         pendingJobs,
         failedAgentExecutions,
         failedCrewExecutions,
+        runtimeMetrics: {
+          lookback_hours: lookbackHours,
+          queue_depth_pending: pendingJobsRaw.length,
+          jobs_total: recentJobs.length,
+          jobs_terminal: terminalJobs.length,
+          jobs_failed: failedJobs.length,
+          throughput_per_minute: throughputPerMinute,
+          failure_rate_pct: failureRatePct,
+          queue_wait_ms: {
+            p50: percentile(queueWaitMsValues, 50),
+            p95: percentile(queueWaitMsValues, 95),
+            p99: percentile(queueWaitMsValues, 99),
+          },
+          run_duration_ms: {
+            p50: percentile(runDurationMsValues, 50),
+            p95: percentile(runDurationMsValues, 95),
+            p99: percentile(runDurationMsValues, 99),
+          },
+          max_attempts: maxAttempts,
+          jobs_by_type: jobsByType,
+        },
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message || 'Failed to load task control data' });

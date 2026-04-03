@@ -8,6 +8,19 @@ type CrewRun = { id: number; crew_id: number; initial_input?: string; created_at
 type PendingJob = { id: number; type: string; status: string; created_at: string; payload?: any };
 type FailedAgent = { id: number; agent_id: number; task?: string; created_at: string; agent_name: string };
 type FailedCrew = { id: number; crew_id: number; initial_input?: string; created_at: string; crew_name: string };
+type RuntimeMetrics = {
+  lookback_hours: number;
+  queue_depth_pending: number;
+  jobs_total: number;
+  jobs_terminal: number;
+  jobs_failed: number;
+  throughput_per_minute: number;
+  failure_rate_pct: number;
+  queue_wait_ms: { p50: number; p95: number; p99: number };
+  run_duration_ms: { p50: number; p95: number; p99: number };
+  max_attempts: number;
+  jobs_by_type: Record<string, number>;
+};
 
 export default function TaskControlPage() {
   const [loading, setLoading] = useState(false);
@@ -17,6 +30,7 @@ export default function TaskControlPage() {
   const [pendingJobs, setPendingJobs] = useState<PendingJob[]>([]);
   const [failedAgentExecutions, setFailedAgentExecutions] = useState<FailedAgent[]>([]);
   const [failedCrewExecutions, setFailedCrewExecutions] = useState<FailedCrew[]>([]);
+  const [runtimeMetrics, setRuntimeMetrics] = useState<RuntimeMetrics | null>(null);
   const [runningAgentPage, setRunningAgentPage] = useState(1);
   const [runningCrewPage, setRunningCrewPage] = useState(1);
   const [pendingJobsPage, setPendingJobsPage] = useState(1);
@@ -36,6 +50,7 @@ export default function TaskControlPage() {
       setPendingJobs(Array.isArray(data.pendingJobs) ? data.pendingJobs : []);
       setFailedAgentExecutions(Array.isArray(data.failedAgentExecutions) ? data.failedAgentExecutions : []);
       setFailedCrewExecutions(Array.isArray(data.failedCrewExecutions) ? data.failedCrewExecutions : []);
+      setRuntimeMetrics(data.runtimeMetrics || null);
     } catch (e: any) {
       setMsg(e.message || 'Failed to load task control');
     } finally {
@@ -111,6 +126,44 @@ export default function TaskControlPage() {
           </div>
         ))}
       </div>
+
+      {runtimeMetrics && (
+        <section className="rounded-2xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold text-slate-900">Runtime Health (Last {runtimeMetrics.lookback_hours}h)</h2>
+            <span className="text-xs text-slate-500">Ops telemetry</span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-3">
+            <div className="rounded-lg border border-slate-200 p-3">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500">Queue Wait P95</div>
+              <div className="mt-1 text-lg font-bold text-slate-900">{runtimeMetrics.queue_wait_ms.p95}ms</div>
+            </div>
+            <div className="rounded-lg border border-slate-200 p-3">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500">Run Duration P95</div>
+              <div className="mt-1 text-lg font-bold text-slate-900">{runtimeMetrics.run_duration_ms.p95}ms</div>
+            </div>
+            <div className="rounded-lg border border-slate-200 p-3">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500">Failure Rate</div>
+              <div className="mt-1 text-lg font-bold text-slate-900">{runtimeMetrics.failure_rate_pct}%</div>
+            </div>
+            <div className="rounded-lg border border-slate-200 p-3">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500">Throughput / Min</div>
+              <div className="mt-1 text-lg font-bold text-slate-900">{runtimeMetrics.throughput_per_minute}</div>
+            </div>
+            <div className="rounded-lg border border-slate-200 p-3">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500">Terminal Jobs</div>
+              <div className="mt-1 text-lg font-bold text-slate-900">{runtimeMetrics.jobs_terminal}</div>
+            </div>
+            <div className="rounded-lg border border-slate-200 p-3">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500">Max Attempts</div>
+              <div className="mt-1 text-lg font-bold text-slate-900">{runtimeMetrics.max_attempts}</div>
+            </div>
+          </div>
+          <div className="mt-3 text-xs text-slate-500">
+            Job mix: {Object.entries(runtimeMetrics.jobs_by_type || {}).map(([k, v]) => `${k}:${v}`).join(' | ') || 'n/a'}
+          </div>
+        </section>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
         <button className="px-3 py-2 rounded-lg bg-red-600 text-white text-sm" onClick={() => postAction('/api/task-control/stop-running-agents', 'Stopped all running agent executions')}>
