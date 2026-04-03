@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Mic, MicOff, PhoneCall, PhoneOff, Radio, Send, Volume2, Waves, Bot, Activity, Save, Paperclip } from 'lucide-react';
+import { Mic, MicOff, PhoneCall, PhoneOff, Radio, Send, Volume2, Waves, Bot, Activity, Save, Paperclip, Search, RotateCcw } from 'lucide-react';
 
 type VoiceTarget = {
   id: number;
@@ -185,6 +185,9 @@ export default function VoicePage() {
   const [sessionAttachments, setSessionAttachments] = useState<SessionAttachment[]>([]);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [monitorTab, setMonitorTab] = useState<'conversation' | 'events'>('conversation');
+  const [targetSearch, setTargetSearch] = useState('');
+  const [eventSearch, setEventSearch] = useState('');
+  const [eventTypeFilter, setEventTypeFilter] = useState<'all' | string>('all');
   const [latencyMetrics, setLatencyMetrics] = useState<{
     sttToReplyMs: number | null;
     replyToTtsMs: number | null;
@@ -432,8 +435,15 @@ export default function VoicePage() {
   };
 
   const availableTargets = useMemo(
-    () => targets.filter((target) => target.type === targetType),
-    [targetType, targets],
+    () => {
+      const query = targetSearch.trim().toLowerCase();
+      return targets.filter((target) => {
+        if (target.type !== targetType) return false;
+        if (!query) return true;
+        return `${target.name} ${target.subtitle || ''} ${target.role || ''} ${target.process || ''}`.toLowerCase().includes(query);
+      });
+    },
+    [targetSearch, targetType, targets],
   );
 
   const selectedTarget = useMemo(
@@ -481,6 +491,19 @@ export default function VoicePage() {
     if (total <= 3500) return 'text-amber-300';
     return 'text-rose-300';
   }, [latencyMetrics.turnTotalMs]);
+  const eventTypes = useMemo(() => {
+    return Array.from(new Set(events.map((event) => String(event.type || '').trim()).filter(Boolean))).sort();
+  }, [events]);
+  const filteredEvents = useMemo(() => {
+    const query = eventSearch.trim().toLowerCase();
+    return events.filter((event) => {
+      const matchesType = eventTypeFilter === 'all' || event.type === eventTypeFilter;
+      if (!matchesType) return false;
+      if (!query) return true;
+      return `${event.type || ''} ${JSON.stringify(event.payload || {})}`.toLowerCase().includes(query);
+    });
+  }, [eventSearch, eventTypeFilter, events]);
+  const hasVoiceFilters = targetSearch.trim().length > 0 || eventSearch.trim().length > 0 || eventTypeFilter !== 'all';
 
   useEffect(() => {
     if (!availableTargets.some((target) => String(target.id) === String(targetId))) {
@@ -1141,6 +1164,19 @@ export default function VoicePage() {
               </span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="md:col-span-2">
+                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Find Target</label>
+                <div className="relative">
+                  <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    value={targetSearch}
+                    onChange={(e) => setTargetSearch(e.target.value)}
+                    placeholder={`Search ${targetType}s by name or role...`}
+                    className="w-full rounded-xl border border-slate-300 bg-white pl-9 pr-3 py-2 text-sm"
+                  />
+                </div>
+                <div className="mt-1 text-[11px] text-slate-500">{availableTargets.length} visible target{availableTargets.length === 1 ? '' : 's'} for {targetType}</div>
+              </div>
               <div>
                 <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Target Type</label>
                 <select
@@ -1204,6 +1240,18 @@ export default function VoicePage() {
               </button>
               <button onClick={deleteSelectedPreset} disabled={!selectedVoiceConfigId} className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700 disabled:opacity-40">
                 Delete Preset
+              </button>
+              <button
+                onClick={() => {
+                  setTargetSearch('');
+                  setEventSearch('');
+                  setEventTypeFilter('all');
+                }}
+                disabled={!hasVoiceFilters}
+                className="ml-auto rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-600 disabled:opacity-45 inline-flex items-center gap-1"
+              >
+                <RotateCcw size={14} />
+                Reset Filters
               </button>
             </div>
 
@@ -1572,6 +1620,27 @@ export default function VoicePage() {
                 </button>
               </div>
             </div>
+            <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
+              <div className="relative">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  value={eventSearch}
+                  onChange={(e) => setEventSearch(e.target.value)}
+                  placeholder="Search monitor payloads, transcript snippets, and event messages..."
+                  className="w-full rounded-xl border border-slate-300 bg-white pl-9 pr-3 py-2 text-sm"
+                />
+              </div>
+              <select
+                value={eventTypeFilter}
+                onChange={(e) => setEventTypeFilter(e.target.value)}
+                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm bg-white"
+              >
+                <option value="all">All Event Types</option>
+                {eventTypes.map((type) => (
+                  <option key={type} value={type}>{type}</option>
+                ))}
+              </select>
+            </div>
             {monitorTab === 'conversation' ? (
               <div className="grid grid-cols-1 gap-4">
                 <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
@@ -1612,10 +1681,10 @@ export default function VoicePage() {
               <div className="rounded-2xl border border-slate-200 bg-slate-950 text-slate-100 p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold mb-3">
                   <Activity size={16} className="text-emerald-400" />
-                  Session Events
+                  Session Events ({filteredEvents.length})
                 </div>
                 <div className="max-h-[520px] overflow-auto space-y-2 font-mono text-xs">
-                  {events.length ? events.map((event) => (
+                  {filteredEvents.length ? filteredEvents.map((event) => (
                     <div key={event.id} className="rounded-xl border border-white/5 bg-white/5 px-3 py-2">
                       <div className="flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.18em] text-slate-400">
                         <span>{event.type}</span>
@@ -1624,7 +1693,7 @@ export default function VoicePage() {
                       <pre className="mt-2 whitespace-pre-wrap text-slate-200">{JSON.stringify(event.payload, null, 2)}</pre>
                     </div>
                   )) : (
-                    <div className="text-slate-500">Connect a voice session to watch runtime events, transcripts, and TTS output.</div>
+                    <div className="text-slate-500">{events.length ? 'No events match current filters.' : 'Connect a voice session to watch runtime events, transcripts, and TTS output.'}</div>
                   )}
                 </div>
               </div>

@@ -683,6 +683,8 @@ export default function AgentChatPage() {
   const [draftAttachments, setDraftAttachments] = useState<ChatAttachment[]>([]);
   const [feedbackByExecution, setFeedbackByExecution] = useState<Record<number, FeedbackState>>({});
   const [sessionPage, setSessionPage] = useState(1);
+  const [sessionSearch, setSessionSearch] = useState('');
+  const [sessionBucketFilter, setSessionBucketFilter] = useState<'all' | 'today' | 'week' | 'earlier'>('all');
   const [historyHidden, setHistoryHidden] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const loadedSessionKeyRef = useRef<string>('');
@@ -710,6 +712,7 @@ export default function AgentChatPage() {
   }, [messages, sending]);
 
   const deferredAgentSearch = useDeferredValue(agentSearch);
+  const deferredSessionSearch = useDeferredValue(sessionSearch);
   const selectedAgent = useMemo(
     () => agents.find((a) => a.id === selectedAgentId) ?? null,
     [agents, selectedAgentId]
@@ -722,11 +725,25 @@ export default function AgentChatPage() {
     () => agents.filter((a) => `${a.name} ${a.role || ''}`.toLowerCase().includes(deferredAgentSearch.trim().toLowerCase())),
     [agents, deferredAgentSearch]
   );
+  const filteredSessions = useMemo(() => {
+    const query = deferredSessionSearch.trim().toLowerCase();
+    return sessions.filter((session) => {
+      const bucket = formatSessionBucket(session.last_seen_at || session.created_at);
+      const matchesBucket = sessionBucketFilter === 'all'
+        || (sessionBucketFilter === 'today' && bucket === 'Today')
+        || (sessionBucketFilter === 'week' && ['Yesterday', 'Last 7 Days'].includes(bucket))
+        || (sessionBucketFilter === 'earlier' && bucket === 'Earlier');
+      if (!matchesBucket) return false;
+      if (!query) return true;
+      return `${session.user_id || ''} ${session.preview || ''} ${session.id} ${session.message_count || 0}`.toLowerCase().includes(query);
+    });
+  }, [deferredSessionSearch, sessionBucketFilter, sessions]);
   const visibleSessions = useMemo(
-    () => sessions.slice(0, sessionPage * SESSION_PAGE_SIZE),
-    [sessions, sessionPage]
+    () => filteredSessions.slice(0, sessionPage * SESSION_PAGE_SIZE),
+    [filteredSessions, sessionPage]
   );
-  const hasMoreSessions = visibleSessions.length < sessions.length;
+  const hasMoreSessions = visibleSessions.length < filteredSessions.length;
+  const hasSessionFilters = sessionBucketFilter !== 'all' || sessionSearch.trim().length > 0;
   const groupedVisibleSessions = useMemo(() => {
     const groups: Array<{ label: string; items: SessionSummary[] }> = [];
     for (const session of visibleSessions) {
@@ -771,6 +788,10 @@ export default function AgentChatPage() {
       }
       if (typeof persisted.draft === 'string') setDraft(persisted.draft);
       if (Array.isArray(persisted.draftAttachments)) setDraftAttachments(persisted.draftAttachments);
+      if (typeof persisted.sessionSearch === 'string') setSessionSearch(persisted.sessionSearch);
+      if (persisted.sessionBucketFilter === 'all' || persisted.sessionBucketFilter === 'today' || persisted.sessionBucketFilter === 'week' || persisted.sessionBucketFilter === 'earlier') {
+        setSessionBucketFilter(persisted.sessionBucketFilter);
+      }
       if (typeof persisted.historyHidden === 'boolean') setHistoryHidden(persisted.historyHidden);
       if (typeof persisted.focusMode === 'boolean') setFocusMode(persisted.focusMode);
     }
@@ -780,9 +801,9 @@ export default function AgentChatPage() {
   useEffect(() => {
     if (!stateReady) return;
     savePersisted(AGENT_CHAT_UI_KEY, {
-      selectedAgentId, selectedSessionId, debugMode, showToolTrace, supervisorMode, delegateAgentIds, draft, draftAttachments, historyHidden, focusMode,
+      selectedAgentId, selectedSessionId, debugMode, showToolTrace, supervisorMode, delegateAgentIds, draft, draftAttachments, sessionSearch, sessionBucketFilter, historyHidden, focusMode,
     });
-  }, [stateReady, selectedAgentId, selectedSessionId, debugMode, showToolTrace, supervisorMode, delegateAgentIds, draft, draftAttachments, historyHidden, focusMode]);
+  }, [stateReady, selectedAgentId, selectedSessionId, debugMode, showToolTrace, supervisorMode, delegateAgentIds, draft, draftAttachments, sessionSearch, sessionBucketFilter, historyHidden, focusMode]);
 
   const loadSessions = async (agentId: number, silent = false) => {
     if (!silent) setLoading(true);
@@ -825,6 +846,10 @@ export default function AgentChatPage() {
     setDelegateAgentIds((prev) => prev.filter((id) => id !== selectedAgentId));
     loadSessions(selectedAgentId);
   }, [selectedAgentId]);
+
+  useEffect(() => {
+    setSessionPage(1);
+  }, [sessionSearch, sessionBucketFilter]);
 
   useEffect(() => {
     if (!selectedAgentId) return;
@@ -1274,11 +1299,54 @@ export default function AgentChatPage() {
           {/* Session history */}
           <div className="mt-4 flex items-center justify-between gap-2 shrink-0">
             <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Recent Chats</div>
-            <div className="text-[11px] text-slate-400">{sessions.length} total</div>
+            <div className="text-[11px] text-slate-400">{filteredSessions.length} visible · {sessions.length} total</div>
+          </div>
+          <div className="mt-2 space-y-2 shrink-0">
+            <div className="relative">
+              <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                value={sessionSearch}
+                onChange={(e) => setSessionSearch(e.target.value)}
+                placeholder="Search session history..."
+                className="w-full rounded-lg border border-slate-300 bg-white pl-8 pr-3 py-2 text-xs"
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {[
+                { key: 'all', label: 'All' },
+                { key: 'today', label: 'Today' },
+                { key: 'week', label: 'Last 7d' },
+                { key: 'earlier', label: 'Earlier' },
+              ].map((chip) => (
+                <button
+                  key={chip.key}
+                  type="button"
+                  onClick={() => setSessionBucketFilter(chip.key as 'all' | 'today' | 'week' | 'earlier')}
+                  className={`rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${
+                    sessionBucketFilter === chip.key
+                      ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                      : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                  }`}
+                >
+                  {chip.label}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => { setSessionSearch(''); setSessionBucketFilter('all'); }}
+                disabled={!hasSessionFilters}
+                className="ml-auto rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500 disabled:opacity-45"
+              >
+                Reset
+              </button>
+            </div>
           </div>
           <div className="mt-2 space-y-1.5 flex-1 min-h-0 overflow-y-auto pr-0.5">
             {loading && <div className="text-xs text-slate-500 text-center py-4">Loading…</div>}
             {!loading && sessions.length === 0 && <div className="text-xs text-slate-500 text-center py-4">No saved chats yet.</div>}
+            {!loading && sessions.length > 0 && filteredSessions.length === 0 && (
+              <div className="text-xs text-slate-500 text-center py-4">No chat sessions match the current filters.</div>
+            )}
             {groupedVisibleSessions.map((group) => (
               <div key={group.label} className="space-y-1.5">
                 <div className="sticky top-0 z-10 bg-white/85 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400 backdrop-blur">
