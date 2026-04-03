@@ -189,7 +189,7 @@ export default function AgentExecutionPage() {
       <div className="swarm-hero p-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <Link to="/agents" className="text-indigo-600 hover:text-indigo-800 flex items-center gap-2 mb-4">
+          <Link to="/agents" className="text-slate-200 hover:text-white flex items-center gap-2 mb-4">
             <ArrowLeft size={16} /> Back to Agents
           </Link>
           <h1 className="text-3xl font-black text-white">Execution #{execId}</h1>
@@ -259,6 +259,56 @@ export default function AgentExecutionPage() {
             Reset
           </button>
         </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {[
+            {
+              label: `Timeline ${filteredTimeline.length}/${timeline.length}`,
+              active: timelineStatusFilter === 'all',
+              onClick: () => setTimelineStatusFilter('all' as const),
+            },
+            {
+              label: `Timeline Running`,
+              active: timelineStatusFilter === 'running',
+              onClick: () => setTimelineStatusFilter('running' as const),
+            },
+            {
+              label: `Timeline Failed`,
+              active: timelineStatusFilter === 'failed',
+              onClick: () => setTimelineStatusFilter('failed' as const),
+            },
+            {
+              label: `Delegates ${filteredDelegations.filter((row) => row.role !== 'synthesis').length}/${delegations.filter((row) => row.role !== 'synthesis').length}`,
+              active: delegationFilter === 'delegate',
+              onClick: () => setDelegationFilter('delegate' as const),
+            },
+            {
+              label: `Synthesis ${filteredDelegations.filter((row) => row.role === 'synthesis').length}/${delegations.filter((row) => row.role === 'synthesis').length}`,
+              active: delegationFilter === 'synthesis',
+              onClick: () => setDelegationFilter('synthesis' as const),
+            },
+          ].map((chip) => (
+            <button
+              key={chip.label}
+              type="button"
+              onClick={chip.onClick}
+              className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${
+                chip.active
+                  ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                  : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+          <div className="ml-auto text-xs text-slate-500">
+            Tools <span className="font-semibold text-slate-700">{filteredTools.length}</span>/<span className="font-semibold text-slate-700">{tools.length}</span>
+          </div>
+        </div>
+        {hasDetailFilters && filteredTimeline.length + filteredDelegations.length + filteredTools.length === 0 && (
+          <div className="mt-3 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            No timeline, delegation, or tool activity matches your current filters.
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
