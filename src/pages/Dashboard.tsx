@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Plus, Users, PlayCircle, ArrowRight, Trash2, Activity, DollarSign, Brain, Sparkles, X, LayoutGrid, Bot, Gauge, TrendingUp, Clock3, Cpu, FileText, Calendar, Package, Target, Wand2, BarChart3 } from 'lucide-react';
+import { Plus, Users, PlayCircle, ArrowRight, Trash2, Activity, DollarSign, Brain, Sparkles, X, LayoutGrid, Bot, Gauge, TrendingUp, Clock3, Cpu, FileText, Calendar, Package, Target, Wand2, BarChart3, Search } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Pagination from '../components/Pagination';
 import { LiveAgentCard } from '../components/LiveAgentCard';
@@ -122,8 +122,10 @@ export default function Dashboard() {
   const [agents, setAgents] = useState<any[]>([]);
   const [crewsPage, setCrewsPage] = useState(1);
   const [crewsPageSize, setCrewsPageSize] = useState(6);
+  const [crewQuery, setCrewQuery] = useState('');
   const [execPage, setExecPage] = useState(1);
   const [execPageSize, setExecPageSize] = useState(8);
+  const [executionQuery, setExecutionQuery] = useState('');
   const [templates, setTemplates] = useState<CrewTemplate[]>([]);
   const [failureAnalytics, setFailureAnalytics] = useState<{ topFailingTools: any[]; timeoutHotspots: any[]; tokenSpikes: any[] }>({
     topFailingTools: [],
@@ -169,27 +171,56 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 5000); // Poll every 5 seconds
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      fetchData();
+    }, 5000);
     return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
     setCrewsPage(1);
   }, [crews.length]);
+  useEffect(() => {
+    setCrewsPage(1);
+  }, [crewQuery]);
 
   useEffect(() => {
     setExecPage(1);
   }, [recentExecutions.length]);
+  useEffect(() => {
+    setExecPage(1);
+  }, [executionQuery]);
+
+  const filteredCrews = useMemo(() => {
+    const query = crewQuery.trim().toLowerCase();
+    if (!query) return crews;
+    return crews.filter((crew) =>
+      [crew.name, crew.process, crew.is_exposed ? 'exposed' : 'private']
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query))
+    );
+  }, [crews, crewQuery]);
+
+  const filteredExecutions = useMemo(() => {
+    const query = executionQuery.trim().toLowerCase();
+    if (!query) return recentExecutions;
+    return recentExecutions.filter((exec) =>
+      [exec.agent_name, exec.status, exec.input, exec.output]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query))
+    );
+  }, [recentExecutions, executionQuery]);
 
   const pagedCrews = useMemo(() => {
     const start = (crewsPage - 1) * crewsPageSize;
-    return crews.slice(start, start + crewsPageSize);
-  }, [crews, crewsPage, crewsPageSize]);
+    return filteredCrews.slice(start, start + crewsPageSize);
+  }, [filteredCrews, crewsPage, crewsPageSize]);
 
   const pagedExecutions = useMemo(() => {
     const start = (execPage - 1) * execPageSize;
-    return recentExecutions.slice(start, start + execPageSize);
-  }, [recentExecutions, execPage, execPageSize]);
+    return filteredExecutions.slice(start, start + execPageSize);
+  }, [filteredExecutions, execPage, execPageSize]);
 
   const dashboardInsights = useMemo(() => {
     const now = Date.now();
@@ -1269,6 +1300,17 @@ export default function Dashboard() {
             Browse All Crews <ArrowRight size={14} />
           </Link>
         </div>
+        <div className="mb-4 panel-chrome rounded-2xl p-3">
+          <div className="flex items-center gap-2 border border-slate-200 rounded-xl px-3 py-2 bg-white/80">
+            <Clock3 size={15} className="text-slate-400" />
+            <input
+              value={crewQuery}
+              onChange={(e) => setCrewQuery(e.target.value)}
+              className="w-full bg-transparent text-sm outline-none text-slate-700 placeholder:text-slate-400"
+              placeholder="Filter crews by name, process, or exposure..."
+            />
+          </div>
+        </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {pagedCrews.map(crew => (
@@ -1326,9 +1368,9 @@ export default function Dashboard() {
             </Link>
           ))}
           
-          {crews.length === 0 && !isCreating && (
+          {filteredCrews.length === 0 && !isCreating && (
             <div className="col-span-full rounded-[1.75rem] border border-dashed border-white/10 bg-slate-950/72 py-12 text-center">
-              <p className="text-slate-400">No crews created yet. Start by creating one!</p>
+              <p className="text-slate-400">{crews.length === 0 ? 'No crews created yet. Start by creating one!' : 'No crews match the current filter.'}</p>
             </div>
           )}
         </div>
@@ -1337,7 +1379,7 @@ export default function Dashboard() {
         <Pagination
           page={crewsPage}
           pageSize={crewsPageSize}
-          total={crews.length}
+          total={filteredCrews.length}
           onPageChange={setCrewsPage}
           onPageSizeChange={setCrewsPageSize}
         />
@@ -1348,13 +1390,22 @@ export default function Dashboard() {
       )}
 
       <div className="mt-16">
-        <h2 className="text-xl font-bold text-slate-900 mb-6 flex items-center gap-2">
+        <h2 className="text-xl font-bold text-slate-900 mb-3 flex items-center gap-2">
             <div className="p-2 bg-accent-50 rounded-lg text-accent-600">
               <Activity size={20} />
             </div>
             Operation Streams
         </h2>
-        <div className="mb-4 flex justify-end">
+        <div className="mb-4 panel-chrome rounded-2xl p-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-2 border border-slate-200 rounded-xl px-3 py-2 bg-white/80 w-full sm:max-w-md">
+            <Search size={15} className="text-slate-400" />
+            <input
+              value={executionQuery}
+              onChange={(e) => setExecutionQuery(e.target.value)}
+              className="w-full bg-transparent text-sm outline-none text-slate-700 placeholder:text-slate-400"
+              placeholder="Filter execution streams..."
+            />
+          </div>
           <Link
             to="/agent-executions"
             className="text-sm font-semibold text-indigo-700 hover:text-indigo-900"
@@ -1363,9 +1414,9 @@ export default function Dashboard() {
           </Link>
         </div>
         <div className={`${dashboardOperatorPanel} overflow-hidden p-0`}>
-            {recentExecutions.length === 0 ? (
+            {filteredExecutions.length === 0 ? (
                 <div className="p-8 text-center text-slate-500">
-                    No recent activity found.
+                    {recentExecutions.length === 0 ? 'No recent activity found.' : 'No executions match the current filter.'}
                 </div>
             ) : (
                 <div className="overflow-x-auto">
@@ -1414,7 +1465,7 @@ export default function Dashboard() {
                 <Pagination
                     page={execPage}
                     pageSize={execPageSize}
-                    total={recentExecutions.length}
+                    total={filteredExecutions.length}
                     onPageChange={setExecPage}
                     onPageSizeChange={setExecPageSize}
                 />

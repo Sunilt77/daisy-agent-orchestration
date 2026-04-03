@@ -8943,7 +8943,11 @@ async function runDelegatedAgentExecution(options: {
         delegationTitle: delegation.title,
         tenantKey: readTenantKey(userId || `delegated:${supervisorAgent.id}`),
       });
-      const numericJobId = Number(jobId);
+      const numericJobId = Number(
+        (jobId && typeof jobId === 'object')
+          ? ((jobId as any).id ?? (jobId as any).jobId ?? (jobId as any).value ?? NaN)
+          : jobId
+      );
       await getPrisma().orchestratorAgentDelegation.update({
         where: { id: delegation.id },
         data: { childJobId: Number.isFinite(numericJobId) && numericJobId > 0 ? numericJobId : null, status: 'queued', updatedAt: new Date() },

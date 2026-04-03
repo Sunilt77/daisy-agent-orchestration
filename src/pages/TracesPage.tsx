@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Activity, BarChart3, Bot, Clock3, DollarSign, Filter, MessageSquare, Search, TrendingUp, Wrench, X } from 'lucide-react';
+import { Activity, BarChart3, Bot, Clock3, DollarSign, Filter, MessageSquare, Search, TrendingUp, Wrench, X, RotateCcw, CalendarClock } from 'lucide-react';
 import Pagination from '../components/Pagination';
 
 function formatToolTraceName(rawName?: string | null) {
@@ -198,6 +198,25 @@ export default function TracesPage() {
   const [localToolPage, setLocalToolPage] = useState(1);
   const [localToolPageSize, setLocalToolPageSize] = useState(10);
   const [stateReady, setStateReady] = useState(false);
+
+  const applyQuickRange = (hours: number) => {
+    const now = new Date();
+    const start = new Date(now.getTime() - hours * 60 * 60 * 1000);
+    const asLocalInput = (value: Date) => {
+      const pad = (n: number) => String(n).padStart(2, '0');
+      return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}T${pad(value.getHours())}:${pad(value.getMinutes())}`;
+    };
+    setFrom(asLocalInput(start));
+    setTo(asLocalInput(now));
+  };
+
+  const resetFilters = () => {
+    setQ('');
+    setStatus('');
+    setKind('');
+    setFrom('');
+    setTo('');
+  };
 
   useEffect(() => {
     const persisted = loadPersisted<any>(TRACES_UI_KEY, {});
@@ -522,29 +541,32 @@ export default function TracesPage() {
         </div>
       </div>
 
-      <div className="mb-4 flex items-center gap-2">
+      <div className="mb-4 panel-chrome rounded-2xl p-2 flex items-center gap-2 flex-wrap">
         <button
           onClick={() => setViewMode('platform')}
           disabled={!platformProjectId}
-          className={`px-3 py-2 rounded-lg text-sm font-medium border ${viewMode === 'platform' ? 'bg-indigo-50 border-indigo-200 text-indigo-800' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'} ${!platformProjectId ? 'opacity-60 cursor-not-allowed' : ''}`}
+          className={`px-3 py-2 rounded-xl text-sm font-semibold border inline-flex items-center gap-2 ${viewMode === 'platform' ? 'bg-indigo-50 border-indigo-200 text-indigo-800' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'} ${!platformProjectId ? 'opacity-60 cursor-not-allowed' : ''}`}
         >
+          <Activity size={14} />
           Platform Runs
         </button>
         <button
           onClick={() => setViewMode('local-agent')}
-          className={`px-3 py-2 rounded-lg text-sm font-medium border ${viewMode === 'local-agent' ? 'bg-indigo-50 border-indigo-200 text-indigo-800' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
+          className={`px-3 py-2 rounded-xl text-sm font-semibold border inline-flex items-center gap-2 ${viewMode === 'local-agent' ? 'bg-indigo-50 border-indigo-200 text-indigo-800' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
         >
+          <Bot size={14} />
           Local Agent Traces
         </button>
         <button
           onClick={() => setViewMode('local-tool')}
-          className={`px-3 py-2 rounded-lg text-sm font-medium border ${viewMode === 'local-tool' ? 'bg-indigo-50 border-indigo-200 text-indigo-800' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
+          className={`px-3 py-2 rounded-xl text-sm font-semibold border inline-flex items-center gap-2 ${viewMode === 'local-tool' ? 'bg-indigo-50 border-indigo-200 text-indigo-800' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
         >
+          <Wrench size={14} />
           Local Tool Traces
         </button>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-xl p-4 mb-6">
+      <div className="panel-chrome rounded-2xl p-4 mb-6">
         <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
           <div className="md:col-span-3">
             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Project</label>
@@ -597,7 +619,7 @@ export default function TracesPage() {
             </select>
           </div>
 
-          <div className="md:col-span-12 flex justify-between items-center">
+          <div className="md:col-span-12 flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
             <div className="text-xs text-slate-500">
               {selectedProject ? (
                 platformProjectId ? (
@@ -607,29 +629,35 @@ export default function TracesPage() {
                 )
               ) : 'Select a project.'}
             </div>
-            <button
-              onClick={() => {
-                if (!selectedProject) return;
-                if (viewMode === 'local-agent') {
-                  loadLocalTraces();
-                  return;
-                }
-                if (viewMode === 'local-tool') {
-                  loadLocalToolTraces();
-                  return;
-                }
-                if (!platformProjectId) {
-                  setRunsError('Project not linked to platform traces. Link it from Projects.');
-                  return;
-                }
-                loadRuns();
-                loadInsights();
-              }}
-              disabled={!selectedProject}
-              className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white px-4 py-2 rounded-lg text-sm font-medium"
-            >
-              <Filter size={16} /> Apply
-            </button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button type="button" onClick={() => applyQuickRange(24)} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1"><CalendarClock size={12} />24h</button>
+              <button type="button" onClick={() => applyQuickRange(72)} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50">3d</button>
+              <button type="button" onClick={() => applyQuickRange(168)} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50">7d</button>
+              <button type="button" onClick={resetFilters} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1"><RotateCcw size={12} />Reset</button>
+              <button
+                onClick={() => {
+                  if (!selectedProject) return;
+                  if (viewMode === 'local-agent') {
+                    loadLocalTraces();
+                    return;
+                  }
+                  if (viewMode === 'local-tool') {
+                    loadLocalToolTraces();
+                    return;
+                  }
+                  if (!platformProjectId) {
+                    setRunsError('Project not linked to platform traces. Link it from Projects.');
+                    return;
+                  }
+                  loadRuns();
+                  loadInsights();
+                }}
+                disabled={!selectedProject}
+                className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white px-4 py-2 rounded-lg text-sm font-semibold"
+              >
+                <Filter size={16} /> Apply
+              </button>
+            </div>
           </div>
         </div>
       </div>
