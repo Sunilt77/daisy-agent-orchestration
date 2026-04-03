@@ -102,14 +102,16 @@ export default function AgentExecutionsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900">Agent Executions</h1>
-          <p className="text-slate-500 mt-1">Browse all executions and open full timelines.</p>
+      <div className="swarm-hero p-6">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="text-3xl font-black text-white">Agent Executions</h1>
+            <p className="text-slate-300 mt-1">Browse live and historical runs, track delegation kinds, and open detailed timelines fast.</p>
+          </div>
+          <Link to="/task-control" className="px-3 py-2 rounded-lg border border-white/20 bg-white/10 text-sm text-white hover:bg-white/15">
+            Open Task Control
+          </Link>
         </div>
-        <Link to="/task-control" className="px-3 py-2 rounded-lg border border-slate-300 text-sm text-slate-700 hover:bg-slate-50">
-          Open Task Control
-        </Link>
       </div>
 
       <div className="rounded-2xl border border-slate-200 bg-white p-4">
@@ -201,7 +203,15 @@ export default function AgentExecutionsPage() {
             <RotateCcw size={12} />
             Reset
           </button>
+          <div className="text-xs text-slate-500 ml-1">
+            <span className="font-semibold text-slate-700">{rows.length}</span> visible of <span className="font-semibold text-slate-700">{total}</span>
+          </div>
         </div>
+        {hasFilters && rows.length === 0 && !loading && (
+          <div className="mt-3 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            No executions match your current filter/search combination.
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
