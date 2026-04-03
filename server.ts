@@ -4708,22 +4708,34 @@ app.get('/api/agents', requireUser, async (req, res) => {
     }
 
     const agentsWithDetails = await Promise.all(agents.map(async (agent) => {
-      const stats = db.prepare(`
-          SELECT 
-              SUM(prompt_tokens) as prompt_tokens, 
-              SUM(completion_tokens) as completion_tokens, 
-              SUM(total_cost) as total_cost 
-          FROM agent_executions 
-          WHERE agent_id = ?
-      `).get(agent.id) as any;
-      const runningExecutions = db.prepare("SELECT COUNT(*) as count FROM agent_executions WHERE agent_id = ? AND status = 'running'").get(agent.id) as any;
-      const queuedJobs = db.prepare(`
-        SELECT COUNT(*) as count
-        FROM job_queue
-        WHERE type = 'run_agent'
-          AND status = 'pending'
-          AND CAST(json_extract(payload, '$.agentId') AS INTEGER) = ?
-      `).get(agent.id) as any;
+      const [stats, runningExecutions, pendingJobs] = await Promise.all([
+        getPrisma().orchestratorAgentExecution.aggregate({
+          where: { agentId: agent.id },
+          _sum: {
+            promptTokens: true,
+            completionTokens: true,
+            totalCost: true,
+          },
+        }),
+        getPrisma().orchestratorAgentExecution.count({
+          where: { agentId: agent.id, status: 'running' },
+        }),
+        getPrisma().orchestratorJobQueue.findMany({
+          where: { type: 'run_agent', status: 'pending' },
+          select: { payload: true },
+        }),
+      ]);
+      const queuedJobs = pendingJobs.reduce((count, row: any) => {
+        let payload: any = {};
+        try { payload = row.payload ? JSON.parse(row.payload) : {}; } catch {}
+        const payloadAgentId = Number(
+          payload?.agentId ??
+          payload?.agent_id ??
+          payload?.agent?.id ??
+          NaN
+        );
+        return payloadAgentId === agent.id ? count + 1 : count;
+      }, 0);
       const config = await getProviderConfig(agent.provider);
       const mcpTools = agentMcpToolsMap.get(agent.id) || [];
       const mcpBundles = agentMcpBundlesMap.get(agent.id) || [];
@@ -4752,11 +4764,11 @@ app.get('/api/agents', requireUser, async (req, res) => {
         updated_at: agent.updatedAt,
         tools: agentToolsMap.get(agent.id) || [],
         stats: {
-          prompt_tokens: stats.prompt_tokens || 0,
-          completion_tokens: stats.completion_tokens || 0,
-          total_cost: stats.total_cost || 0,
+          prompt_tokens: Number(stats._sum.promptTokens || 0),
+          completion_tokens: Number(stats._sum.completionTokens || 0),
+          total_cost: Number(stats._sum.totalCost || 0),
         },
-        running_count: (runningExecutions.count || 0) + (queuedJobs.count || 0),
+        running_count: Number(runningExecutions || 0) + Number(queuedJobs || 0),
         credential_source: config.source,
         credential_source_name: config.sourceName,
         mcp_tool_ids: mcpTools.map((x: any) => Number(x.tool_id)),
@@ -5362,9 +5374,9 @@ app.put('/api/workflows/:id', requireUser, async (req, res) => {
     const prisma = getPrisma();
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
-    const existing = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id) as any;
+    const existing = await prisma.orchestratorWorkflow.findUnique({ where: { id } });
     if (!existing) return res.status(404).json({ error: 'Workflow not found' });
-    requireVisibleProjectId(scope, existing.project_id ?? null);
+    requireVisibleProjectId(scope, existing.projectId ?? null);
     const { name, description, status, trigger_type, graph, project_id, learning_enabled } = req.body || {};
     if (project_id != null && project_id !== '') requireVisibleProjectId(scope, Number(project_id));
     const normalizedGraph = normalizeWorkflowGraph(parseWorkflowGraph(graph || existing.graph || { nodes: [], edges: [] }));
@@ -5378,11 +5390,11 @@ app.put('/api/workflows/:id', requireUser, async (req, res) => {
         name: workflowName,
         description: typeof description === 'string' ? description : existing.description,
         status: String(status || existing.status || 'draft'),
-        triggerType: String(trigger_type || existing.trigger_type || 'manual'),
+        triggerType: String(trigger_type || existing.triggerType || 'manual'),
         graph: serializedGraph,
         version: nextVersion,
         updatedAt: new Date(now),
-        projectId: Number.isFinite(Number(project_id)) ? Number(project_id) : existing.project_id ?? null,
+        projectId: Number.isFinite(Number(project_id)) ? Number(project_id) : existing.projectId ?? null,
       },
     });
     await prisma.orchestratorWorkflowVersion.create({
@@ -5392,7 +5404,7 @@ app.put('/api/workflows/:id', requireUser, async (req, res) => {
         name: workflowName,
         description: typeof description === 'string' ? description : existing.description,
         status: String(status || existing.status || 'draft'),
-        triggerType: String(trigger_type || existing.trigger_type || 'manual'),
+        triggerType: String(trigger_type || existing.triggerType || 'manual'),
         graph: serializedGraph,
         changeKind: 'update',
         createdAt: new Date(now),
@@ -5411,9 +5423,12 @@ app.delete('/api/workflows/:id', requireUser, async (req, res) => {
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
   try {
     const scope = await resolveOrchestratorAccessScope(req);
-    const existing = db.prepare('SELECT project_id FROM workflows WHERE id = ?').get(id) as any;
+    const existing = await getPrisma().orchestratorWorkflow.findUnique({
+      where: { id },
+      select: { projectId: true },
+    });
     if (!existing) return res.status(404).json({ error: 'Workflow not found' });
-    requireVisibleProjectId(scope, existing.project_id ?? null);
+    requireVisibleProjectId(scope, existing.projectId ?? null);
     const prisma = getPrisma();
     await prisma.orchestratorWorkflowVersion.deleteMany({ where: { workflowId: id } });
     await prisma.orchestratorWorkflow.delete({ where: { id } });
@@ -5429,9 +5444,12 @@ app.get('/api/workflows/:id/versions', requireUser, async (req, res) => {
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
   try {
     const scope = await resolveOrchestratorAccessScope(req);
-    const existing = db.prepare('SELECT project_id FROM workflows WHERE id = ?').get(id) as any;
+    const existing = await getPrisma().orchestratorWorkflow.findUnique({
+      where: { id },
+      select: { projectId: true },
+    });
     if (!existing) return res.status(404).json({ error: 'Workflow not found' });
-    requireVisibleProjectId(scope, existing.project_id ?? null);
+    requireVisibleProjectId(scope, existing.projectId ?? null);
     const versions = await getPrisma().orchestratorWorkflowVersion.findMany({
       where: { workflowId: id },
       orderBy: [{ versionNumber: 'desc' }, { id: 'desc' }],
@@ -5503,9 +5521,12 @@ app.get('/api/workflows/:id/runs', requireUser, async (req, res) => {
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
   try {
     const scope = await resolveOrchestratorAccessScope(req);
-    const workflow = db.prepare('SELECT project_id FROM workflows WHERE id = ?').get(id) as any;
+    const workflow = await getPrisma().orchestratorWorkflow.findUnique({
+      where: { id },
+      select: { projectId: true },
+    });
     if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
-    requireVisibleProjectId(scope, workflow.project_id ?? null);
+    requireVisibleProjectId(scope, workflow.projectId ?? null);
     const runs = await getPrisma().orchestratorWorkflowRun.findMany({ where: { workflowId: id }, orderBy: { id: 'desc' } });
     res.json({ runs });
   } catch (e: any) {
@@ -5613,12 +5634,12 @@ app.post('/api/workflows/:id/execute', requireUser, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
     const scope = await resolveOrchestratorAccessScope(req);
-    const workflow = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id) as any;
+    const workflow = await getPrisma().orchestratorWorkflow.findUnique({ where: { id } });
     if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
-    requireVisibleProjectId(scope, workflow.project_id ?? null);
+    requireVisibleProjectId(scope, workflow.projectId ?? null);
     const userId = String((req as any)?.user?.id || '').trim() || null;
     const input = req.body?.input ?? {};
-    const triggerType = String(req.body?.trigger_type || workflow.trigger_type || 'manual');
+    const triggerType = String(req.body?.trigger_type || workflow.triggerType || 'manual');
     const runId = await createWorkflowRun(id, triggerType, input, workflow.graph);
     const shouldWait = shouldWaitForExecution(req);
     if (!shouldWait) {
@@ -5637,9 +5658,9 @@ app.post('/api/workflows/:id/webhook', async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
-    const workflow = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id) as any;
+    const workflow = await getPrisma().orchestratorWorkflow.findUnique({ where: { id } });
     if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
-    const configuredTrigger = String(workflow.trigger_type || 'manual').toLowerCase();
+    const configuredTrigger = String(workflow.triggerType || 'manual').toLowerCase();
     if (configuredTrigger !== 'webhook') {
       return res.status(409).json({ error: 'Workflow is not configured for webhook triggers' });
     }

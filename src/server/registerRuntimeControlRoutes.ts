@@ -68,8 +68,7 @@ export function registerRuntimeControlRoutes({
     const prisma = getPrisma();
     const exec = await prisma.orchestratorCrewExecution.findUnique({ where: { id: executionId } });
     if (!exec) return res.status(404).json({ error: 'Execution not found' });
-    const sqliteExec = db.prepare('SELECT crew_id FROM crew_executions WHERE id = ?').get(executionId) as any;
-    const crewId = Number(exec.crewId ?? sqliteExec?.crew_id);
+    const crewId = Number(exec.crewId);
     const hasValidCrewId = Number.isFinite(crewId) && crewId > 0;
     const crew = hasValidCrewId
       ? await prisma.orchestratorCrew.findUnique({ where: { id: crewId } })
@@ -114,8 +113,7 @@ export function registerRuntimeControlRoutes({
     const prisma = getPrisma();
     const exec = await prisma.orchestratorCrewExecution.findUnique({ where: { id: executionId } });
     if (!exec) return res.status(404).json({ error: 'Execution not found' });
-    const sqliteExec = db.prepare('SELECT crew_id FROM crew_executions WHERE id = ?').get(executionId) as any;
-    const crewId = Number(exec.crewId ?? sqliteExec?.crew_id);
+    const crewId = Number(exec.crewId);
     const hasValidCrewId = Number.isFinite(crewId) && crewId > 0;
     const crew = hasValidCrewId
       ? await prisma.orchestratorCrew.findUnique({ where: { id: crewId } })
