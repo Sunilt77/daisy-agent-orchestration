@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Activity, AlertTriangle, Building2, KeyRound, MessageSquare, RefreshCw, Save, Search, ShieldCheck, Users, Zap } from 'lucide-react';
+import { Activity, AlertTriangle, Building2, KeyRound, MessageSquare, RefreshCw, RotateCcw, Save, Search, ShieldCheck, Users, Zap } from 'lucide-react';
 import Pagination from '../components/Pagination';
 
 type AdminStats = {
@@ -268,8 +268,11 @@ export default function PlatformPage() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [tenantStatusFilter, setTenantStatusFilter] = useState<'all' | 'active' | 'suspended'>('all');
   const [tenantPage, setTenantPage] = useState(1);
   const [tenantPageSize, setTenantPageSize] = useState(8);
+  const [userSearch, setUserSearch] = useState('');
+  const [userSessionFilter, setUserSessionFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [userPage, setUserPage] = useState(1);
   const [userPageSize, setUserPageSize] = useState(8);
   const [newPassword, setNewPassword] = useState<Record<string, string>>({});
@@ -352,21 +355,42 @@ export default function PlatformPage() {
     hydrateTenantPolicyDraft(tenantPolicyTenantId);
   }, [tenantPolicyTenantId, tenants]);
 
+  useEffect(() => {
+    setTenantPage(1);
+  }, [searchTerm, tenantStatusFilter, tenants.length]);
+
+  useEffect(() => {
+    setUserPage(1);
+  }, [userSearch, userSessionFilter, users.length]);
+
   const filteredTenants = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
-    if (!q) return tenants;
-    return tenants.filter((t) => t.name.toLowerCase().includes(q) || t.id.toLowerCase().includes(q));
-  }, [tenants, searchTerm]);
+    return tenants.filter((t) => {
+      if (tenantStatusFilter !== 'all' && t.status !== tenantStatusFilter) return false;
+      if (!q) return true;
+      return t.name.toLowerCase().includes(q) || t.id.toLowerCase().includes(q);
+    });
+  }, [tenants, searchTerm, tenantStatusFilter]);
 
   const pagedTenants = useMemo(() => {
     const start = (tenantPage - 1) * tenantPageSize;
     return filteredTenants.slice(start, start + tenantPageSize);
   }, [filteredTenants, tenantPage, tenantPageSize]);
 
+  const filteredUsers = useMemo(() => {
+    const q = userSearch.trim().toLowerCase();
+    return users.filter((u) => {
+      if (userSessionFilter === 'active' && Number(u.active_sessions || 0) <= 0) return false;
+      if (userSessionFilter === 'inactive' && Number(u.active_sessions || 0) > 0) return false;
+      if (!q) return true;
+      return [u.email, u.org_name, u.id].some((value) => String(value || '').toLowerCase().includes(q));
+    });
+  }, [users, userSearch, userSessionFilter]);
+
   const pagedUsers = useMemo(() => {
     const start = (userPage - 1) * userPageSize;
-    return users.slice(start, start + userPageSize);
-  }, [users, userPage, userPageSize]);
+    return filteredUsers.slice(start, start + userPageSize);
+  }, [filteredUsers, userPage, userPageSize]);
 
   const insightMetrics = useMemo(() => {
     const activeUsers = Number(stats.active_users || 0);
@@ -1150,14 +1174,39 @@ export default function PlatformPage() {
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
                 value={searchTerm}
-                onChange={(e) => {
-                  setSearchTerm(e.target.value);
-                  setTenantPage(1);
-                }}
+                onChange={(e) => setSearchTerm(e.target.value)}
                 className="w-full pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-lg"
                 placeholder="Search org..."
               />
             </div>
+          </div>
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            {[
+              { key: 'all', label: `All (${tenants.length})` },
+              { key: 'active', label: `Active (${tenants.filter((t) => t.status === 'active').length})` },
+              { key: 'suspended', label: `Suspended (${tenants.filter((t) => t.status === 'suspended').length})` },
+            ].map((chip) => (
+              <button
+                key={chip.key}
+                onClick={() => setTenantStatusFilter(chip.key as typeof tenantStatusFilter)}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                  tenantStatusFilter === chip.key ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+            <button
+              onClick={() => { setSearchTerm(''); setTenantStatusFilter('all'); }}
+              disabled={!searchTerm.trim() && tenantStatusFilter === 'all'}
+              className="ml-auto inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:hover:bg-white"
+            >
+              <RotateCcw size={11} />
+              Reset
+            </button>
+          </div>
+          <div className="mb-3 text-xs text-slate-500">
+            <span className="font-semibold text-slate-700">{filteredTenants.length}</span> visible of <span className="font-semibold text-slate-700">{tenants.length}</span>
           </div>
 
           <div className="table-shell">
@@ -1300,8 +1349,49 @@ export default function PlatformPage() {
         </div>
 
         <div className="bg-white border border-slate-200 rounded-2xl p-5">
-          <h3 className="text-lg font-black text-slate-900 mb-1">Users & Password Resets</h3>
-          <p className="text-xs text-slate-500 mb-3">Reset credentials and inspect active sessions.</p>
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+            <div>
+              <h3 className="text-lg font-black text-slate-900 mb-1">Users & Password Resets</h3>
+              <p className="text-xs text-slate-500">Reset credentials and inspect active sessions.</p>
+            </div>
+            <div className="relative w-64">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                value={userSearch}
+                onChange={(e) => setUserSearch(e.target.value)}
+                className="w-full pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-lg"
+                placeholder="Search user or org..."
+              />
+            </div>
+          </div>
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            {[
+              { key: 'all', label: `All (${users.length})` },
+              { key: 'active', label: `Active Sessions (${users.filter((u) => Number(u.active_sessions || 0) > 0).length})` },
+              { key: 'inactive', label: `No Sessions (${users.filter((u) => Number(u.active_sessions || 0) <= 0).length})` },
+            ].map((chip) => (
+              <button
+                key={chip.key}
+                onClick={() => setUserSessionFilter(chip.key as typeof userSessionFilter)}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                  userSessionFilter === chip.key ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+            <button
+              onClick={() => { setUserSearch(''); setUserSessionFilter('all'); }}
+              disabled={!userSearch.trim() && userSessionFilter === 'all'}
+              className="ml-auto inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:hover:bg-white"
+            >
+              <RotateCcw size={11} />
+              Reset
+            </button>
+          </div>
+          <div className="mb-3 text-xs text-slate-500">
+            <span className="font-semibold text-slate-700">{filteredUsers.length}</span> visible of <span className="font-semibold text-slate-700">{users.length}</span>
+          </div>
           <div className="table-shell">
             <table className="w-full text-sm">
               <thead>
@@ -1342,7 +1432,7 @@ export default function PlatformPage() {
             className="mt-3"
             page={userPage}
             pageSize={userPageSize}
-            total={users.length}
+            total={filteredUsers.length}
             onPageChange={setUserPage}
             onPageSizeChange={(n) => {
               setUserPageSize(n);
