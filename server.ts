@@ -7394,6 +7394,13 @@ app.post('/mcp/call/:toolName', localRunLimiter, async (req, res) => {
 app.post('/api/agents/autobuild', requireUser, async (req, res) => {
     try {
         const { goal, project_id, provider = 'google', model = 'gemini-1.5-flash', stream = false, agent_role_preference = 'auto' } = req.body;
+        const normalizedGoal = String(goal || '').trim();
+        if (!normalizedGoal) {
+            return res.status(400).json({ error: 'goal is required' });
+        }
+        if (normalizedGoal.length > 4000) {
+            return res.status(400).json({ error: 'goal is too long (max 4000 characters)' });
+        }
         const purifiedProjectId = project_id && !isNaN(Number(project_id)) ? Number(project_id) : null;
         const scope = await resolveOrchestratorAccessScope(req);
         if (!scope.isAdmin && !purifiedProjectId) {
@@ -7411,7 +7418,7 @@ app.post('/api/agents/autobuild', requireUser, async (req, res) => {
         const sendEvent = (type: string, data: any) => {
             if (!stream) return;
             try {
-                res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
+                res.write(`data: ${JSON.stringify({ type, timestamp: new Date().toISOString(), ...data })}\n\n`);
             } catch (e) {
                 console.error("Failed to write to stream", e);
             }
@@ -7437,7 +7444,7 @@ app.post('/api/agents/autobuild', requireUser, async (req, res) => {
         You are an expert AI Agent Architect.
         Your goal is to design a single, highly specialized AI agent to accomplish a specific objective.
 
-        User's Objective: "${goal}"
+        User's Objective: "${normalizedGoal}"
         Role Preference: "${agent_role_preference}"
 
         Instructions:

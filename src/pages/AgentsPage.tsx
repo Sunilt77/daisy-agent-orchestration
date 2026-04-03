@@ -109,6 +109,15 @@ interface AgentDelegation {
     updated_at?: string;
 }
 
+interface AutoBuildEvent {
+  type: 'status' | 'error' | 'done';
+  message?: string;
+  id?: number;
+  agent?: string;
+  timestamp?: string;
+  received_at?: string;
+}
+
 function executionKindLabel(kind?: string) {
     switch (kind) {
         case 'delegated_parent':
@@ -967,7 +976,7 @@ type AgentOptionalConfig =
   const [autoBuildGoal, setAutoBuildGoal] = useState('');
   const [isBuilding, setIsBuilding] = useState(false);
   const [buildError, setBuildError] = useState('');
-  const [buildEvents, setBuildEvents] = useState<{message: string, type: 'status' | 'error' | 'done', id?: number}[]>([]);
+  const [buildEvents, setBuildEvents] = useState<AutoBuildEvent[]>([]);
   const [autoBuildProvider, setAutoBuildProvider] = useState('google');
   const [autoBuildModel, setAutoBuildModel] = useState('gemini-1.5-flash');
   const [autoBuildArchitecture, setAutoBuildArchitecture] = useState<'auto' | 'specialist' | 'supervisor'>('auto');
@@ -1221,7 +1230,7 @@ type AgentOptionalConfig =
                   if (line.startsWith('data: ')) {
                       try {
                           const event = JSON.parse(line.slice(6));
-                          setBuildEvents(prev => [...prev, event]);
+                          setBuildEvents((prev) => [...prev, { ...event, received_at: new Date().toISOString() }]);
 
                           if (event.type === 'done') {
                               setTimeout(() => {
@@ -1243,7 +1252,7 @@ type AgentOptionalConfig =
           if (finalLine.startsWith('data: ')) {
             try {
               const event = JSON.parse(finalLine.slice(6));
-              setBuildEvents((prev) => [...prev, event]);
+              setBuildEvents((prev) => [...prev, { ...event, received_at: new Date().toISOString() }]);
             } catch (e) {
               console.error("Failed to parse final stream event", e);
             }
@@ -1976,7 +1985,7 @@ type AgentOptionalConfig =
                                             animate={{ opacity: 1, x: 0 }}
                                             className={`${event.type === 'error' ? 'text-red-400' : event.type === 'done' ? 'text-emerald-400' : 'text-slate-300'} flex items-start gap-2`}
                                         >
-                                            <span className="text-slate-500 shrink-0">[{new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})}]</span>
+                                            <span className="text-slate-500 shrink-0">[{new Date(event.timestamp || event.received_at || Date.now()).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})}]</span>
                                             <span>
                                                 {event.message}
                                                 {event.agent && <span className="ml-2 px-1.5 py-0.5 bg-slate-800 rounded text-purple-300 font-bold border border-slate-700">{event.agent}</span>}
