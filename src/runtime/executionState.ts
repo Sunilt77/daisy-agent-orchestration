@@ -1,4 +1,16 @@
 type CrewLogPayload = Record<string, unknown>;
+type CrewExecutionRecord = {
+  id: number;
+  crew_id: number | null;
+  status: string;
+  initial_input: string | null;
+  retry_of: number | null;
+  logs: string | null;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_cost: number;
+  created_at: string;
+};
 
 export type RuntimeExecutionStatus = 'pending' | 'running' | 'completed' | 'failed' | 'canceled';
 
@@ -110,6 +122,83 @@ export async function getCrewExecutionStatus(options: {
     select: { status: true },
   });
   return normalizeRuntimeExecutionStatus(execution?.status, 'pending');
+}
+
+export async function getCrewExecution(options: {
+  prisma: any;
+  executionId: number;
+}) {
+  const { prisma, executionId } = options;
+  const execution = await prisma.orchestratorCrewExecution.findUnique({
+    where: { id: executionId },
+  });
+  if (!execution) return null;
+  const row: CrewExecutionRecord = {
+    id: execution.id,
+    crew_id: execution.crewId ?? null,
+    status: execution.status,
+    initial_input: execution.initialInput ?? null,
+    retry_of: execution.retryOf ?? null,
+    logs: execution.logs ?? null,
+    prompt_tokens: Number(execution.promptTokens || 0),
+    completion_tokens: Number(execution.completionTokens || 0),
+    total_cost: Number(execution.totalCost || 0),
+    created_at: execution.createdAt.toISOString(),
+  };
+  return row;
+}
+
+export async function readCrewExecutionLogs(options: {
+  prisma: any;
+  executionId: number;
+}) {
+  const { prisma, executionId } = options;
+  const rows = await prisma.orchestratorCrewExecutionLog.findMany({
+    where: { executionId },
+    orderBy: { id: 'asc' },
+  });
+  return rows.map((row: any) => {
+    let payload: any = {};
+    try {
+      payload = row.payload ? JSON.parse(row.payload) : {};
+    } catch {
+      payload = {};
+    }
+    return {
+      timestamp: row.timestamp?.toISOString?.() ?? null,
+      ...payload,
+      type: row.type,
+    };
+  });
+}
+
+export async function recoverCrewExecutionState(options: {
+  db: any;
+  prisma: any;
+  reason?: string;
+}) {
+  const { db, prisma, reason = 'Recovered after server restart' } = options;
+  const runningExecutions = await prisma.orchestratorCrewExecution.findMany({
+    where: { status: 'running' },
+    select: { id: true },
+  });
+
+  if (!runningExecutions.length) {
+    return { count: 0 };
+  }
+
+  for (const execution of runningExecutions) {
+    await syncCrewExecutionStatus({
+      db,
+      prisma,
+      executionId: Number(execution.id),
+      status: 'failed',
+      logType: 'error',
+      logPayload: { message: reason },
+    });
+  }
+
+  return { count: runningExecutions.length };
 }
 
 export async function syncCrewExecutionStatus(options: {

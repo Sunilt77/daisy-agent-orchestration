@@ -60,7 +60,10 @@ import { startRuntimeJobWorker } from './src/runtime/jobWorker';
 import {
   appendCrewExecutionLog,
   createCrewExecutionRecord,
+  getCrewExecution,
   getCrewExecutionStatus,
+  readCrewExecutionLogs as readCrewExecutionLogsFromStore,
+  recoverCrewExecutionState,
   syncCrewExecutionMetrics,
   syncCrewExecutionStatus,
 } from './src/runtime/executionState';
@@ -2445,11 +2448,22 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
     if (current.targetType === 'crew') {
       const crewId = current.targetId;
       const crewInput = [transcript, attachmentContext].filter(Boolean).join('\n\n');
-      const info = db.prepare('INSERT INTO crew_executions (crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?)')
-        .run(crewId, 'pending', JSON.stringify([]), crewInput || '', null);
-      executionId = Number(info.lastInsertRowid);
-      db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
-        .run(executionId, 'thought', JSON.stringify({ agent: 'system', message: 'Voice-triggered crew run queued.' }));
+      const crewExecution = await createCrewExecutionRecord({
+        db,
+        prisma: getPrisma(),
+        crewId: Number(crewId),
+        initialInput: crewInput || '',
+        retryOf: null,
+        status: 'pending',
+      });
+      executionId = Number(crewExecution.id);
+      await appendCrewExecutionLog({
+        db,
+        prisma: getPrisma(),
+        executionId,
+        type: 'thought',
+        payload: { agent: 'system', message: 'Voice-triggered crew run queued.' },
+      });
       sendVoiceSocketEvent(ws, 'runtime.event', { event: { type: 'status', message: 'Crew execution queued' }, executionId });
       await emitVoiceProgress(ws, current, `${current.targetName} has been queued and will start shortly.`, { executionId });
       await enqueueJob('run_crew', {
@@ -2462,7 +2476,10 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
       let lastLogCount = 0;
       while (true) {
         await new Promise((resolve) => setTimeout(resolve, 700));
-        const logs = readCrewExecutionLogs(executionId);
+        const logs = await readCrewExecutionLogsFromStore({
+          prisma: getPrisma(),
+          executionId,
+        });
         const newLogs = logs.slice(lastLogCount);
         lastLogCount = logs.length;
         for (const log of newLogs) {
@@ -2473,7 +2490,10 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
             logType: log?.type || null,
           });
         }
-        const execution = db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any;
+        const execution = await getCrewExecution({
+          prisma: getPrisma(),
+          executionId,
+        });
         const status = String(execution?.status || 'pending');
         if (status === 'completed' || status === 'failed' || status === 'canceled') {
           reply = extractCrewFinalResult(logs).trim();
@@ -3090,23 +3110,33 @@ async function runWorkflowExecution(runId: number, userId?: string | null): Prom
         lastOutput
       ) || '';
       const crewInput = workflowGuidance ? `${workflowGuidance}\n\nWorkflow objective:\n${initialInput}` : initialInput;
-      const execInfo = db.prepare(`
-        INSERT INTO crew_executions (crew_id, status, initial_input, retry_of, logs)
-        VALUES (?, 'running', ?, NULL, '[]')
-      `).run(crewId, crewInput);
-      const executionId = Number(execInfo.lastInsertRowid);
+      const crewExecution = await createCrewExecutionRecord({
+        db,
+        prisma: getPrisma(),
+        crewId: Number(crewId),
+        initialInput: crewInput,
+        retryOf: null,
+        status: 'running',
+      });
+      const executionId = Number(crewExecution.id);
       await runCrewExecution(
         crewId,
         executionId,
         crewInput,
         { initiatedBy: 'workflow_node_crew', userId: userId || undefined }
       );
-      const crewExecution = db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any;
-      const crewLogs = readCrewExecutionLogs(executionId);
+      const crewExecutionState = await getCrewExecution({
+        prisma: getPrisma(),
+        executionId,
+      });
+      const crewLogs = await readCrewExecutionLogsFromStore({
+        prisma: getPrisma(),
+        executionId,
+      });
       nodeResult = {
         text: extractCrewFinalResult(crewLogs),
         execution_id: executionId,
-        status: crewExecution?.status || 'completed',
+        status: crewExecutionState?.status || 'completed',
       };
     } else if (type === 'loop') {
       const items = parseWorkflowList(
@@ -6642,9 +6672,15 @@ function buildMcpServer(options?: { toolExposedName?: string; bundleSlug?: strin
             const startTime = Date.now();
             while (Date.now() - startTime < 60000) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
-                const exec = db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any;
-                if (exec.status === 'completed' || exec.status === 'failed' || exec.status === 'canceled') {
-                    const logs = readCrewExecutionLogs(executionId);
+                const exec = await getCrewExecution({
+                  prisma: getPrisma(),
+                  executionId,
+                });
+                if (exec?.status === 'completed' || exec?.status === 'failed' || exec?.status === 'canceled') {
+                    const logs = await readCrewExecutionLogsFromStore({
+                      prisma: getPrisma(),
+                      executionId,
+                    });
                     const finalResult = extractCrewFinalResult(logs);
                     const message =
                         exec.status === 'failed'
@@ -7042,9 +7078,15 @@ app.post('/mcp/call/:toolName', localRunLimiter, async (req, res) => {
         const startTime = Date.now();
         while (Date.now() - startTime < 60000) {
             await new Promise(resolve => setTimeout(resolve, 2000));
-            const exec = db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any;
-            if (exec.status === 'completed' || exec.status === 'failed' || exec.status === 'canceled') {
-                const logs = readCrewExecutionLogs(executionId);
+            const exec = await getCrewExecution({
+              prisma: getPrisma(),
+              executionId,
+            });
+            if (exec?.status === 'completed' || exec?.status === 'failed' || exec?.status === 'canceled') {
+                const logs = await readCrewExecutionLogsFromStore({
+                  prisma: getPrisma(),
+                  executionId,
+                });
                 const finalResult = extractCrewFinalResult(logs);
                 
                 const message =
@@ -8751,12 +8793,14 @@ function startJobWorker() {
 
 async function recoverStaleExecutionState() {
   const recovered = await recoverRuntimeState();
-  const recoveredCrewExecutions = db.prepare(
-    "UPDATE crew_executions SET status = 'failed' WHERE status = 'running'"
-  ).run();
-  if (recovered.jobs || recovered.agentExecutions || recovered.workflowRuns || recoveredCrewExecutions.changes) {
+  const recoveredCrewExecutions = await recoverCrewExecutionState({
+    db,
+    prisma: getPrisma(),
+    reason: 'Recovered after server restart',
+  });
+  if (recovered.jobs || recovered.agentExecutions || recovered.workflowRuns || recoveredCrewExecutions.count) {
     console.warn(
-      `Recovered stale state: jobs=${recovered.jobs}, agent_executions=${recovered.agentExecutions}, crew_executions=${recoveredCrewExecutions.changes}, workflow_runs=${recovered.workflowRuns}`
+      `Recovered stale state: jobs=${recovered.jobs}, agent_executions=${recovered.agentExecutions}, crew_executions=${recoveredCrewExecutions.count}, workflow_runs=${recovered.workflowRuns}`
     );
   }
 }
@@ -10331,15 +10375,6 @@ async function runCrewExecution(
     });
 }
 
-function readCrewExecutionLogs(executionId: number | bigint) {
-  const rows = db.prepare('SELECT timestamp, type, payload FROM crew_execution_logs WHERE execution_id = ? ORDER BY id ASC').all(executionId) as any[];
-  return rows.map((r) => {
-    let payload: any = {};
-    try { payload = r.payload ? JSON.parse(r.payload) : {}; } catch { payload = {}; }
-    return { timestamp: r.timestamp, ...payload, type: r.type };
-  });
-}
-
 function extractCrewFinalResult(logs: any[]): string {
   if (!Array.isArray(logs) || !logs.length) return '';
   const finalSummary = [...logs].reverse().find((l: any) => l?.type === 'crew_result' || l?.type === 'crew_summary');
@@ -10399,10 +10434,16 @@ app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   while (Date.now() - startedAt < timeoutMs) {
-    const exec = db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any;
+    const exec = await getCrewExecution({
+      prisma,
+      executionId: Number(executionId),
+    });
     if (!exec) break;
     if (exec.status === 'completed' || exec.status === 'failed' || exec.status === 'canceled') {
-      const parsedLogs = readCrewExecutionLogs(executionId);
+      const parsedLogs = await readCrewExecutionLogsFromStore({
+        prisma,
+        executionId: Number(executionId),
+      });
       const finalResult = extractCrewFinalResult(parsedLogs);
       const lastError = [...parsedLogs].reverse().find((l: any) => l.type === 'error');
       return res.json({
@@ -10419,10 +10460,18 @@ app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
   res.status(202).json({ executionId, status: 'running' });
 });
 
-app.get('/api/executions/:id', (req, res) => {
-    const execution = db.prepare('SELECT * FROM crew_executions WHERE id = ?').get(req.params.id);
+app.get('/api/executions/:id', async (req, res) => {
+    const executionId = Number(req.params.id);
+    if (!Number.isFinite(executionId)) return res.status(400).json({ error: 'Invalid execution id' });
+    const execution = await getCrewExecution({
+      prisma: getPrisma(),
+      executionId,
+    });
     if (execution) {
-        execution.logs = readCrewExecutionLogs(Number(req.params.id));
+        execution.logs = await readCrewExecutionLogsFromStore({
+          prisma: getPrisma(),
+          executionId,
+        });
         res.json(execution);
     } else {
         res.status(404).json({ error: "Execution not found" });
@@ -10436,15 +10485,22 @@ app.get('/api/executions/:id/stream', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders?.();
+  const prisma = getPrisma();
 
   let lastCount = 0;
-  const sendSnapshot = () => {
-    const exec = db.prepare('SELECT * FROM crew_executions WHERE id = ?').get(executionId) as any;
+  const sendSnapshot = async () => {
+    const exec = await getCrewExecution({
+      prisma,
+      executionId,
+    });
     if (!exec) {
       res.write(`event: error\ndata: ${JSON.stringify({ error: 'Execution not found' })}\n\n`);
       return;
     }
-    const logs = readCrewExecutionLogs(executionId);
+    const logs = await readCrewExecutionLogsFromStore({
+      prisma,
+      executionId,
+    });
     const payload = { status: exec.status, logs: logs.slice(lastCount), fullLogCount: logs.length };
     lastCount = logs.length;
     res.write(`event: update\ndata: ${JSON.stringify(payload)}\n\n`);
@@ -10456,8 +10512,10 @@ app.get('/api/executions/:id/stream', (req, res) => {
     }
   };
 
-  const timer = setInterval(sendSnapshot, 1200);
-  sendSnapshot();
+  const timer = setInterval(() => {
+    void sendSnapshot();
+  }, 1200);
+  void sendSnapshot();
   req.on('close', () => clearInterval(timer));
 });
 
@@ -10465,7 +10523,10 @@ app.post('/api/executions/:id/feedback', requireUser, async (req, res) => {
   try {
     const executionId = Number(req.params.id);
     if (!Number.isFinite(executionId)) return res.status(400).json({ error: 'Invalid execution id' });
-    const exec = db.prepare('SELECT id, crew_id, status, initial_input FROM crew_executions WHERE id = ?').get(executionId) as any;
+    const exec = await getCrewExecution({
+      prisma: getPrisma(),
+      executionId,
+    });
     if (!exec) return res.status(404).json({ error: 'Execution not found' });
     const scope = await resolveOrchestratorAccessScope(req);
     requireVisibleCrewId(scope, Number(exec.crew_id));
@@ -10486,6 +10547,7 @@ registerRuntimeControlRoutes({
   updateRuntimeAgentExecution,
   cascadeCancelDelegatedChildren,
   enqueueJob,
+  updateJobResult: updateRuntimeJobResult,
   agentCancelTokens,
   crewCancelTokens,
   getCancelToken,
@@ -10493,16 +10555,16 @@ registerRuntimeControlRoutes({
 
 app.post('/api/task-control/cancel-pending-jobs', async (req, res) => {
   const prisma = getPrisma();
-  const updateResult = await prisma.orchestratorJobQueue.updateMany({
+  const pendingJobs = await prisma.orchestratorJobQueue.findMany({
     where: { status: 'pending' },
-    data: { status: 'canceled', error: 'Canceled by user (bulk stop)', finishedAt: new Date() }
+    select: { id: true },
   });
-  
-  // Mirror to SQLite
-  db.prepare("UPDATE job_queue SET status = 'canceled', error = ?, finished_at = CURRENT_TIMESTAMP WHERE status = 'pending'")
-    .run('Canceled by user (bulk stop)');
+
+  for (const row of pendingJobs) {
+    await updateRuntimeJobResult(row.id, 'canceled', null, 'Canceled by user (bulk stop)');
+  }
     
-  res.json({ success: true, canceled_pending_jobs: updateResult.count });
+  res.json({ success: true, canceled_pending_jobs: pendingJobs.length });
 });
 
 app.get('/api/agent-executions/:id/stream', async (req, res) => {

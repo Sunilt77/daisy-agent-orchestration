@@ -12,6 +12,7 @@ type RegisterRuntimeControlRoutesDeps = {
   updateRuntimeAgentExecution: (id: number, data: Record<string, any>) => Promise<void>;
   cascadeCancelDelegatedChildren: (parentExecutionId: number, reason: string) => Promise<void>;
   enqueueJob: (type: string, payload: any) => Promise<number>;
+  updateJobResult: (jobId: number, status: 'completed' | 'failed' | 'canceled', result?: any, error?: string, options?: { workerId?: string | null }) => Promise<void>;
   agentCancelTokens: Map<number, CancelToken>;
   crewCancelTokens: Map<number, CancelToken>;
   getCancelToken: (map: Map<number, CancelToken>, id: number) => CancelToken;
@@ -25,6 +26,7 @@ export function registerRuntimeControlRoutes({
   updateRuntimeAgentExecution,
   cascadeCancelDelegatedChildren,
   enqueueJob,
+  updateJobResult,
   agentCancelTokens,
   crewCancelTokens,
   getCancelToken,
@@ -216,16 +218,7 @@ export function registerRuntimeControlRoutes({
       matchedQueued++;
       if (row.status !== 'pending' && row.status !== 'running') continue;
 
-      await prisma.orchestratorJobQueue.update({
-        where: { id: row.id },
-        data: {
-          status: 'canceled',
-          error: 'Canceled by user (stop-all)',
-          finishedAt: new Date()
-        }
-      });
-      db.prepare("UPDATE job_queue SET status = 'canceled', error = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?")
-        .run('Canceled by user (stop-all)', row.id);
+      await updateJobResult(row.id, 'canceled', null, 'Canceled by user (stop-all)');
       canceledQueued++;
     }
     res.json({
@@ -330,13 +323,7 @@ export function registerRuntimeControlRoutes({
     if (!row) return res.status(404).json({ error: 'Job not found' });
     if (row.status !== 'pending') return res.status(409).json({ error: 'Only pending jobs can be canceled' });
 
-    await prisma.orchestratorJobQueue.update({
-      where: { id: jobId },
-      data: { status: 'canceled', error: 'Canceled by user', finishedAt: new Date() }
-    });
-
-    db.prepare("UPDATE job_queue SET status = 'canceled', error = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?")
-      .run('Canceled by user', jobId);
+    await updateJobResult(jobId, 'canceled', null, 'Canceled by user');
     res.json({ success: true });
   });
 
@@ -378,25 +365,24 @@ export function registerRuntimeControlRoutes({
       token.canceled = true;
       token.reason = 'Canceled by user (bulk stop)';
 
-      await prisma.orchestratorCrewExecutionLog.create({
-        data: {
-          executionId: Number(exec.id),
-          type: 'canceled',
-          payload: JSON.stringify({ message: 'Canceled by user (bulk stop)' })
-        }
+      await appendCrewExecutionLog({
+        db,
+        prisma,
+        executionId: Number(exec.id),
+        type: 'canceled',
+        payload: { message: 'Canceled by user (bulk stop)' },
       });
-
-      db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
-        .run(Number(exec.id), 'canceled', JSON.stringify({ message: 'Canceled by user (bulk stop)' }));
     }
 
-    const updateResult = await prisma.orchestratorCrewExecution.updateMany({
-      where: { status: 'running' },
-      data: { status: 'canceled' }
-    });
+    for (const exec of running) {
+      await syncCrewExecutionStatus({
+        db,
+        prisma,
+        executionId: Number(exec.id),
+        status: 'canceled',
+      });
+    }
 
-    db.prepare("UPDATE crew_executions SET status = 'canceled' WHERE status = 'running'").run();
-
-    res.json({ success: true, canceled_running_executions: updateResult.count });
+    res.json({ success: true, canceled_running_executions: running.length });
   });
 }
