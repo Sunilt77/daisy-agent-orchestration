@@ -7563,10 +7563,10 @@ app.post('/api/crews/autobuild', async (req, res) => {
         4. PRIORITIZE using existing agents if they are a good fit.
         5. If existing agents are sufficient, use them. If not, create new specialized agents.
         6. Define a name and description for this crew.
-        7. Define a process (sequential or hierarchical).
-        7a. If Process Preference is "sequential" or "hierarchical", strongly prefer that unless it would make the design clearly incoherent.
+        7. Define a process (sequential, parallel, or hierarchical).
+        7a. If Process Preference is "sequential", "parallel", or "hierarchical", strongly prefer that unless it would make the design clearly incoherent.
         7b. If Process Preference is "auto", choose the best process yourself.
-        8. If the process is hierarchical, explicitly choose a coordinator/supervisor agent and return its temp id as coordinator_temp_id.
+        8. If the process is hierarchical or parallel, explicitly choose a coordinator/supervisor agent and return its temp id as coordinator_temp_id.
         9. Break down the objective into a series of specific tasks. Assign each task to an agent (either existing or new).
         10. For new agents, include an agent_role of either "supervisor" or "specialist". Hierarchical crews should usually have exactly one supervisor.
 
@@ -7574,7 +7574,7 @@ app.post('/api/crews/autobuild', async (req, res) => {
         {
             "crew_name": "Name of the crew",
             "crew_description": "Description of what this crew does",
-            "process": "sequential",
+            "process": "sequential|parallel|hierarchical",
             "coordinator_temp_id": "agent_1",
             "agents": [
                 {
@@ -7666,18 +7666,19 @@ app.post('/api/crews/autobuild', async (req, res) => {
         sendEvent('status', { message: 'Deploying crew and agents...', step: 3, design });
 
         const purifiedProjectId = project_id && !isNaN(Number(project_id)) ? Number(project_id) : null;
-        const requestedCoordinatorTempId = normalizedProcess === 'hierarchical'
-          ? (validTempIds.has(String(design?.coordinator_temp_id || '')) ? String(design.coordinator_temp_id) : null)
-          : null;
-        const supervisorAgentTempId = normalizedProcess === 'hierarchical'
-          ? (
-              normalizedAgents.find((agentDef: any) => String(agentDef?.agent_role || '').toLowerCase() === 'supervisor')?.temp_id ||
-              null
-            )
-          : null;
-        const proposedCoordinatorTempId = normalizedProcess === 'hierarchical'
-          ? (requestedCoordinatorTempId || supervisorAgentTempId || normalizedTasks[0]?.assigned_to_temp_id || normalizedAgents[0]?.temp_id || null)
-          : null;
+	        const needsCoordinator = normalizedProcess === 'hierarchical' || normalizedProcess === 'parallel';
+	        const requestedCoordinatorTempId = needsCoordinator
+	          ? (validTempIds.has(String(design?.coordinator_temp_id || '')) ? String(design.coordinator_temp_id) : null)
+	          : null;
+	        const supervisorAgentTempId = needsCoordinator
+	          ? (
+	              normalizedAgents.find((agentDef: any) => String(agentDef?.agent_role || '').toLowerCase() === 'supervisor')?.temp_id ||
+	              null
+	            )
+	          : null;
+	        const proposedCoordinatorTempId = needsCoordinator
+	          ? (requestedCoordinatorTempId || supervisorAgentTempId || normalizedTasks[0]?.assigned_to_temp_id || normalizedAgents[0]?.temp_id || null)
+	          : null;
 
         const createdCrew = await prisma.orchestratorCrew.create({
           data: {
@@ -7737,10 +7738,10 @@ app.post('/api/crews/autobuild', async (req, res) => {
           await prisma.orchestratorTask.createMany({ data: taskRows });
         }
 
-        if (normalizedProcess === 'hierarchical' && proposedCoordinatorTempId) {
-            const coordinatorId = agentIdMap.get(proposedCoordinatorTempId) || null;
-            if (coordinatorId) {
-              await prisma.orchestratorCrew.update({
+	        if (needsCoordinator && proposedCoordinatorTempId) {
+	            const coordinatorId = agentIdMap.get(proposedCoordinatorTempId) || null;
+	            if (coordinatorId) {
+	              await prisma.orchestratorCrew.update({
                 where: { id: crewId },
                 data: { coordinatorAgentId: coordinatorId, updatedAt: new Date() },
               });
@@ -8809,9 +8810,10 @@ async function runDelegatedAgentExecution(options: {
         delegationTitle: delegation.title,
         tenantKey: readTenantKey(userId || `delegated:${supervisorAgent.id}`),
       });
+      const numericJobId = Number(jobId);
       await getPrisma().orchestratorAgentDelegation.update({
         where: { id: delegation.id },
-        data: { childJobId: jobId, status: 'queued', updatedAt: new Date() },
+        data: { childJobId: Number.isFinite(numericJobId) && numericJobId > 0 ? numericJobId : null, status: 'queued', updatedAt: new Date() },
       });
     }
 

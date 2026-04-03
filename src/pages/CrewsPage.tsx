@@ -1169,7 +1169,7 @@ export default function CrewsPage() {
                           setFormData((prev) => ({
                             ...prev,
                             process: nextProcess,
-                            coordinator_agent_id: nextProcess === 'hierarchical'
+                            coordinator_agent_id: (nextProcess === 'hierarchical' || nextProcess === 'parallel')
                               ? (prev.coordinator_agent_id ?? prev.agentIds[0] ?? null)
                               : prev.coordinator_agent_id,
                           }));
@@ -1237,7 +1237,7 @@ export default function CrewsPage() {
                     </p>
                   </div>
 
-                  {formData.process === 'hierarchical' && coordinatorPreview && (
+                  {(formData.process === 'hierarchical' || formData.process === 'parallel') && coordinatorPreview && (
                     <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3">
                       <div className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-1">Coordinator Preview</div>
                       <div className="text-sm font-semibold text-violet-900">
@@ -1282,7 +1282,7 @@ export default function CrewsPage() {
                       <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
                         <div className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Selected Supervisors</div>
                         <div className="mt-2 text-lg font-black text-slate-900">{selectedSupervisorCount}</div>
-                        <div className="mt-1 text-[11px] text-slate-600">Ideally one coordinator for hierarchical crews.</div>
+                        <div className="mt-1 text-[11px] text-slate-600">Ideally one coordinator for hierarchical and parallel crews.</div>
                       </div>
                       <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
                         <div className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Selected Specialists</div>

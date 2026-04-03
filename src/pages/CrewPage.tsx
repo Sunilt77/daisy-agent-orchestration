@@ -117,6 +117,13 @@ export default function CrewPage() {
   const [feedbackByExecution, setFeedbackByExecution] = useState<Record<number, FeedbackState>>({});
 
   const [initialInput, setInitialInput] = useState('');
+  const [routingPolicy, setRoutingPolicy] = useState({
+    allow_partial_success: true,
+    min_successful_units: 1,
+    synthesis_on_partial: true,
+    fail_fast_on_unit_error: false,
+    max_failures: '',
+  });
   const [newTask, setNewTask] = useState({
     description: '',
     expected_output: '',
@@ -151,6 +158,20 @@ export default function CrewPage() {
       setSelectedThreadExecutionId(Number(executionId));
     }
   }, [executionId]);
+
+  useEffect(() => {
+    if (!crew) return;
+    const totalUnits = Math.max(1, tasks.length || 1);
+    const recommendedMinSuccess = crew.process === 'parallel'
+      ? Math.max(1, Math.ceil(totalUnits * 0.6))
+      : totalUnits;
+    setRoutingPolicy((prev) => ({
+      ...prev,
+      allow_partial_success: crew.process === 'parallel' ? prev.allow_partial_success : false,
+      min_successful_units: recommendedMinSuccess,
+      synthesis_on_partial: true,
+    }));
+  }, [crew?.process, tasks.length]);
 
   useEffect(() => {
     if (!isRunning || !executionId) return;
@@ -297,6 +318,22 @@ export default function CrewPage() {
     const trimmedInput = initialInput.trim();
     const requestInitialInput = buildCrewThreadContext(threadMessages, trimmedInput);
     const requestMessageTs = trimmedInput ? new Date().toISOString() : null;
+    const totalUnits = Math.max(1, tasks.length || 1);
+    const requestedMinSuccess = Number(routingPolicy.min_successful_units);
+    const normalizedMinSuccess = Number.isFinite(requestedMinSuccess)
+      ? Math.max(1, Math.min(totalUnits, Math.floor(requestedMinSuccess)))
+      : Math.max(1, Math.ceil(totalUnits * 0.6));
+    const parsedMaxFailures = Number(routingPolicy.max_failures);
+    const normalizedMaxFailures = Number.isFinite(parsedMaxFailures) && parsedMaxFailures > 0
+      ? Math.floor(parsedMaxFailures)
+      : null;
+    const routingPolicyPayload = {
+      allow_partial_success: Boolean(routingPolicy.allow_partial_success),
+      min_successful_units: normalizedMinSuccess,
+      synthesis_on_partial: Boolean(routingPolicy.synthesis_on_partial),
+      fail_fast_on_unit_error: Boolean(routingPolicy.fail_fast_on_unit_error),
+      ...(normalizedMaxFailures != null ? { max_failures: normalizedMaxFailures } : {}),
+    };
     setIsRunning(true);
     setLogs([]);
     try {
@@ -313,7 +350,10 @@ export default function CrewPage() {
       const res = await fetch(`/api/crews/${id}/kickoff`, { 
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initialInput: requestInitialInput || trimmedInput })
+        body: JSON.stringify({
+          initialInput: requestInitialInput || trimmedInput,
+          routing_policy: routingPolicyPayload,
+        })
       });
       const data = await res.json();
       if (!res.ok) {
@@ -387,7 +427,28 @@ export default function CrewPage() {
 
   const retryExecution = async () => {
     if (!executionId) return;
-    const res = await fetch(`/api/executions/${executionId}/retry`, { method: 'POST' });
+    const totalUnits = Math.max(1, tasks.length || 1);
+    const requestedMinSuccess = Number(routingPolicy.min_successful_units);
+    const normalizedMinSuccess = Number.isFinite(requestedMinSuccess)
+      ? Math.max(1, Math.min(totalUnits, Math.floor(requestedMinSuccess)))
+      : Math.max(1, Math.ceil(totalUnits * 0.6));
+    const parsedMaxFailures = Number(routingPolicy.max_failures);
+    const normalizedMaxFailures = Number.isFinite(parsedMaxFailures) && parsedMaxFailures > 0
+      ? Math.floor(parsedMaxFailures)
+      : null;
+    const res = await fetch(`/api/executions/${executionId}/retry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        routing_policy: {
+          allow_partial_success: Boolean(routingPolicy.allow_partial_success),
+          min_successful_units: normalizedMinSuccess,
+          synthesis_on_partial: Boolean(routingPolicy.synthesis_on_partial),
+          fail_fast_on_unit_error: Boolean(routingPolicy.fail_fast_on_unit_error),
+          ...(normalizedMaxFailures != null ? { max_failures: normalizedMaxFailures } : {}),
+        },
+      }),
+    });
     const data = await res.json();
     if (!res.ok) {
       setLogs(prev => [...prev, {
@@ -473,7 +534,7 @@ export default function CrewPage() {
   const apiUrl = `${origin}/api/crews/${id}/kickoff`;
   const curlCommand = `curl -X POST ${apiUrl} \\
   -H "Content-Type: application/json" \\
-  -d '{"initialInput": "Your input here", "user_id": "user_123"}'`;
+  -d '{"initialInput":"Your input here","routing_policy":{"allow_partial_success":true,"min_successful_units":1,"synthesis_on_partial":true,"fail_fast_on_unit_error":false}}'`;
   const mcpConfig = `{
   "mcpServers": {
     "${crewToolName(crew?.name || 'crew')}": {
@@ -654,7 +715,7 @@ export default function CrewPage() {
                 <span className="text-[10px] font-medium px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full uppercase tracking-wide">
                   {crew.process}
                 </span>
-                {crew.process === 'hierarchical' && (
+                {(crew.process === 'hierarchical' || crew.process === 'parallel') && (
                   <span className="text-[10px] font-medium px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full">
                     Coordinator {agents.find((a) => Number(a.id) === Number(crew.coordinator_agent_id))?.name || 'Auto'}
                   </span>
@@ -823,6 +884,65 @@ export default function CrewPage() {
               onChange={(e) => setInitialInput(e.target.value)}
               disabled={isRunning}
             />
+            <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50/80 p-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Routing Policy</div>
+              <div className="mt-2 text-xs text-slate-500">
+                Control quorum and failure behavior for this run. Useful for parallel and hierarchical crews in production.
+              </div>
+              <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={routingPolicy.allow_partial_success}
+                    onChange={(e) => setRoutingPolicy((prev) => ({ ...prev, allow_partial_success: e.target.checked }))}
+                    disabled={isRunning}
+                  />
+                  Allow partial success
+                </label>
+                <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={routingPolicy.synthesis_on_partial}
+                    onChange={(e) => setRoutingPolicy((prev) => ({ ...prev, synthesis_on_partial: e.target.checked }))}
+                    disabled={isRunning}
+                  />
+                  Synthesize on partial results
+                </label>
+                <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={routingPolicy.fail_fast_on_unit_error}
+                    onChange={(e) => setRoutingPolicy((prev) => ({ ...prev, fail_fast_on_unit_error: e.target.checked }))}
+                    disabled={isRunning}
+                  />
+                  Fail fast on first unit error
+                </label>
+                <div>
+                  <label className="block text-xs text-slate-500 mb-1">Min Successful Units</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={Math.max(1, tasks.length || 1)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm"
+                    value={routingPolicy.min_successful_units}
+                    onChange={(e) => setRoutingPolicy((prev) => ({ ...prev, min_successful_units: Math.max(1, Number(e.target.value) || 1) }))}
+                    disabled={isRunning}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-500 mb-1">Max Failures (Optional)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm"
+                    value={routingPolicy.max_failures}
+                    onChange={(e) => setRoutingPolicy((prev) => ({ ...prev, max_failures: e.target.value }))}
+                    placeholder="Unlimited"
+                    disabled={isRunning}
+                  />
+                </div>
+              </div>
+            </div>
             <div className="mt-4 flex items-center justify-between">
               <div className="text-xs text-slate-500">
                 {isRunning ? 'Crew is running. Logs update in real time.' : 'Run uses the input above and streams logs to the panel.'}
