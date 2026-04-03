@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
-import { createServer as createViteServer, ViteDevServer } from 'vite';
+import type { ViteDevServer } from 'vite';
 import { ensureAttachmentTables, ensureLearningTables, ensureVoiceTables, initDb } from './src/db';
 import db from './src/db';
 import { GoogleGenAI } from '@google/genai';
@@ -11982,6 +11982,7 @@ async function startServer() {
   }
 
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     viteServer = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
