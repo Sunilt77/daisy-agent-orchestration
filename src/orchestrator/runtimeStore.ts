@@ -1,5 +1,6 @@
 import { getPrisma } from '../platform/prisma';
 import { uuid } from '../platform/crypto';
+import { publishAgentExecution, publishWorkflowRun } from '../runtime/executionEvents';
 
 export type RuntimeJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'canceled';
 export const DEFAULT_JOB_PRIORITY = 100;
@@ -49,6 +50,7 @@ export async function getJobRow(jobId: number) {
       attempts: true,
       priority: true,
       readyAt: true,
+      tenantKey: true,
     },
   });
   return row
@@ -63,6 +65,7 @@ export async function getJobRow(jobId: number) {
         attempts: Number(row.attempts || 0),
         priority: Number(row.priority ?? DEFAULT_JOB_PRIORITY),
         ready_at: asIso(row.readyAt),
+        tenant_key: row.tenantKey ?? 'global',
       }
     : undefined;
 }
@@ -73,10 +76,19 @@ export async function enqueueJob(
   options?: {
     priority?: number;
     delayMs?: number;
+    tenantKey?: string | null;
   }
 ) {
   const jobQueue = getPrisma().orchestratorJobQueue as any;
   const readyAt = new Date(Date.now() + Math.max(0, Number(options?.delayMs || 0)));
+  const inferredTenantKey = String(
+    options?.tenantKey ??
+      payload?.tenantKey ??
+      payload?.tenant_key ??
+      payload?.orgId ??
+      payload?.org_id ??
+      'global'
+  ).trim() || 'global';
   const row = await jobQueue.create({
     data: {
       type,
@@ -85,6 +97,7 @@ export async function enqueueJob(
       attempts: 0,
       priority: normalizePriority(options?.priority),
       readyAt,
+      tenantKey: inferredTenantKey,
     },
     select: { id: true },
   });
@@ -136,11 +149,23 @@ export async function claimNextJob(workerId: string, leaseMs: number = DEFAULT_J
   try {
     const rows = await prisma.$queryRawUnsafe<Array<{ id: number; type: string; payload: string | null }>>(
       `
-      WITH candidate AS (
+      WITH next_tenant AS (
+        SELECT COALESCE(tenant_key, 'global') AS tenant_key
+        FROM orchestrator_job_queue
+        WHERE status = 'pending'
+          AND COALESCE(ready_at, NOW()) <= NOW()
+        GROUP BY COALESCE(tenant_key, 'global')
+        ORDER BY
+          MAX(COALESCE(priority, ${DEFAULT_JOB_PRIORITY})) DESC,
+          MIN(created_at) ASC
+        LIMIT 1
+      ),
+      candidate AS (
         SELECT id
         FROM orchestrator_job_queue
         WHERE status = 'pending'
           AND COALESCE(ready_at, NOW()) <= NOW()
+          AND COALESCE(tenant_key, 'global') = (SELECT tenant_key FROM next_tenant)
         ORDER BY
           COALESCE(priority, ${DEFAULT_JOB_PRIORITY}) DESC,
           id ASC
@@ -176,8 +201,8 @@ export async function claimNextJob(workerId: string, leaseMs: number = DEFAULT_J
   }
 
   const job = await jobQueue.findFirst({
-    where: { status: 'pending' },
-    orderBy: { id: 'asc' },
+    where: { status: 'pending', readyAt: { lte: new Date() } },
+    orderBy: [{ priority: 'desc' }, { id: 'asc' }],
     select: { id: true, type: true, payload: true },
   });
   if (!job) return null;
@@ -334,6 +359,7 @@ export async function createDelegatedParentExecution(options: {
     },
     select: { id: true },
   });
+  publishAgentExecution(Number(row.id), 'created');
   return Number(row.id);
 }
 
@@ -354,6 +380,7 @@ export async function finalizeSupervisorExecution(
       totalCost: usage.cost,
     },
   });
+  publishAgentExecution(parentExecutionId, 'finalized');
 }
 
 export async function collectExecutionUsage(executionIds: number[]) {
@@ -497,6 +524,7 @@ export async function createWorkflowRun(workflowId: number, triggerType: string,
     },
     select: { id: true },
   });
+  publishWorkflowRun(Number(row.id), 'created');
   return Number(row.id);
 }
 
@@ -510,6 +538,7 @@ export async function persistWorkflowRun(runId: number, status: string, output: 
       updatedAt: new Date(),
     },
   });
+  publishWorkflowRun(runId, 'updated');
 }
 
 export async function getWorkflowRun(runId: number) {
@@ -595,6 +624,7 @@ export async function createAgentExecution(data: {
     },
     select: { id: true },
   });
+  publishAgentExecution(Number(row.id), 'created');
   return Number(row.id);
 }
 
@@ -619,6 +649,7 @@ export async function updateAgentExecution(execId: number, data: {
       task: data.task,
     },
   });
+  publishAgentExecution(execId, 'updated');
 }
 
 export async function getAgentExecution(execId: number) {
@@ -673,7 +704,7 @@ export async function updateToolExecution(id: number, data: {
   error?: string | null;
   durationMs?: number | null;
 }) {
-  await getPrisma().orchestratorToolExecution.update({
+  const updated = await getPrisma().orchestratorToolExecution.update({
     where: { id },
     data: {
       status: data.status,
@@ -682,6 +713,8 @@ export async function updateToolExecution(id: number, data: {
       durationMs: data.durationMs ?? null,
     },
   });
+  const executionId = Number((updated as any)?.agentExecutionId || 0);
+  if (executionId > 0) publishAgentExecution(executionId, 'tool_updated');
 }
 
 export async function getExecutionCostTotals(options: {

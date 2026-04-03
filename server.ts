@@ -70,6 +70,7 @@ import {
   syncCrewExecutionMetrics,
   syncCrewExecutionStatus,
 } from './src/runtime/executionState';
+import { subscribeAgentExecution, subscribeCrewExecution, subscribeWorkflowRun } from './src/runtime/executionEvents';
 import { spawn } from 'child_process';
 import rateLimit from 'express-rate-limit';
 import { randomUUID } from 'node:crypto';
@@ -609,6 +610,12 @@ function readJobPriority(rawValue: unknown, fallback: number = JOB_PRIORITY.NORM
   const value = Number(rawValue);
   if (!Number.isFinite(value)) return fallback;
   return Math.min(1000, Math.max(0, Math.round(value)));
+}
+
+function readTenantKey(rawValue: unknown, fallback: string = 'global') {
+  const value = String(rawValue ?? '').trim();
+  if (!value) return fallback;
+  return value.slice(0, 120);
 }
 
 function getCancelToken(map: Map<number, CancelToken>, id: number) {
@@ -5581,7 +5588,6 @@ app.get('/api/workflow-runs/:id/stream', requireUser, async (req, res) => {
     const run = await getPrisma().orchestratorWorkflowRun.findUnique({ where: { id } });
     if (!run) {
       res.write(`event: error\ndata: ${JSON.stringify({ error: 'Workflow run not found' })}\n\n`);
-      clearInterval(timer);
       res.end();
       return;
     }
@@ -5601,14 +5607,23 @@ app.get('/api/workflow-runs/:id/stream', requireUser, async (req, res) => {
     })}\n\n`);
     if (run.status !== 'running' && run.status !== 'pending') {
       res.write(`event: done\ndata: ${JSON.stringify({ status: run.status, run_id: id })}\n\n`);
-      clearInterval(timer);
       res.end();
     }
   };
 
-  const timer = setInterval(() => { void sendSnapshot(); }, 1200);
   await sendSnapshot();
-  req.on('close', () => clearInterval(timer));
+  const unsubscribe = subscribeWorkflowRun(id, () => {
+    void sendSnapshot();
+  });
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`event: ping\ndata: {}\n\n`);
+    } catch {}
+  }, 15_000);
+  req.on('close', () => {
+    unsubscribe();
+    clearInterval(heartbeat);
+  });
 });
 
 app.post('/api/workflow-runs/:id/feedback', requireUser, async (req, res) => {
@@ -5647,6 +5662,7 @@ app.post('/api/workflows/:id/execute', requireUser, async (req, res) => {
     if (!shouldWait) {
       const jobId = await enqueueJob('run_workflow', { workflowId: id, runId, userId }, {
         priority: readJobPriority(req.body?.priority, JOB_PRIORITY.HIGH),
+        tenantKey: readTenantKey(req.user?.orgId || userId || 'global'),
       });
       return acceptedExecutionResponse(res, { run_id: runId, job_id: jobId });
     }
@@ -5682,6 +5698,7 @@ app.post('/api/workflows/:id/webhook', async (req, res) => {
     if (!shouldWait) {
       const jobId = await enqueueJob('run_workflow', { workflowId: id, runId, userId: null }, {
         priority: readJobPriority(req.body?.priority, JOB_PRIORITY.HIGH),
+        tenantKey: readTenantKey('public:webhook'),
       });
       return acceptedExecutionResponse(res, { run_id: runId, job_id: jobId });
     }
@@ -6103,6 +6120,7 @@ app.post('/api/agents/:id/run', localRunLimiter, async (req, res) => {
           initiatedBy: 'direct_agent_api',
         }, {
           priority: readJobPriority(req.body?.priority, JOB_PRIORITY.HIGH),
+          tenantKey: readTenantKey((req as any)?.user?.orgId || user_id || 'global'),
         });
 
         if (!shouldWaitForExecution(req)) {
@@ -6219,6 +6237,7 @@ app.post('/api/agents/:id/chat', requireUser, localRunLimiter, async (req, res) 
         initiatedBy: 'agent_chat_ui',
       }, {
         priority: readJobPriority(req.body?.priority, JOB_PRIORITY.CRITICAL),
+        tenantKey: readTenantKey((req as any)?.user?.orgId || user_id || 'global'),
       });
       const result = await waitForJob(jobId, 120000);
       res.json({
@@ -8602,7 +8621,7 @@ function getProviderBaselinePricing(providerType: string): { input: number; outp
 async function enqueueJob(
   type: string,
   payload: any,
-  options?: { priority?: number; delayMs?: number }
+  options?: { priority?: number; delayMs?: number; tenantKey?: string | null }
 ) {
   return await enqueueRuntimeJob(type, payload, options);
 }
@@ -8694,6 +8713,7 @@ async function runDelegatedAgentExecution(options: {
         initiatedBy: 'delegated_agent_child',
         parentExecutionId,
         delegationTitle: delegation.title,
+        tenantKey: readTenantKey(userId || `delegated:${supervisorAgent.id}`),
       });
       await getPrisma().orchestratorAgentDelegation.update({
         where: { id: delegation.id },
@@ -10578,6 +10598,7 @@ app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
     userId,
   }, {
     priority: readJobPriority(req.body?.priority, JOB_PRIORITY.NORMAL),
+    tenantKey: readTenantKey((req as any)?.user?.orgId || userId || 'global'),
   });
 
   const shouldWait = shouldWaitForExecution(req) || wait === true;
@@ -10663,16 +10684,23 @@ app.get('/api/executions/:id/stream', (req, res) => {
     if (exec.status === 'completed' || exec.status === 'failed' || exec.status === 'canceled') {
       const result = extractCrewFinalResult(logs);
       res.write(`event: done\ndata: ${JSON.stringify({ status: exec.status, result: result || null })}\n\n`);
-      clearInterval(timer);
       res.end();
     }
   };
 
-  const timer = setInterval(() => {
-    void sendSnapshot();
-  }, 1200);
   void sendSnapshot();
-  req.on('close', () => clearInterval(timer));
+  const unsubscribe = subscribeCrewExecution(executionId, () => {
+    void sendSnapshot();
+  });
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`event: ping\ndata: {}\n\n`);
+    } catch {}
+  }, 15_000);
+  req.on('close', () => {
+    unsubscribe();
+    clearInterval(heartbeat);
+  });
 });
 
 app.post('/api/executions/:id/feedback', requireUser, async (req, res) => {
@@ -10735,7 +10763,6 @@ app.get('/api/agent-executions/:id/stream', async (req, res) => {
     const exec = await getRuntimeAgentExecution(execId);
     if (!exec) {
       res.write(`event: error\ndata: ${JSON.stringify({ error: 'Execution not found' })}\n\n`);
-      clearInterval(timer);
       res.end();
       return;
     }
@@ -10749,13 +10776,22 @@ app.get('/api/agent-executions/:id/stream', async (req, res) => {
     res.write(`event: update\ndata: ${JSON.stringify({ execution: exec, tools, delegations, orchestration })}\n\n`);
     if (exec.status !== 'running') {
       res.write(`event: done\ndata: ${JSON.stringify({ status: exec.status })}\n\n`);
-      clearInterval(timer);
       res.end();
     }
   };
-  const timer = setInterval(() => { void sendSnapshot(); }, 1200);
   await sendSnapshot();
-  req.on('close', () => clearInterval(timer));
+  const unsubscribe = subscribeAgentExecution(execId, () => {
+    void sendSnapshot();
+  });
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`event: ping\ndata: {}\n\n`);
+    } catch {}
+  }, 15_000);
+  req.on('close', () => {
+    unsubscribe();
+    clearInterval(heartbeat);
+  });
 });
 
 app.get('/api/agent-executions/:id/timeline', async (req, res) => {
@@ -10817,6 +10853,7 @@ app.post('/api/agent-executions/:id/retry', async (req, res) => {
     retryOfExecutionId: execId,
   }, {
     priority: JOB_PRIORITY.HIGH,
+    tenantKey: readTenantKey((req as any)?.user?.orgId || 'global'),
   });
   if (!shouldWaitForExecution(req)) {
     return acceptedExecutionResponse(res, { job_id: jobId });
@@ -10839,6 +10876,7 @@ app.post('/api/agent-executions/:id/resume', async (req, res) => {
     retryOfExecutionId: execId,
   }, {
     priority: JOB_PRIORITY.HIGH,
+    tenantKey: readTenantKey((req as any)?.user?.orgId || 'global'),
   });
   if (!shouldWaitForExecution(req)) {
     return acceptedExecutionResponse(res, { job_id: jobId });

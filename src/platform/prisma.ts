@@ -101,6 +101,7 @@ async function ensureSchemaCompatibility(prisma: PrismaClient) {
     `ALTER TABLE IF EXISTS orchestrator_job_queue ADD COLUMN IF NOT EXISTS attempts INTEGER DEFAULT 0`,
     `ALTER TABLE IF EXISTS orchestrator_job_queue ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 100`,
     `ALTER TABLE IF EXISTS orchestrator_job_queue ADD COLUMN IF NOT EXISTS ready_at TIMESTAMPTZ DEFAULT NOW()`,
+    `ALTER TABLE IF EXISTS orchestrator_job_queue ADD COLUMN IF NOT EXISTS tenant_key TEXT DEFAULT 'global'`,
   ];
 
   for (const sql of statements) {
@@ -117,6 +118,10 @@ async function ensureSchemaCompatibility(prisma: PrismaClient) {
   await prisma.$executeRawUnsafe(`
     CREATE INDEX IF NOT EXISTS orchestrator_job_queue_status_ready_priority_idx
     ON orchestrator_job_queue (status, ready_at, priority DESC, id)
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS orchestrator_job_queue_status_ready_tenant_priority_idx
+    ON orchestrator_job_queue (status, ready_at, tenant_key, priority DESC, id)
   `);
 }
 

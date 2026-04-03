@@ -1,3 +1,4 @@
+import { publishCrewExecution } from './executionEvents';
 type CrewLogPayload = Record<string, unknown>;
 type CrewExecutionRecord = {
   id: number;
@@ -63,6 +64,7 @@ export async function createCrewExecutionRecord(options: {
 
   db.prepare('INSERT INTO crew_executions (id, crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?, ?)')
     .run(execution.id, crewId, status, JSON.stringify([]), initialInput, retryOf);
+  publishCrewExecution(Number(execution.id), 'created');
 
   return execution;
 }
@@ -87,6 +89,7 @@ export async function appendCrewExecutionLog(options: {
 
   db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
     .run(executionId, type, serializedPayload);
+  publishCrewExecution(executionId, `log:${type}`);
 }
 
 export async function syncCrewExecutionMetrics(options: {
@@ -110,6 +113,7 @@ export async function syncCrewExecutionMetrics(options: {
 
   db.prepare('UPDATE crew_executions SET prompt_tokens = ?, completion_tokens = ?, total_cost = ? WHERE id = ?')
     .run(promptTokens, completionTokens, totalCost, executionId);
+  publishCrewExecution(executionId, 'metrics_updated');
 }
 
 export async function getCrewExecutionStatus(options: {
@@ -267,6 +271,7 @@ export async function syncCrewExecutionStatus(options: {
     data: { status },
   });
   db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run(status, executionId);
+  publishCrewExecution(executionId, `status:${status}`);
 
   if (logType) {
     await appendCrewExecutionLog({
