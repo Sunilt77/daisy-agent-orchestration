@@ -82,6 +82,7 @@ import * as internalTools from './src/orchestrator/internalTools.js';
 import { registerOrchestratorConfigRoutes } from './src/server/registerOrchestratorConfigRoutes';
 import { registerMcpAdminRoutes } from './src/server/registerMcpAdminRoutes';
 import { registerRuntimeControlRoutes } from './src/server/registerRuntimeControlRoutes';
+import { getNextCronOccurrenceUtc, parseCronExpression } from './src/server/cron';
 import { WebSocketServer, WebSocket } from 'ws';
 import { requireUser } from './src/platform/auth';
 import {
@@ -595,6 +596,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 const JOB_CONCURRENCY = Number(process.env.JOB_CONCURRENCY) || 2;
 const JOB_TIMEOUT_MS = Number(process.env.JOB_TIMEOUT_MS) || 120000;
 const CREW_PARALLEL_TASK_CONCURRENCY = Math.max(1, Number(process.env.CREW_PARALLEL_TASK_CONCURRENCY) || 3);
+const CRON_SCHEDULER_POLL_MS = Math.max(5_000, Number(process.env.CRON_SCHEDULER_POLL_MS) || 15_000);
 const JOB_PRIORITY = {
   CRITICAL: 300,
   HIGH: 200,
@@ -602,6 +604,7 @@ const JOB_PRIORITY = {
   LOW: 50,
 } as const;
 let workerTimer: NodeJS.Timeout | null = null;
+let cronSchedulerTimer: NodeJS.Timeout | null = null;
 let workerRunning = 0;
 const agentCancelTokens = new Map<number, CancelToken>();
 const crewCancelTokens = new Map<number, CancelToken>();
@@ -617,6 +620,86 @@ function readTenantKey(rawValue: unknown, fallback: string = 'global') {
   const value = String(rawValue ?? '').trim();
   if (!value) return fallback;
   return value.slice(0, 120);
+}
+
+type AgentCronJobRow = {
+  id: number;
+  agent_id: number;
+  name: string;
+  cron_expr: string;
+  timezone: string;
+  task: string;
+  enabled: boolean;
+  priority: number;
+  tenant_key: string | null;
+  next_run_at: Date | string | null;
+  last_run_at: Date | string | null;
+  last_status: string | null;
+  last_error: string | null;
+  created_by_user_id: string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+};
+
+function asIsoString(value: Date | string | null | undefined) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString();
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
+function normalizeAgentCronJobRow(row: AgentCronJobRow) {
+  return {
+    id: Number(row.id),
+    agent_id: Number(row.agent_id),
+    name: String(row.name || ''),
+    cron_expr: String(row.cron_expr || ''),
+    timezone: String(row.timezone || 'UTC'),
+    task: String(row.task || ''),
+    enabled: Boolean(row.enabled),
+    priority: Number(row.priority ?? JOB_PRIORITY.NORMAL),
+    tenant_key: row.tenant_key || 'global',
+    next_run_at: asIsoString(row.next_run_at),
+    last_run_at: asIsoString(row.last_run_at),
+    last_status: row.last_status || null,
+    last_error: row.last_error || null,
+    created_by_user_id: row.created_by_user_id || null,
+    created_at: asIsoString(row.created_at),
+    updated_at: asIsoString(row.updated_at),
+  };
+}
+
+async function ensureAgentCronJobsTable() {
+  const prisma = getPrisma();
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS orchestrator_agent_cron_jobs (
+      id SERIAL PRIMARY KEY,
+      agent_id INTEGER NOT NULL REFERENCES orchestrator_agents(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      cron_expr TEXT NOT NULL,
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      task TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      priority INTEGER NOT NULL DEFAULT 100,
+      tenant_key TEXT DEFAULT 'global',
+      next_run_at TIMESTAMPTZ,
+      last_run_at TIMESTAMPTZ,
+      last_status TEXT,
+      last_error TEXT,
+      created_by_user_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS idx_orchestrator_agent_cron_jobs_due
+      ON orchestrator_agent_cron_jobs(enabled, next_run_at);
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS idx_orchestrator_agent_cron_jobs_agent
+      ON orchestrator_agent_cron_jobs(agent_id);
+  `);
 }
 
 function normalizeCrewProcess(value: unknown): 'sequential' | 'hierarchical' | 'parallel' {
@@ -9317,6 +9400,94 @@ async function recoverStaleExecutionState() {
   }
 }
 
+async function tickAgentCronScheduler() {
+  const prisma = getPrisma();
+  const lockId = 928_443_107;
+  const lockRows = await prisma.$queryRawUnsafe<Array<{ ok: boolean }>>(
+    'SELECT pg_try_advisory_lock($1) AS ok',
+    lockId,
+  );
+  if (!lockRows?.[0]?.ok) return;
+
+  try {
+    const dueRows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(`
+      WITH due AS (
+        SELECT id
+        FROM orchestrator_agent_cron_jobs
+        WHERE enabled = TRUE
+          AND next_run_at IS NOT NULL
+          AND next_run_at <= NOW()
+        ORDER BY next_run_at ASC
+        LIMIT 25
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE orchestrator_agent_cron_jobs j
+      SET
+        last_run_at = NOW(),
+        last_status = 'queued',
+        last_error = NULL,
+        next_run_at = NULL,
+        updated_at = NOW()
+      FROM due
+      WHERE j.id = due.id
+      RETURNING j.*;
+    `);
+
+    for (const row of dueRows || []) {
+      try {
+        const nextRunAt = getNextCronOccurrenceUtc(String(row.cron_expr || ''), new Date());
+        await enqueueJob(
+          'run_agent',
+          {
+            agentId: Number(row.agent_id),
+            task: String(row.task || ''),
+            user_id: row.created_by_user_id || undefined,
+            initiatedBy: 'cron_scheduler',
+          },
+          {
+            priority: readJobPriority(row.priority, JOB_PRIORITY.NORMAL),
+            tenantKey: readTenantKey(row.tenant_key || 'global'),
+          },
+        );
+        await prisma.$executeRawUnsafe(
+          `
+            UPDATE orchestrator_agent_cron_jobs
+            SET next_run_at = $2, updated_at = NOW()
+            WHERE id = $1
+          `,
+          Number(row.id),
+          nextRunAt,
+        );
+      } catch (error: any) {
+        await prisma.$executeRawUnsafe(
+          `
+            UPDATE orchestrator_agent_cron_jobs
+            SET
+              last_status = 'failed',
+              last_error = $2,
+              next_run_at = NULL,
+              updated_at = NOW()
+            WHERE id = $1
+          `,
+          Number(row.id),
+          String(error?.message || 'Failed to enqueue cron job'),
+        );
+      }
+    }
+  } finally {
+    await prisma.$queryRawUnsafe('SELECT pg_advisory_unlock($1)', lockId);
+  }
+}
+
+function startAgentCronScheduler() {
+  if (cronSchedulerTimer) return;
+  const run = () => tickAgentCronScheduler().catch((error) => {
+    console.error('Cron scheduler tick failed:', error);
+  });
+  cronSchedulerTimer = setInterval(run, CRON_SCHEDULER_POLL_MS);
+  void run();
+}
+
 interface RunResult {
     exec_id?: number;
     text: string;
@@ -11239,6 +11410,238 @@ registerRuntimeControlRoutes({
   getCancelToken,
 });
 
+app.get('/api/agent-cron-jobs', requireUser, async (req, res) => {
+  try {
+    await ensureAgentCronJobsTable();
+    const scope = await resolveOrchestratorAccessScope(req);
+    const prisma = getPrisma();
+    const rawAgentId = Number(req.query.agent_id);
+
+    if (Number.isFinite(rawAgentId) && rawAgentId > 0) {
+      requireVisibleAgentId(scope, rawAgentId);
+      const rows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+        `
+          SELECT *
+          FROM orchestrator_agent_cron_jobs
+          WHERE agent_id = $1
+          ORDER BY id DESC
+        `,
+        rawAgentId,
+      );
+      return res.json(rows.map(normalizeAgentCronJobRow));
+    }
+
+    if (scope.isAdmin) {
+      const rows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+        'SELECT * FROM orchestrator_agent_cron_jobs ORDER BY id DESC',
+      );
+      return res.json(rows.map(normalizeAgentCronJobRow));
+    }
+
+    const scopedAgentIds = getScopedAgentIds(scope);
+    if (!scopedAgentIds?.length) return res.json([]);
+    const rows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+      `
+        SELECT *
+        FROM orchestrator_agent_cron_jobs
+        WHERE agent_id = ANY($1::int[])
+        ORDER BY id DESC
+      `,
+      scopedAgentIds,
+    );
+    res.json(rows.map(normalizeAgentCronJobRow));
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to load agent cron jobs' });
+  }
+});
+
+app.post('/api/agent-cron-jobs', requireUser, async (req, res) => {
+  try {
+    await ensureAgentCronJobsTable();
+    const scope = await resolveOrchestratorAccessScope(req);
+    const prisma = getPrisma();
+    const agentId = Number(req.body?.agent_id);
+    if (!Number.isFinite(agentId) || agentId <= 0) {
+      return res.status(400).json({ error: 'agent_id is required' });
+    }
+    requireVisibleAgentId(scope, agentId);
+
+    const name = String(req.body?.name || '').trim();
+    const cronExpr = String(req.body?.cron_expr || '').trim();
+    const task = String(req.body?.task || '').trim();
+    const timezone = String(req.body?.timezone || 'UTC').trim() || 'UTC';
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    if (!task) return res.status(400).json({ error: 'task is required' });
+    if (timezone.toUpperCase() !== 'UTC') {
+      return res.status(400).json({ error: 'Only UTC timezone is currently supported' });
+    }
+
+    parseCronExpression(cronExpr);
+    const enabled = req.body?.enabled !== false;
+    const priority = readJobPriority(req.body?.priority, JOB_PRIORITY.NORMAL);
+    const tenantKey = readTenantKey(req.body?.tenant_key ?? scope.user.orgId ?? 'global');
+    const nextRunAt = enabled ? getNextCronOccurrenceUtc(cronExpr, new Date()) : null;
+
+    const rows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+      `
+        INSERT INTO orchestrator_agent_cron_jobs
+          (agent_id, name, cron_expr, timezone, task, enabled, priority, tenant_key, next_run_at, created_by_user_id)
+        VALUES
+          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING *
+      `,
+      agentId,
+      name,
+      cronExpr,
+      timezone,
+      task,
+      enabled,
+      priority,
+      tenantKey,
+      nextRunAt,
+      scope.user.id,
+    );
+    res.json(normalizeAgentCronJobRow(rows[0]));
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to create agent cron job' });
+  }
+});
+
+app.put('/api/agent-cron-jobs/:id', requireUser, async (req, res) => {
+  try {
+    await ensureAgentCronJobsTable();
+    const scope = await resolveOrchestratorAccessScope(req);
+    const prisma = getPrisma();
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'Invalid cron job id' });
+    const existingRows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+      'SELECT * FROM orchestrator_agent_cron_jobs WHERE id = $1 LIMIT 1',
+      id,
+    );
+    const existing = existingRows?.[0];
+    if (!existing) return res.status(404).json({ error: 'Cron job not found' });
+    requireVisibleAgentId(scope, Number(existing.agent_id));
+
+    const name = req.body?.name != null ? String(req.body.name).trim() : String(existing.name || '');
+    const cronExpr = req.body?.cron_expr != null ? String(req.body.cron_expr).trim() : String(existing.cron_expr || '');
+    const task = req.body?.task != null ? String(req.body.task).trim() : String(existing.task || '');
+    const timezone = req.body?.timezone != null ? String(req.body.timezone).trim() : String(existing.timezone || 'UTC');
+    const enabled = req.body?.enabled == null ? Boolean(existing.enabled) : Boolean(req.body.enabled);
+    const priority = req.body?.priority == null ? Number(existing.priority ?? JOB_PRIORITY.NORMAL) : readJobPriority(req.body.priority, JOB_PRIORITY.NORMAL);
+    const tenantKey = req.body?.tenant_key == null ? readTenantKey(existing.tenant_key || 'global') : readTenantKey(req.body.tenant_key, 'global');
+
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    if (!task) return res.status(400).json({ error: 'task is required' });
+    if (timezone.toUpperCase() !== 'UTC') {
+      return res.status(400).json({ error: 'Only UTC timezone is currently supported' });
+    }
+    parseCronExpression(cronExpr);
+    const nextRunAt = enabled ? getNextCronOccurrenceUtc(cronExpr, new Date()) : null;
+
+    const rows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+      `
+        UPDATE orchestrator_agent_cron_jobs
+        SET
+          name = $2,
+          cron_expr = $3,
+          timezone = $4,
+          task = $5,
+          enabled = $6,
+          priority = $7,
+          tenant_key = $8,
+          next_run_at = $9,
+          last_error = CASE WHEN $6 THEN NULL ELSE last_error END,
+          updated_at = NOW()
+        WHERE id = $1
+        RETURNING *
+      `,
+      id,
+      name,
+      cronExpr,
+      timezone,
+      task,
+      enabled,
+      priority,
+      tenantKey,
+      nextRunAt,
+    );
+    res.json(normalizeAgentCronJobRow(rows[0]));
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to update agent cron job' });
+  }
+});
+
+app.post('/api/agent-cron-jobs/:id/run-now', requireUser, async (req, res) => {
+  try {
+    await ensureAgentCronJobsTable();
+    const scope = await resolveOrchestratorAccessScope(req);
+    const prisma = getPrisma();
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'Invalid cron job id' });
+    const rows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+      'SELECT * FROM orchestrator_agent_cron_jobs WHERE id = $1 LIMIT 1',
+      id,
+    );
+    const row = rows?.[0];
+    if (!row) return res.status(404).json({ error: 'Cron job not found' });
+    requireVisibleAgentId(scope, Number(row.agent_id));
+
+    const jobId = await enqueueJob(
+      'run_agent',
+      {
+        agentId: Number(row.agent_id),
+        task: String(row.task || ''),
+        user_id: scope.user.id,
+        initiatedBy: 'cron_manual_run',
+      },
+      {
+        priority: readJobPriority(row.priority, JOB_PRIORITY.NORMAL),
+        tenantKey: readTenantKey(row.tenant_key || scope.user.orgId || 'global'),
+      },
+    );
+
+    const nextRunAt = Boolean(row.enabled) ? getNextCronOccurrenceUtc(String(row.cron_expr || ''), new Date()) : null;
+    await prisma.$executeRawUnsafe(
+      `
+        UPDATE orchestrator_agent_cron_jobs
+        SET
+          last_run_at = NOW(),
+          last_status = 'queued',
+          last_error = NULL,
+          next_run_at = $2,
+          updated_at = NOW()
+        WHERE id = $1
+      `,
+      id,
+      nextRunAt,
+    );
+    res.json({ success: true, job_id: jobId, cron_job_id: id });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to run cron job' });
+  }
+});
+
+app.delete('/api/agent-cron-jobs/:id', requireUser, async (req, res) => {
+  try {
+    await ensureAgentCronJobsTable();
+    const scope = await resolveOrchestratorAccessScope(req);
+    const prisma = getPrisma();
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'Invalid cron job id' });
+    const rows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+      'SELECT * FROM orchestrator_agent_cron_jobs WHERE id = $1 LIMIT 1',
+      id,
+    );
+    const row = rows?.[0];
+    if (!row) return res.status(404).json({ error: 'Cron job not found' });
+    requireVisibleAgentId(scope, Number(row.agent_id));
+    await prisma.$executeRawUnsafe('DELETE FROM orchestrator_agent_cron_jobs WHERE id = $1', id);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to delete cron job' });
+  }
+});
+
 app.post('/api/task-control/cancel-pending-jobs', async (req, res) => {
   const prisma = getPrisma();
   const pendingJobs = await prisma.orchestratorJobQueue.findMany({
@@ -11460,6 +11863,10 @@ async function shutdown(signal: string) {
   if (workerTimer) {
     clearInterval(workerTimer);
     workerTimer = null;
+  }
+  if (cronSchedulerTimer) {
+    clearInterval(cronSchedulerTimer);
+    cronSchedulerTimer = null;
   }
   if (gcsSyncTimer) {
     clearInterval(gcsSyncTimer);
@@ -12057,6 +12464,7 @@ async function startServer() {
     await prisma.orchestratorAgent.updateMany({
       data: { status: 'idle' },
     });
+    await ensureAgentCronJobsTable();
     await ensureBuiltInInternalTools();
     await refreshPersistentMirror();
     
@@ -12090,6 +12498,7 @@ async function startServer() {
 
   scheduleRetention();
   startJobWorker();
+  startAgentCronScheduler();
   gcsSyncTimer = startSqliteGcsSyncLoop(getSqlitePath());
 }
 
