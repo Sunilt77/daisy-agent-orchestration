@@ -38,6 +38,7 @@ export default function TaskControlPage() {
   const [failedCrewPage, setFailedCrewPage] = useState(1);
   const [pageSize, setPageSize] = useState(8);
   const [query, setQuery] = useState('');
+  const [sectionFilter, setSectionFilter] = useState<'all' | 'running' | 'pending' | 'failed'>('all');
 
   const load = async () => {
     setLoading(true);
@@ -69,6 +70,13 @@ export default function TaskControlPage() {
   useEffect(() => setPendingJobsPage(1), [pendingJobs.length]);
   useEffect(() => setFailedAgentPage(1), [failedAgentExecutions.length]);
   useEffect(() => setFailedCrewPage(1), [failedCrewExecutions.length]);
+  useEffect(() => {
+    setRunningAgentPage(1);
+    setRunningCrewPage(1);
+    setPendingJobsPage(1);
+    setFailedAgentPage(1);
+    setFailedCrewPage(1);
+  }, [query, sectionFilter, pageSize]);
 
   const postAction = async (url: string, successMessage: string) => {
     const res = await fetch(url, { method: 'POST' });
@@ -95,6 +103,7 @@ export default function TaskControlPage() {
   const pagedPendingJobs = useMemo(() => sliceByPage(filteredPendingJobs, pendingJobsPage), [filteredPendingJobs, pendingJobsPage, pageSize]);
   const pagedFailedAgents = useMemo(() => sliceByPage(filteredFailedAgentExecutions, failedAgentPage), [filteredFailedAgentExecutions, failedAgentPage, pageSize]);
   const pagedFailedCrews = useMemo(() => sliceByPage(filteredFailedCrewExecutions, failedCrewPage), [filteredFailedCrewExecutions, failedCrewPage, pageSize]);
+  const hasTaskFilters = query.trim().length > 0 || sectionFilter !== 'all';
 
   return (
     <div className="space-y-6">
@@ -197,8 +206,38 @@ export default function TaskControlPage() {
             </select>
           </div>
         </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {[
+            { key: 'all', label: 'All' },
+            { key: 'running', label: 'Running' },
+            { key: 'pending', label: 'Pending' },
+            { key: 'failed', label: 'Failed' },
+          ].map((chip) => (
+            <button
+              key={chip.key}
+              type="button"
+              onClick={() => setSectionFilter(chip.key as 'all' | 'running' | 'pending' | 'failed')}
+              className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${
+                sectionFilter === chip.key
+                  ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                  : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            disabled={!hasTaskFilters}
+            onClick={() => { setQuery(''); setSectionFilter('all'); }}
+            className="ml-auto rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-50 disabled:opacity-45"
+          >
+            Reset Filters
+          </button>
+        </div>
       </div>
 
+      {(sectionFilter === 'all' || sectionFilter === 'running') && (
       <section className="bg-white rounded-xl border border-slate-200 p-4">
         <h2 className="font-semibold text-slate-900 mb-3">Running Agent Executions ({runningAgentExecutions.length})</h2>
         <div className="space-y-2">
@@ -222,7 +261,9 @@ export default function TaskControlPage() {
           <Pagination page={runningAgentPage} pageSize={pageSize} total={filteredRunningAgentExecutions.length} onPageChange={setRunningAgentPage} />
         </div>
       </section>
+      )}
 
+      {(sectionFilter === 'all' || sectionFilter === 'running') && (
       <section className="bg-white rounded-xl border border-slate-200 p-4">
         <h2 className="font-semibold text-slate-900 mb-3">Running Crew Executions ({runningCrewExecutions.length})</h2>
         <div className="space-y-2">
@@ -243,7 +284,9 @@ export default function TaskControlPage() {
           <Pagination page={runningCrewPage} pageSize={pageSize} total={filteredRunningCrewExecutions.length} onPageChange={setRunningCrewPage} />
         </div>
       </section>
+      )}
 
+      {(sectionFilter === 'all' || sectionFilter === 'pending') && (
       <section className="bg-white rounded-xl border border-slate-200 p-4">
         <h2 className="font-semibold text-slate-900 mb-3">Pending Jobs ({pendingJobs.length})</h2>
         <div className="space-y-2">
@@ -264,7 +307,9 @@ export default function TaskControlPage() {
           <Pagination page={pendingJobsPage} pageSize={pageSize} total={filteredPendingJobs.length} onPageChange={setPendingJobsPage} />
         </div>
       </section>
+      )}
 
+      {(sectionFilter === 'all' || sectionFilter === 'failed') && (
       <section className="bg-white rounded-xl border border-slate-200 p-4">
         <h2 className="font-semibold text-slate-900 mb-3">Failed Executions</h2>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
@@ -305,6 +350,7 @@ export default function TaskControlPage() {
           </div>
         </div>
       </section>
+      )}
 
       {loading && <div className="text-xs text-slate-500">Refreshing...</div>}
     </div>

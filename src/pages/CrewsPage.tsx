@@ -224,7 +224,7 @@ export default function CrewsPage() {
   }, [autoBuildProvider, isAutoBuilding]);
 
   const autoBuildCrew = async () => {
-      if (!autoBuildGoal) return;
+      if (!autoBuildGoal || autoBuildGoal.trim().length > 1200) return;
       setIsBuilding(true);
       setBuildError('');
       setBuildEvents([]);
@@ -303,6 +303,9 @@ export default function CrewsPage() {
   useEffect(() => {
     setCrewsPage(1);
   }, [crews.length]);
+  useEffect(() => {
+    setCrewsPage(1);
+  }, [crewSearch, processFilter, exposureFilter, crewSortMode, crewsPageSize]);
 
   const handleOpenModal = (crew: Crew | null = null) => {
     setSaveError('');
@@ -530,6 +533,25 @@ export default function CrewsPage() {
     setExposureFilter('all');
     setCrewSortMode('size');
   };
+  const hasCrewFilters = crewSearch.trim().length > 0 || processFilter !== 'all' || exposureFilter !== 'all' || crewSortMode !== 'size';
+  const autoBuildGoalTooLong = autoBuildGoal.trim().length > 1200;
+  const autoBuildTemplates = [
+    {
+      label: 'Research Syndicate',
+      goal: 'Build a hierarchical crew that coordinates market research, data validation, and final executive synthesis for a weekly strategy brief.',
+      process: 'hierarchical' as const,
+    },
+    {
+      label: 'Growth Squad',
+      goal: 'Build a parallel crew for SEO, paid campaigns, and social content analysis with one combined recommendation output.',
+      process: 'parallel' as const,
+    },
+    {
+      label: 'Delivery Pipeline',
+      goal: 'Build a sequential crew that takes requirements, drafts implementation notes, validates quality checks, and prepares final delivery docs.',
+      process: 'sequential' as const,
+    },
+  ];
   const selectedSupervisorCount = useMemo(
     () => selectedCrewAgents.filter((agent) => agent.agent_role === 'supervisor').length,
     [selectedCrewAgents]
@@ -787,16 +809,20 @@ export default function CrewsPage() {
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {[
-            { label: 'All', onClick: () => { setProcessFilter('all'); setExposureFilter('all'); } },
-            { label: 'Hierarchical', onClick: () => setProcessFilter('hierarchical') },
-            { label: 'Parallel', onClick: () => setProcessFilter('parallel') },
-            { label: 'Exposed', onClick: () => setExposureFilter('exposed') },
+            { label: 'All', active: processFilter === 'all' && exposureFilter === 'all', onClick: () => { setProcessFilter('all'); setExposureFilter('all'); } },
+            { label: 'Hierarchical', active: processFilter === 'hierarchical', onClick: () => setProcessFilter('hierarchical') },
+            { label: 'Parallel', active: processFilter === 'parallel', onClick: () => setProcessFilter('parallel') },
+            { label: 'Exposed', active: exposureFilter === 'exposed', onClick: () => setExposureFilter('exposed') },
           ].map((chip) => (
             <button
               key={chip.label}
               type="button"
               onClick={chip.onClick}
-              className="px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50"
+              className={`px-3 py-1.5 rounded-full border text-xs font-semibold transition-colors ${
+                chip.active
+                  ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+              }`}
             >
               {chip.label}
             </button>
@@ -804,7 +830,8 @@ export default function CrewsPage() {
           <button
             type="button"
             onClick={resetCrewFilters}
-            className="ml-auto px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50"
+            disabled={!hasCrewFilters}
+            className="ml-auto px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-45"
           >
             Reset Filters
           </button>
@@ -992,10 +1019,29 @@ export default function CrewsPage() {
                       <p className="text-slate-600 mb-6 text-sm font-medium">
                           Describe your goal, and our AI Architect will select the best agents from your library (or design new specialists) and wire them into a cohesive syndicate.
                       </p>
+                      <div className="mb-4 flex flex-wrap items-center gap-2">
+                        {autoBuildTemplates.map((template) => (
+                          <button
+                            key={template.label}
+                            type="button"
+                            onClick={() => {
+                              setAutoBuildGoal(template.goal);
+                              setAutoBuildProcessPreference(template.process);
+                            }}
+                            disabled={isBuilding}
+                            className="rounded-full border border-purple-200 bg-purple-50 px-3 py-1.5 text-xs font-semibold text-purple-700 hover:bg-purple-100 disabled:opacity-60"
+                          >
+                            {template.label}
+                          </button>
+                        ))}
+                      </div>
                       
                       <div className="space-y-4">
                           <div className="space-y-1">
-                              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Mission Objective</label>
+                              <div className="flex items-center justify-between">
+                                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Mission Objective</label>
+                                <span className={`text-[10px] font-semibold ${autoBuildGoalTooLong ? 'text-red-600' : 'text-slate-400'}`}>{autoBuildGoal.trim().length}/1200</span>
+                              </div>
                               <textarea
                                   className="w-full px-4 py-3 border border-slate-200 rounded-2xl focus:ring-4 focus:ring-purple-500/10 focus:border-purple-500 outline-none h-32 resize-none bg-slate-50/50 font-medium text-slate-700 transition-all"
                                   placeholder="e.g. Conduct a deep analysis of the current EV market and generate a series of engaging tweets about the findings."
@@ -1104,6 +1150,11 @@ export default function CrewsPage() {
                                {buildError}
                           </div>
                       )}
+                      {autoBuildGoalTooLong && (
+                          <div className="mt-4 p-3 bg-red-50 text-red-700 text-xs font-semibold rounded-2xl border border-red-100">
+                              Mission objective is too long. Keep it under 1200 characters for reliable crew generation.
+                          </div>
+                      )}
 
                       <div className="flex justify-end gap-3 mt-8">
                           <button 
@@ -1119,7 +1170,7 @@ export default function CrewsPage() {
                           <button 
                               onClick={autoBuildCrew}
                               className="premium-gradient text-white px-8 py-3 rounded-2xl flex items-center gap-2 transition-all hover:scale-105 active:scale-95 shadow-xl shadow-purple-200 font-bold text-sm disabled:opacity-50"
-                              disabled={isBuilding || !autoBuildGoal}
+                              disabled={isBuilding || !autoBuildGoal || autoBuildGoalTooLong}
                           >
                               {isBuilding ? (
                                   <>
