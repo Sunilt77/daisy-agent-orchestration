@@ -104,17 +104,26 @@ export default function TaskControlPage() {
   const pagedFailedAgents = useMemo(() => sliceByPage(filteredFailedAgentExecutions, failedAgentPage), [filteredFailedAgentExecutions, failedAgentPage, pageSize]);
   const pagedFailedCrews = useMemo(() => sliceByPage(filteredFailedCrewExecutions, failedCrewPage), [filteredFailedCrewExecutions, failedCrewPage, pageSize]);
   const hasTaskFilters = query.trim().length > 0 || sectionFilter !== 'all';
+  const filteredRunningTotal = filteredRunningAgentExecutions.length + filteredRunningCrewExecutions.length;
+  const filteredFailureTotal = filteredFailedAgentExecutions.length + filteredFailedCrewExecutions.length;
+  const filteredTotalRows = filteredRunningTotal + filteredPendingJobs.length + filteredFailureTotal;
+  const rawTotalRows = runningAgentExecutions.length + runningCrewExecutions.length + pendingJobs.length + failedAgentExecutions.length + failedCrewExecutions.length;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900">Task Control Center</h1>
-          <p className="text-slate-500 mt-1">See active agents/crews, queued jobs, and apply stop/retry actions.</p>
+      <div className="swarm-hero p-6">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="text-3xl font-black text-white">Task Control Center</h1>
+            <p className="text-slate-300 mt-1">Monitor active agent and crew workloads, queue health, and failure recovery in one place.</p>
+          </div>
+          <button
+            onClick={load}
+            className="px-3 py-2 rounded-lg border border-white/20 bg-white/10 text-white text-sm inline-flex items-center gap-2 hover:bg-white/15"
+          >
+            <RefreshCw size={14} /> Refresh
+          </button>
         </div>
-        <button onClick={load} className="px-3 py-2 rounded-lg border border-slate-300 text-slate-700 text-sm inline-flex items-center gap-2">
-          <RefreshCw size={14} /> Refresh
-        </button>
       </div>
 
       {msg && <div className="text-sm text-slate-700 bg-slate-100 border border-slate-200 rounded-lg px-3 py-2">{msg}</div>}
@@ -208,10 +217,10 @@ export default function TaskControlPage() {
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {[
-            { key: 'all', label: 'All' },
-            { key: 'running', label: 'Running' },
-            { key: 'pending', label: 'Pending' },
-            { key: 'failed', label: 'Failed' },
+            { key: 'all', label: `All (${rawTotalRows})` },
+            { key: 'running', label: `Running (${runningAgentExecutions.length + runningCrewExecutions.length})` },
+            { key: 'pending', label: `Pending (${pendingJobs.length})` },
+            { key: 'failed', label: `Failed (${failedAgentExecutions.length + failedCrewExecutions.length})` },
           ].map((chip) => (
             <button
               key={chip.key}
@@ -226,6 +235,9 @@ export default function TaskControlPage() {
               {chip.label}
             </button>
           ))}
+          <div className="text-xs text-slate-500 ml-1">
+            <span className="font-semibold text-slate-700">{filteredTotalRows}</span> visible of <span className="font-semibold text-slate-700">{rawTotalRows}</span>
+          </div>
           <button
             type="button"
             disabled={!hasTaskFilters}
@@ -235,6 +247,11 @@ export default function TaskControlPage() {
             Reset Filters
           </button>
         </div>
+        {hasTaskFilters && filteredTotalRows === 0 && (
+          <div className="mt-3 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            No task-control rows match your current search/filter combination.
+          </div>
+        )}
       </div>
 
       {(sectionFilter === 'all' || sectionFilter === 'running') && (
