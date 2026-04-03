@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { Plus, Trash2, User, Brain, Target, ScrollText, Wrench, Edit, Globe, Terminal, Copy, Check, X, Folder, Activity, Key, Sparkles, Play, Loader2, ExternalLink, Gauge, Search, List, LayoutGrid, ArrowUpDown, AudioLines, Radio } from 'lucide-react';
+import { Plus, Trash2, User, Brain, Target, ScrollText, Wrench, Edit, Globe, Terminal, Copy, Check, X, Folder, Activity, Key, Sparkles, Play, Loader2, ExternalLink, Gauge, Search, List, LayoutGrid, ArrowUpDown, AudioLines, Radio, CalendarClock, RefreshCw, Power } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Pagination from '../components/Pagination';
 import { LiveAgentCard } from '../components/LiveAgentCard';
@@ -118,6 +118,22 @@ interface AutoBuildEvent {
   received_at?: string;
 }
 
+interface AgentCronJob {
+  id: number;
+  agent_id: number;
+  name: string;
+  cron_expr: string;
+  timezone: string;
+  task: string;
+  enabled: boolean;
+  priority: number;
+  tenant_key?: string;
+  next_run_at?: string | null;
+  last_run_at?: string | null;
+  last_status?: string | null;
+  last_error?: string | null;
+}
+
 function executionKindLabel(kind?: string) {
     switch (kind) {
         case 'delegated_parent':
@@ -212,6 +228,226 @@ const AgentRunModal = ({ agent, onClose }: { agent: Agent; onClose: () => void }
                     >
                         {isRunning ? 'Running...' : 'Run'}
                     </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const AgentCronModal = ({ agent, onClose }: { agent: Agent; onClose: () => void }) => {
+    const [jobs, setJobs] = useState<AgentCronJob[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [message, setMessage] = useState('');
+    const [error, setError] = useState('');
+    const [form, setForm] = useState({
+        name: `${agent.name} schedule`,
+        cron_expr: '*/15 * * * *',
+        task: '',
+        priority: 100,
+        enabled: true,
+    });
+
+    const loadJobs = async () => {
+        setLoading(true);
+        setError('');
+        try {
+            const res = await fetch(`/api/agent-cron-jobs?agent_id=${agent.id}`);
+            const data = await res.json().catch(() => []);
+            if (!res.ok) throw new Error(data?.error || 'Failed to load schedules');
+            setJobs(Array.isArray(data) ? data : []);
+        } catch (e: any) {
+            setError(e.message || 'Failed to load schedules');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => { void loadJobs(); }, [agent.id]);
+
+    const createJob = async () => {
+        if (!form.task.trim()) {
+            setError('Task is required');
+            return;
+        }
+        setSaving(true);
+        setError('');
+        setMessage('');
+        try {
+            const res = await fetch('/api/agent-cron-jobs', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    agent_id: agent.id,
+                    name: form.name.trim() || `${agent.name} schedule`,
+                    cron_expr: form.cron_expr.trim(),
+                    task: form.task.trim(),
+                    priority: Number(form.priority) || 100,
+                    enabled: !!form.enabled,
+                    timezone: 'UTC',
+                }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data?.error || 'Failed to create schedule');
+            setMessage('Schedule created');
+            setForm((prev) => ({ ...prev, task: '' }));
+            await loadJobs();
+        } catch (e: any) {
+            setError(e.message || 'Failed to create schedule');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const runNow = async (id: number) => {
+        setError('');
+        setMessage('');
+        try {
+            const res = await fetch(`/api/agent-cron-jobs/${id}/run-now`, { method: 'POST' });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data?.error || 'Failed to run schedule');
+            setMessage(`Queued job #${data?.job_id ?? ''}`.trim());
+            await loadJobs();
+        } catch (e: any) {
+            setError(e.message || 'Failed to run schedule');
+        }
+    };
+
+    const toggleEnabled = async (job: AgentCronJob) => {
+        setError('');
+        try {
+            const res = await fetch(`/api/agent-cron-jobs/${job.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: !job.enabled }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data?.error || 'Failed to update schedule');
+            await loadJobs();
+        } catch (e: any) {
+            setError(e.message || 'Failed to update schedule');
+        }
+    };
+
+    const deleteJob = async (id: number) => {
+        if (!confirm('Delete this schedule?')) return;
+        setError('');
+        try {
+            const res = await fetch(`/api/agent-cron-jobs/${id}`, { method: 'DELETE' });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data?.error || 'Failed to delete schedule');
+            await loadJobs();
+        } catch (e: any) {
+            setError(e.message || 'Failed to delete schedule');
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+            <div className="bg-white rounded-xl shadow-xl w-[min(96vw,1280px)] max-h-[92vh] overflow-y-auto">
+                <div className="flex justify-between items-center p-6 border-b border-slate-100">
+                    <h3 className="text-xl font-bold text-slate-900">Agent Schedules: {agent.name}</h3>
+                    <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+                        <X size={24} />
+                    </button>
+                </div>
+                <div className="p-6 space-y-4">
+                    <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4">
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                            <input
+                                className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                placeholder="Schedule name"
+                                value={form.name}
+                                onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+                            />
+                            <input
+                                className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono"
+                                placeholder="*/15 * * * *"
+                                value={form.cron_expr}
+                                onChange={(e) => setForm((prev) => ({ ...prev, cron_expr: e.target.value }))}
+                            />
+                            <input
+                                type="number"
+                                className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                placeholder="Priority"
+                                value={form.priority}
+                                onChange={(e) => setForm((prev) => ({ ...prev, priority: Number(e.target.value) || 100 }))}
+                            />
+                            <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                                <input
+                                    type="checkbox"
+                                    checked={form.enabled}
+                                    onChange={(e) => setForm((prev) => ({ ...prev, enabled: e.target.checked }))}
+                                />
+                                Enabled
+                            </label>
+                        </div>
+                        <textarea
+                            className="mt-3 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm h-24"
+                            placeholder="Task to execute on each cron tick"
+                            value={form.task}
+                            onChange={(e) => setForm((prev) => ({ ...prev, task: e.target.value }))}
+                        />
+                        <div className="mt-3 flex justify-end">
+                            <button
+                                onClick={createJob}
+                                disabled={saving}
+                                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-60 text-sm font-semibold"
+                            >
+                                {saving ? 'Saving...' : 'Create Schedule'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {error && <div className="text-sm text-red-600">{error}</div>}
+                    {message && <div className="text-sm text-emerald-700">{message}</div>}
+
+                    <div className="flex items-center justify-between">
+                        <div className="text-sm font-semibold text-slate-700">Existing schedules</div>
+                        <button onClick={loadJobs} className="inline-flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50">
+                            <RefreshCw size={14} />
+                            Refresh
+                        </button>
+                    </div>
+
+                    <div className="space-y-3">
+                        {loading && <div className="text-sm text-slate-500">Loading schedules...</div>}
+                        {!loading && jobs.length === 0 && (
+                            <div className="text-sm text-slate-500">No schedules configured for this agent.</div>
+                        )}
+                        {jobs.map((job) => (
+                            <div key={job.id} className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                                <div className="flex flex-wrap items-center justify-between gap-3">
+                                    <div>
+                                        <div className="text-sm font-semibold text-slate-900">{job.name}</div>
+                                        <div className="mt-1 text-xs text-slate-600 font-mono">{job.cron_expr} • {job.timezone}</div>
+                                        <div className="mt-1 text-xs text-slate-600">Next: {job.next_run_at ? new Date(job.next_run_at).toLocaleString() : 'disabled'}</div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button onClick={() => runNow(job.id)} className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700">
+                                            <Play size={12} />
+                                            Run Now
+                                        </button>
+                                        <button onClick={() => toggleEnabled(job)} className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-white">
+                                            <Power size={12} />
+                                            {job.enabled ? 'Pause' : 'Enable'}
+                                        </button>
+                                        <button onClick={() => deleteJob(job.id)} className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg border border-red-200 text-red-700 hover:bg-red-50">
+                                            <Trash2 size={12} />
+                                            Delete
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="mt-3 text-sm text-slate-700 whitespace-pre-wrap">{job.task}</div>
+                                {(job.last_status || job.last_error) && (
+                                    <div className="mt-2 text-xs text-slate-600">
+                                        Last status: <span className="font-semibold">{job.last_status || 'n/a'}</span>
+                                        {job.last_error ? ` • ${job.last_error}` : ''}
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
                 </div>
             </div>
         </div>
@@ -957,6 +1193,7 @@ type AgentOptionalConfig =
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [activityAgent, setActivityAgent] = useState<Agent | null>(null);
   const [runAgent, setRunAgent] = useState<Agent | null>(null);
+  const [cronAgent, setCronAgent] = useState<Agent | null>(null);
   const [delegateAgent, setDelegateAgent] = useState<Agent | null>(null);
   const [activityExecutionId, setActivityExecutionId] = useState<number | null>(null);
   const formRef = React.useRef<HTMLDivElement | null>(null);
@@ -3059,6 +3296,13 @@ type AgentOptionalConfig =
                     <Play size={18} />
                 </button>
                 <button
+                    onClick={() => setCronAgent(agent)}
+                    className="text-slate-400 hover:text-cyan-600 transition-colors"
+                    title="Schedules"
+                >
+                    <CalendarClock size={18} />
+                </button>
+                <button
                     onClick={() => setDelegateAgent(agent)}
                     className="text-slate-400 hover:text-violet-600 transition-colors"
                     title="Launch Supervisor Run"
@@ -3247,6 +3491,9 @@ type AgentOptionalConfig =
       )}
       {runAgent && (
         <AgentRunModal agent={runAgent} onClose={() => setRunAgent(null)} />
+      )}
+      {cronAgent && (
+        <AgentCronModal agent={cronAgent} onClose={() => setCronAgent(null)} />
       )}
       {delegateAgent && (
         <SupervisorRunModal
