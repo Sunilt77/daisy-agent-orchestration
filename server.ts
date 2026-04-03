@@ -56,6 +56,8 @@ import {
   enqueueJob as enqueueRuntimeJob,
 } from './src/orchestrator/runtimeStore';
 import { acceptedExecutionResponse, shouldWaitForExecution } from './src/runtime/httpExecution';
+import { startRuntimeJobWorker } from './src/runtime/jobWorker';
+import { syncCrewExecutionStatus } from './src/runtime/executionState';
 import { spawn } from 'child_process';
 import rateLimit from 'express-rate-limit';
 import { randomUUID } from 'node:crypto';
@@ -8691,16 +8693,17 @@ async function processJob(job: { id: number; type: string; payload: any }) {
 
   if (job.type === 'run_crew') {
     const { crewId, executionId, initialInput, initiatedBy, retryOfExecutionId, userId } = job.payload || {};
-    db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run('running', executionId);
-    db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
-      .run(
-        executionId,
-        'thought',
-        JSON.stringify({
-          agent: 'system',
-          message: 'Crew worker claimed the run and is starting execution.',
-        }),
-      );
+    await syncCrewExecutionStatus({
+      db,
+      prisma: getPrisma(),
+      executionId: Number(executionId),
+      status: 'running',
+      logType: 'thought',
+      logPayload: {
+        agent: 'system',
+        message: 'Crew worker claimed the run and is starting execution.',
+      },
+    });
     await runCrewExecution(
       crewId,
       executionId,
@@ -8724,63 +8727,20 @@ async function processJob(job: { id: number; type: string; payload: any }) {
 
 function startJobWorker() {
   if (workerTimer) return;
-  const workerId = randomUUID();
-  let lastLeaseSweepAt = 0;
-  workerTimer = setInterval(async () => {
-    const now = Date.now();
-    if (now - lastLeaseSweepAt >= 5_000) {
-      lastLeaseSweepAt = now;
-      try {
-        const expiredCount = await failExpiredRuntimeJobLeases();
-        if (expiredCount > 0) {
-          console.warn(`Expired ${expiredCount} runtime job lease(s)`);
-        }
-      } catch (error: any) {
-        console.error('Failed to sweep expired runtime job leases:', error?.message || error);
-      }
-    }
-
-    while (workerRunning < JOB_CONCURRENCY) {
-      const next = await claimNextJob(workerId);
-      if (!next) break;
-      workerRunning += 1;
-      let finalized = false;
-      let heartbeatHandle: NodeJS.Timeout | null = null;
-      let timeoutHandle: NodeJS.Timeout | null = null;
-      const finalize = async (status: 'completed' | 'failed', result?: any, error?: string) => {
-        if (finalized) return;
-        finalized = true;
-        if (heartbeatHandle) {
-          clearInterval(heartbeatHandle);
-          heartbeatHandle = null;
-        }
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-          timeoutHandle = null;
-        }
-        try {
-          await updateRuntimeJobResult(next.id, status, result, error, { workerId });
-        } finally {
-          workerRunning -= 1;
-        }
-      };
-      heartbeatHandle = setInterval(() => {
-        void heartbeatRuntimeJobLease(next.id, workerId).catch((error: any) => {
-          console.error(`Failed to heartbeat job ${next.id}:`, error?.message || error);
-        });
-      }, 10_000);
-      timeoutHandle = setTimeout(() => {
-        void finalize('failed', null, `Job timed out after ${JOB_TIMEOUT_MS}ms`);
-      }, JOB_TIMEOUT_MS);
-      processJob(next)
-        .then((result) => {
-          return finalize('completed', result);
-        })
-        .catch((e: any) => {
-          return finalize('failed', null, e?.message || 'Job failed');
-        });
-    }
-  }, 200);
+  workerTimer = startRuntimeJobWorker({
+    claimNextJob,
+    updateJobResult: updateRuntimeJobResult,
+    heartbeatJobLease: heartbeatRuntimeJobLease,
+    failExpiredJobLeases: failExpiredRuntimeJobLeases,
+    processJob,
+    createWorkerId: () => randomUUID(),
+    log: {
+      warn: (...args: any[]) => console.warn(...args),
+      error: (...args: any[]) => console.error(...args),
+    },
+    concurrency: JOB_CONCURRENCY,
+    timeoutMs: JOB_TIMEOUT_MS,
+  });
 }
 
 async function recoverStaleExecutionState() {

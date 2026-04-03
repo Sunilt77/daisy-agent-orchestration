@@ -1,5 +1,6 @@
 import type express from 'express';
 import { acceptedExecutionResponse, shouldWaitForExecution } from '../runtime/httpExecution';
+import { syncCrewExecutionStatus } from '../runtime/executionState';
 
 type CancelToken = { canceled: boolean; reason?: string };
 
@@ -40,21 +41,14 @@ export function registerRuntimeControlRoutes({
     token.canceled = true;
     token.reason = 'Canceled by user';
 
-    await prisma.orchestratorCrewExecution.update({
-      where: { id: executionId },
-      data: { status: 'canceled' },
+    await syncCrewExecutionStatus({
+      db,
+      prisma,
+      executionId,
+      status: 'canceled',
+      logType: 'canceled',
+      logPayload: { message: 'Canceled by user' },
     });
-    await prisma.orchestratorCrewExecutionLog.create({
-      data: {
-        executionId,
-        type: 'canceled',
-        payload: JSON.stringify({ message: 'Canceled by user' }),
-      },
-    });
-
-    db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run('canceled', executionId);
-    db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
-      .run(executionId, 'canceled', JSON.stringify({ message: 'Canceled by user' }));
 
     res.json({ success: true });
   });
