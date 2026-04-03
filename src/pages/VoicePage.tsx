@@ -52,6 +52,7 @@ type VoiceConfigPreset = {
     browser_noise_suppression?: boolean;
     browser_echo_cancellation?: boolean;
     browser_auto_gain_control?: boolean;
+    push_to_talk?: boolean;
   };
 };
 
@@ -158,6 +159,8 @@ export default function VoicePage() {
   const [browserNoiseSuppression, setBrowserNoiseSuppression] = useState(true);
   const [browserEchoCancellation, setBrowserEchoCancellation] = useState(true);
   const [browserAutoGainControl, setBrowserAutoGainControl] = useState(false);
+  const [pushToTalk, setPushToTalk] = useState(false);
+  const [isPushToTalkPressed, setIsPushToTalkPressed] = useState(false);
   const [textInput, setTextInput] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -181,6 +184,15 @@ export default function VoicePage() {
   const [presetSharedOrgIdsText, setPresetSharedOrgIdsText] = useState('');
   const [sessionAttachments, setSessionAttachments] = useState<SessionAttachment[]>([]);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
+  const [latencyMetrics, setLatencyMetrics] = useState<{
+    sttToReplyMs: number | null;
+    replyToTtsMs: number | null;
+    turnTotalMs: number | null;
+  }>({
+    sttToReplyMs: null,
+    replyToTtsMs: null,
+    turnTotalMs: null,
+  });
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -198,6 +210,9 @@ export default function VoicePage() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+  const pushToTalkPressedRef = useRef(false);
+  const turnCommittedAtRef = useRef<number | null>(null);
+  const replyStartedAtRef = useRef<number | null>(null);
 
   const stopMicVisualization = () => {
     if (animationFrameRef.current != null && typeof window !== 'undefined') {
@@ -375,6 +390,17 @@ export default function VoicePage() {
     }
   };
 
+  const startTurnTiming = () => {
+    const now = Date.now();
+    turnCommittedAtRef.current = now;
+    replyStartedAtRef.current = null;
+    setLatencyMetrics({
+      sttToReplyMs: null,
+      replyToTtsMs: null,
+      turnTotalMs: null,
+    });
+  };
+
   useEffect(() => {
     void loadTargets();
     void loadVoiceConfigs();
@@ -472,6 +498,7 @@ export default function VoicePage() {
     setBrowserNoiseSuppression(Boolean(selectedTarget.voice_profile.meta?.browser_noise_suppression ?? true));
     setBrowserEchoCancellation(Boolean(selectedTarget.voice_profile.meta?.browser_echo_cancellation ?? true));
     setBrowserAutoGainControl(Boolean(selectedTarget.voice_profile.meta?.browser_auto_gain_control ?? false));
+    setPushToTalk(Boolean(selectedTarget.voice_profile.meta?.push_to_talk ?? false));
   }, [selectedTarget]);
 
   const applyVoiceConfig = (presetId: string) => {
@@ -494,6 +521,7 @@ export default function VoicePage() {
     setBrowserNoiseSuppression(Boolean(preset.meta?.browser_noise_suppression ?? true));
     setBrowserEchoCancellation(Boolean(preset.meta?.browser_echo_cancellation ?? true));
     setBrowserAutoGainControl(Boolean(preset.meta?.browser_auto_gain_control ?? false));
+    setPushToTalk(Boolean(preset.meta?.push_to_talk ?? false));
   };
 
   const applyEnvironmentPreset = (presetId: string) => {
@@ -582,6 +610,7 @@ export default function VoicePage() {
     url.searchParams.set('browserNoiseSuppression', browserNoiseSuppression ? 'true' : 'false');
     url.searchParams.set('browserEchoCancellation', browserEchoCancellation ? 'true' : 'false');
     url.searchParams.set('browserAutoGainControl', browserAutoGainControl ? 'true' : 'false');
+    url.searchParams.set('pushToTalk', pushToTalk ? 'true' : 'false');
     const ws = new WebSocket(url);
     wsRef.current = ws;
     void saveProfile();
@@ -606,11 +635,22 @@ export default function VoicePage() {
           setStatusNote('Listening…');
         }
         if (message.type === 'speech.stopped') {
+          startTurnTiming();
           setStatusNote('Speech committed. Sending to the runtime…');
         }
         if (message.type === 'stt.partial') setLiveTranscript(String(message.text || ''));
         if (message.type === 'stt.final') setLiveTranscript(String(message.text || ''));
-        if (message.type === 'agent.reply.start') setAgentReply('');
+        if (message.type === 'agent.reply.start') {
+          setAgentReply('');
+          const now = Date.now();
+          replyStartedAtRef.current = now;
+          if (turnCommittedAtRef.current) {
+            setLatencyMetrics((prev) => ({
+              ...prev,
+              sttToReplyMs: Math.max(0, now - turnCommittedAtRef.current!),
+            }));
+          }
+        }
         if (message.type === 'agent.reply.delta') {
           if (message.fullText) setAgentReply(String(message.fullText || ''));
           else if (message.text) setAgentReply((prev) => `${prev}${prev ? ' ' : ''}${String(message.text || '')}`);
@@ -625,6 +665,13 @@ export default function VoicePage() {
           ].slice(0, 20));
         }
         if (message.type === 'tts.start') {
+          const now = Date.now();
+          if (replyStartedAtRef.current) {
+            setLatencyMetrics((prev) => ({
+              ...prev,
+              replyToTtsMs: Math.max(0, now - replyStartedAtRef.current!),
+            }));
+          }
           startIncomingAudioStream(String(message.mimeType || 'audio/mpeg'));
         }
         if (message.type === 'tts.chunk' && message.audio) {
@@ -655,14 +702,23 @@ export default function VoicePage() {
           setLastAudioSrc(`data:${mimeType};base64,${message.audio}`);
         }
         if (message.type === 'error') setError(String(message.message || 'Voice error'));
+        if (message.type === 'session.completed' && turnCommittedAtRef.current) {
+          const now = Date.now();
+          setLatencyMetrics((prev) => ({
+            ...prev,
+            turnTotalMs: Math.max(0, now - turnCommittedAtRef.current!),
+          }));
+        }
       } catch (e: any) {
         setError(e?.message || 'Failed to parse voice event');
       }
     };
     ws.onerror = () => setError('Voice socket error');
     ws.onclose = () => {
+      wsRef.current = null;
       setIsConnected(false);
       setIsRecording(false);
+      setIsPushToTalkPressed(false);
       stopMicVisualization();
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -683,6 +739,7 @@ export default function VoicePage() {
     wsRef.current = null;
     setIsConnected(false);
     setIsRecording(false);
+    setIsPushToTalkPressed(false);
     stopMicVisualization();
     resetAudioStream();
   };
@@ -691,9 +748,21 @@ export default function VoicePage() {
     const text = textInput.trim();
     if (!text || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     setLiveTranscript(text);
+    startTurnTiming();
     wsRef.current.send(JSON.stringify({ type: 'transcript.commit', text }));
     setStatusNote('Manual text submitted to the selected runtime.');
     setTextInput('');
+  };
+
+  const commitCurrentTranscript = () => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    const transcript = liveTranscript.trim() || textInput.trim();
+    if (!transcript) return;
+    setLiveTranscript(transcript);
+    startTurnTiming();
+    wsRef.current.send(JSON.stringify({ type: 'transcript.commit', text: transcript }));
+    setStatusNote('Committed transcript to runtime.');
+    if (textInput.trim()) setTextInput('');
   };
 
   const saveProfile = async () => {
@@ -721,6 +790,7 @@ export default function VoicePage() {
           browser_noise_suppression: browserNoiseSuppression,
           browser_echo_cancellation: browserEchoCancellation,
           browser_auto_gain_control: browserAutoGainControl,
+          push_to_talk: pushToTalk,
         },
       }),
     });
@@ -752,6 +822,7 @@ export default function VoicePage() {
           browser_noise_suppression: browserNoiseSuppression,
           browser_echo_cancellation: browserEchoCancellation,
           browser_auto_gain_control: browserAutoGainControl,
+          push_to_talk: pushToTalk,
         },
       }),
     });
@@ -790,6 +861,7 @@ export default function VoicePage() {
           browser_noise_suppression: browserNoiseSuppression,
           browser_echo_cancellation: browserEchoCancellation,
           browser_auto_gain_control: browserAutoGainControl,
+          push_to_talk: pushToTalk,
         },
         notes: preset.notes || '',
       }),
@@ -879,9 +951,11 @@ export default function VoicePage() {
       browserNoiseSuppression,
       browserEchoCancellation,
       browserAutoGainControl,
+      pushToTalk,
     }));
 
     processor.onaudioprocess = (event) => {
+      if (pushToTalk && !pushToTalkPressedRef.current) return;
       const input = event.inputBuffer.getChannelData(0);
       const pcm = new Int16Array(input.length);
       for (let i = 0; i < input.length; i += 1) {
@@ -917,7 +991,7 @@ export default function VoicePage() {
     processor.connect(audioContext.destination);
     animationFrameRef.current = window.requestAnimationFrame(updateMicLevel);
     setIsRecording(true);
-    setStatusNote('Listening live. ElevenLabs committed speech segments will invoke the selected runtime automatically.');
+    setStatusNote(pushToTalk ? 'Push-to-talk is enabled. Hold the button or space bar while speaking.' : 'Listening live. ElevenLabs committed speech segments will invoke the selected runtime automatically.');
   };
 
   const stopRecording = () => {
@@ -931,8 +1005,43 @@ export default function VoicePage() {
     sourceRef.current = null;
     streamRef.current = null;
     setIsRecording(false);
+    setIsPushToTalkPressed(false);
     setStatusNote('Microphone stopped. Waiting for any final committed speech segment.');
   };
+
+  useEffect(() => {
+    pushToTalkPressedRef.current = isPushToTalkPressed;
+  }, [isPushToTalkPressed]);
+
+  useEffect(() => {
+    if (!pushToTalk || !isConnected || !isRecording) return;
+    const shouldIgnoreKeyTarget = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName.toLowerCase();
+      return tag === 'input' || tag === 'textarea' || tag === 'select' || Boolean(target.isContentEditable);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== 'Space') return;
+      if (shouldIgnoreKeyTarget(event.target)) return;
+      event.preventDefault();
+      setIsPushToTalkPressed(true);
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.code !== 'Space') return;
+      if (shouldIgnoreKeyTarget(event.target)) return;
+      event.preventDefault();
+      setIsPushToTalkPressed(false);
+    };
+    const onWindowBlur = () => setIsPushToTalkPressed(false);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onWindowBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onWindowBlur);
+    };
+  }, [pushToTalk, isConnected, isRecording]);
 
   useEffect(() => {
     if (!lastAudioSrc || !audioRef.current) return;
@@ -966,7 +1075,7 @@ export default function VoicePage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
         <div className="rounded-2xl border border-white/10 bg-slate-950/88 px-4 py-4 text-white shadow-[0_18px_65px_rgba(15,23,42,0.28)]">
           <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Target</div>
           <div className="mt-2 text-lg font-semibold">{selectedTarget?.name || `No ${targetType} selected`}</div>
@@ -986,6 +1095,17 @@ export default function VoicePage() {
           <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Attachments</div>
           <div className="mt-2 text-lg font-semibold">{sessionAttachments.length}</div>
           <div className="mt-1 text-xs text-slate-400">{sessionAttachments.length ? 'Session files will be included with the next turn.' : 'Attach image or files after you connect.'}</div>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-slate-950/88 px-4 py-4 text-white shadow-[0_18px_65px_rgba(15,23,42,0.28)]">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Latency</div>
+          <div className="mt-2 text-sm font-semibold">
+            {latencyMetrics.sttToReplyMs != null ? `${latencyMetrics.sttToReplyMs}ms` : '--'}
+          </div>
+          <div className="mt-1 text-[11px] text-slate-400">
+            Reply start
+            {latencyMetrics.replyToTtsMs != null ? ` • TTS ${latencyMetrics.replyToTtsMs}ms` : ''}
+            {latencyMetrics.turnTotalMs != null ? ` • Total ${latencyMetrics.turnTotalMs}ms` : ''}
+          </div>
         </div>
       </div>
 
@@ -1147,6 +1267,10 @@ export default function VoicePage() {
                     <input type="checkbox" checked={browserAutoGainControl} onChange={(e) => setBrowserAutoGainControl(e.target.checked)} />
                     Auto gain control
                   </label>
+                  <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" checked={pushToTalk} onChange={(e) => setPushToTalk(e.target.checked)} />
+                    Push to talk
+                  </label>
                   <div>
                     <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Silence Threshold (sec)</label>
                     <input type="number" min="0.2" max="3" step="0.1" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono" value={vadSilenceThresholdSecs} onChange={(e) => setVadSilenceThresholdSecs(Number(e.target.value) || DEFAULT_VAD_SILENCE_THRESHOLD_SECS)} />
@@ -1298,6 +1422,13 @@ export default function VoicePage() {
                 Send Manual Text
               </button>
               <button
+                onClick={commitCurrentTranscript}
+                disabled={!isConnected || (!liveTranscript.trim() && !textInput.trim())}
+                className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-700 disabled:opacity-40"
+              >
+                Commit Transcript
+              </button>
+              <button
                 onClick={isRecording ? stopRecording : startRecording}
                 disabled={!isConnected}
                 className={`rounded-xl px-4 py-2 text-sm font-semibold text-white inline-flex items-center gap-2 disabled:opacity-40 ${
@@ -1307,6 +1438,19 @@ export default function VoicePage() {
                 {isRecording ? <MicOff size={14} /> : <Mic size={14} />}
                 {isRecording ? 'Stop Recording' : 'Record Audio'}
               </button>
+              {pushToTalk && isRecording ? (
+                <button
+                  type="button"
+                  onMouseDown={() => setIsPushToTalkPressed(true)}
+                  onMouseUp={() => setIsPushToTalkPressed(false)}
+                  onMouseLeave={() => setIsPushToTalkPressed(false)}
+                  onTouchStart={() => setIsPushToTalkPressed(true)}
+                  onTouchEnd={() => setIsPushToTalkPressed(false)}
+                  className={`rounded-xl border px-4 py-2 text-sm font-semibold ${isPushToTalkPressed ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-emerald-300 bg-emerald-50 text-emerald-700'}`}
+                >
+                  {isPushToTalkPressed ? 'Talking… release to mute' : 'Hold to Talk (or Space)'}
+                </button>
+              ) : null}
               <button
                 onClick={() => attachmentInputRef.current?.click()}
                 disabled={!isConnected || uploadingAttachment}
