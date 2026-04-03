@@ -222,7 +222,8 @@ export default function TracesPage() {
   useEffect(() => {
     const persisted = loadPersisted<any>(TRACES_UI_KEY, {});
     if (persisted && typeof persisted === 'object') {
-      if (typeof persisted.localProjectId === 'number') setLocalProjectId(persisted.localProjectId);
+      // Always default to "All" project on first load.
+      setLocalProjectId(null);
       if (persisted.viewMode === 'platform' || persisted.viewMode === 'local-agent' || persisted.viewMode === 'local-tool') setViewMode(persisted.viewMode);
       if (typeof persisted.q === 'string') setQ(persisted.q);
       if (typeof persisted.status === 'string') setStatus(persisted.status);
@@ -250,8 +251,11 @@ export default function TracesPage() {
     const res = await fetch('/api/projects', { cache: 'no-store' });
     if (!res.ok) return;
     const data = await res.json().catch(() => []);
-    setProjects(Array.isArray(data) ? data : []);
-    if (localProjectId == null && Array.isArray(data) && data.length) setLocalProjectId(data[0].id);
+    const list = Array.isArray(data) ? data : [];
+    setProjects(list);
+    if (localProjectId != null && !list.some((project: LocalProject) => Number(project.id) === Number(localProjectId))) {
+      setLocalProjectId(null);
+    }
   };
 
   const loadPlatformLink = async (pid: number) => {
@@ -596,7 +600,7 @@ export default function TracesPage() {
               onChange={(e) => setLocalProjectId(e.target.value ? Number(e.target.value) : null)}
               className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white"
             >
-              <option value="">Choose…</option>
+              <option value="">All</option>
               {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           </div>

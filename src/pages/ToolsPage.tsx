@@ -535,11 +535,10 @@ export default function ToolsPage() {
       if (typeof persisted.toolsPage === 'number') setToolsPage(persisted.toolsPage);
       if (typeof persisted.toolsPageSize === 'number') setToolsPageSize(persisted.toolsPageSize);
       if (typeof persisted.toolSearch === 'string') setToolSearch(persisted.toolSearch);
-      if (typeof persisted.categoryFilter === 'string') setCategoryFilter(persisted.categoryFilter);
-      if (typeof persisted.typeFilter === 'string') setTypeFilter(persisted.typeFilter);
-      if (typeof persisted.quickFilter === 'string' && ['all', 'http', 'javascript', 'mcp', 'exposed'].includes(persisted.quickFilter)) {
-        setQuickFilter(persisted.quickFilter as 'all' | 'http' | 'javascript' | 'mcp' | 'exposed');
-      }
+      // Always start with "All" filters for predictable first-load behavior.
+      setCategoryFilter('All');
+      setTypeFilter('All');
+      setQuickFilter('all');
       if (persisted.formData) setFormData((prev) => ({ ...prev, ...persisted.formData }));
       if (typeof persisted.pythonCode === 'string') setPythonCode(persisted.pythonCode);
       if (typeof persisted.javascriptPackages === 'string') setJavascriptPackages(persisted.javascriptPackages);
