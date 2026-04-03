@@ -95,6 +95,10 @@ async function ensureSchemaCompatibility(prisma: PrismaClient) {
     `ALTER TABLE IF EXISTS orchestrator_agent_sessions ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT NOW()`,
     `ALTER TABLE IF EXISTS orchestrator_agent_session_memory ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`,
     `ALTER TABLE IF EXISTS orchestrator_workflow_runs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`,
+    `ALTER TABLE IF EXISTS orchestrator_job_queue ADD COLUMN IF NOT EXISTS worker_id TEXT`,
+    `ALTER TABLE IF EXISTS orchestrator_job_queue ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ`,
+    `ALTER TABLE IF EXISTS orchestrator_job_queue ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ`,
+    `ALTER TABLE IF EXISTS orchestrator_job_queue ADD COLUMN IF NOT EXISTS attempts INTEGER DEFAULT 0`,
   ];
 
   for (const sql of statements) {

@@ -3,6 +3,8 @@ import { uuid } from '../platform/crypto';
 
 export type RuntimeJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'canceled';
 
+const DEFAULT_JOB_LEASE_MS = Math.max(15_000, Number(process.env.JOB_LEASE_MS || 45_000));
+
 function parseJson(value: string | null | undefined, fallback: any) {
   if (!value) return fallback;
   try {
@@ -17,21 +19,42 @@ function asIso(value: Date | null | undefined): string | null {
 }
 
 export async function getJobRow(jobId: number) {
-  const row = await getPrisma().orchestratorJobQueue.findUnique({
+  const jobQueue = getPrisma().orchestratorJobQueue as any;
+  const row = await jobQueue.findUnique({
     where: { id: jobId },
-    select: { id: true, status: true, result: true, error: true },
+    select: {
+      id: true,
+      status: true,
+      result: true,
+      error: true,
+      workerId: true,
+      heartbeatAt: true,
+      leaseExpiresAt: true,
+      attempts: true,
+    },
   });
   return row
-    ? { id: row.id, status: row.status as RuntimeJobStatus, result: row.result, error: row.error }
+    ? {
+        id: row.id,
+        status: row.status as RuntimeJobStatus,
+        result: row.result,
+        error: row.error,
+        worker_id: row.workerId,
+        heartbeat_at: asIso(row.heartbeatAt),
+        lease_expires_at: asIso(row.leaseExpiresAt),
+        attempts: Number(row.attempts || 0),
+      }
     : undefined;
 }
 
 export async function enqueueJob(type: string, payload: any) {
-  const row = await getPrisma().orchestratorJobQueue.create({
+  const jobQueue = getPrisma().orchestratorJobQueue as any;
+  const row = await jobQueue.create({
     data: {
       type,
       payload: JSON.stringify(payload ?? {}),
       status: 'pending',
+      attempts: 0,
     },
     select: { id: true },
   });
@@ -42,30 +65,48 @@ export async function updateJobResult(
   jobId: number,
   status: 'completed' | 'failed' | 'canceled',
   result?: any,
-  error?: string
+  error?: string,
+  options?: { workerId?: string | null }
 ) {
-  await getPrisma().orchestratorJobQueue.update({
-    where: { id: jobId },
+  const jobQueue = getPrisma().orchestratorJobQueue as any;
+  const where =
+    options?.workerId
+      ? { id: jobId, workerId: options.workerId }
+      : { id: jobId };
+  await jobQueue.updateMany({
+    where,
     data: {
       status,
       result: result != null ? JSON.stringify(result) : null,
       error: error ?? null,
       finishedAt: new Date(),
+      workerId: null,
+      heartbeatAt: null,
+      leaseExpiresAt: null,
     },
   });
 }
 
-export async function claimNextJob() {
-  const prisma = getPrisma();
-  const job = await prisma.orchestratorJobQueue.findFirst({
+export async function claimNextJob(workerId: string, leaseMs: number = DEFAULT_JOB_LEASE_MS) {
+  const jobQueue = getPrisma().orchestratorJobQueue as any;
+  const job = await jobQueue.findFirst({
     where: { status: 'pending' },
     orderBy: { id: 'asc' },
     select: { id: true, type: true, payload: true },
   });
   if (!job) return null;
-  const claimed = await prisma.orchestratorJobQueue.updateMany({
+  const now = new Date();
+  const leaseExpiresAt = new Date(now.getTime() + Math.max(5_000, leaseMs));
+  const claimed = await jobQueue.updateMany({
     where: { id: job.id, status: 'pending' },
-    data: { status: 'running', startedAt: new Date() },
+    data: {
+      status: 'running',
+      startedAt: now,
+      workerId,
+      heartbeatAt: now,
+      leaseExpiresAt,
+      attempts: { increment: 1 },
+    },
   });
   if (claimed.count === 0) return null;
   return {
@@ -73,6 +114,40 @@ export async function claimNextJob() {
     type: job.type,
     payload: parseJson(job.payload, {}),
   };
+}
+
+export async function heartbeatJobLease(jobId: number, workerId: string, leaseMs: number = DEFAULT_JOB_LEASE_MS) {
+  const jobQueue = getPrisma().orchestratorJobQueue as any;
+  const now = new Date();
+  const leaseExpiresAt = new Date(now.getTime() + Math.max(5_000, leaseMs));
+  const updated = await jobQueue.updateMany({
+    where: { id: jobId, status: 'running', workerId },
+    data: {
+      heartbeatAt: now,
+      leaseExpiresAt,
+    },
+  });
+  return updated.count > 0;
+}
+
+export async function failExpiredJobLeases() {
+  const jobQueue = getPrisma().orchestratorJobQueue as any;
+  const now = new Date();
+  const updated = await jobQueue.updateMany({
+    where: {
+      status: 'running',
+      leaseExpiresAt: { lt: now },
+    },
+    data: {
+      status: 'failed',
+      error: 'Job lease expired',
+      finishedAt: now,
+      workerId: null,
+      heartbeatAt: null,
+      leaseExpiresAt: null,
+    },
+  });
+  return updated.count;
 }
 
 export async function waitForJob(jobId: number, timeoutMs: number) {
@@ -351,10 +426,18 @@ export async function getWorkflowRun(runId: number) {
 
 export async function recoverRuntimeState() {
   const prisma = getPrisma();
+  const jobQueue = prisma.orchestratorJobQueue as any;
   const [jobs, agentExecutions, workflowRuns] = await Promise.all([
-    prisma.orchestratorJobQueue.updateMany({
+    jobQueue.updateMany({
       where: { status: 'running' },
-      data: { status: 'failed', error: 'Recovered after server restart', finishedAt: new Date() },
+      data: {
+        status: 'failed',
+        error: 'Recovered after server restart',
+        finishedAt: new Date(),
+        workerId: null,
+        heartbeatAt: null,
+        leaseExpiresAt: null,
+      },
     }),
     prisma.orchestratorAgentExecution.updateMany({
       where: { status: 'running' },
