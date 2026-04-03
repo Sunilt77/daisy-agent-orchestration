@@ -217,6 +217,7 @@ export default function TracesPage() {
     setFrom('');
     setTo('');
   };
+  const hasTraceFilters = Boolean(q || status || kind || from || to);
 
   useEffect(() => {
     const persisted = loadPersisted<any>(TRACES_UI_KEY, {});
@@ -385,26 +386,46 @@ export default function TracesPage() {
 
   useEffect(() => {
     setLocalPage(1);
-  }, [localTraces.length, localProjectId]);
+  }, [localTraces.length, localProjectId, q]);
 
   useEffect(() => {
     setLocalToolPage(1);
-  }, [localToolTraces.length, localProjectId]);
+  }, [localToolTraces.length, localProjectId, q, status]);
 
   const pagedRuns = useMemo(() => {
     const start = (runsPage - 1) * runsPageSize;
     return runs.slice(start, start + runsPageSize);
   }, [runs, runsPage, runsPageSize]);
 
+  const localFilteredTraces = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    if (!query) return localTraces;
+    return localTraces.filter((trace) =>
+      [trace.agent_name, trace.agent_role, trace.input, trace.output, trace.created_at]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query))
+    );
+  }, [localTraces, q]);
+  const localFilteredToolTraces = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    return localToolTraces.filter((trace) => {
+      const matchesQuery = !query || [trace.tool_name, trace.tool_type, trace.agent_name, trace.args, trace.result, trace.error]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query));
+      const matchesStatus = !status || String(trace.status || '').toLowerCase() === String(status || '').toLowerCase();
+      return matchesQuery && matchesStatus;
+    });
+  }, [localToolTraces, q, status]);
+
   const pagedLocalTraces = useMemo(() => {
     const start = (localPage - 1) * localPageSize;
-    return localTraces.slice(start, start + localPageSize);
-  }, [localTraces, localPage, localPageSize]);
+    return localFilteredTraces.slice(start, start + localPageSize);
+  }, [localFilteredTraces, localPage, localPageSize]);
 
   const pagedLocalToolTraces = useMemo(() => {
     const start = (localToolPage - 1) * localToolPageSize;
-    return localToolTraces.slice(start, start + localToolPageSize);
-  }, [localToolTraces, localToolPage, localToolPageSize]);
+    return localFilteredToolTraces.slice(start, start + localToolPageSize);
+  }, [localFilteredToolTraces, localToolPage, localToolPageSize]);
 
   useEffect(() => {
     if (!platformProjectId) {
@@ -633,7 +654,7 @@ export default function TracesPage() {
               <button type="button" onClick={() => applyQuickRange(24)} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1"><CalendarClock size={12} />24h</button>
               <button type="button" onClick={() => applyQuickRange(72)} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50">3d</button>
               <button type="button" onClick={() => applyQuickRange(168)} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50">7d</button>
-              <button type="button" onClick={resetFilters} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1"><RotateCcw size={12} />Reset</button>
+              <button type="button" onClick={resetFilters} disabled={!hasTraceFilters} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1 disabled:opacity-45"><RotateCcw size={12} />Reset</button>
               <button
                 onClick={() => {
                   if (!selectedProject) return;
@@ -875,7 +896,7 @@ export default function TracesPage() {
               <tbody>
                 {localToolLoading ? (
                   <tr className="border-t border-slate-100"><td className="px-4 py-6 text-center text-slate-500" colSpan={5}>Loading local tool traces...</td></tr>
-                ) : localToolTraces.length === 0 ? (
+                ) : localFilteredToolTraces.length === 0 ? (
                   <tr className="border-t border-slate-100"><td className="px-4 py-6 text-center text-slate-500" colSpan={5}>No local tool traces found for this project.</td></tr>
                 ) : (
                   pagedLocalToolTraces.map((t) => (
@@ -918,7 +939,7 @@ export default function TracesPage() {
               <tbody>
                 {localLoading ? (
                   <tr className="border-t border-slate-100"><td className="px-4 py-6 text-center text-slate-500" colSpan={5}>Loading local traces...</td></tr>
-                ) : localTraces.length === 0 ? (
+                ) : localFilteredTraces.length === 0 ? (
                   <tr className="border-t border-slate-100"><td className="px-4 py-6 text-center text-slate-500" colSpan={5}>No local traces found for this project.</td></tr>
                 ) : (
                   pagedLocalTraces.map((t) => (
@@ -960,7 +981,7 @@ export default function TracesPage() {
             <Pagination
               page={localToolPage}
               pageSize={localToolPageSize}
-              total={localToolTraces.length}
+              total={localFilteredToolTraces.length}
               onPageChange={setLocalToolPage}
               onPageSizeChange={setLocalToolPageSize}
             />
@@ -968,7 +989,7 @@ export default function TracesPage() {
             <Pagination
               page={localPage}
               pageSize={localPageSize}
-              total={localTraces.length}
+              total={localFilteredTraces.length}
               onPageChange={setLocalPage}
               onPageSizeChange={setLocalPageSize}
             />

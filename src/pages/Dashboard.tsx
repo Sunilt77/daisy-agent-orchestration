@@ -123,9 +123,12 @@ export default function Dashboard() {
   const [crewsPage, setCrewsPage] = useState(1);
   const [crewsPageSize, setCrewsPageSize] = useState(6);
   const [crewQuery, setCrewQuery] = useState('');
+  const [crewProcessFilter, setCrewProcessFilter] = useState<'all' | 'sequential' | 'hierarchical' | 'parallel'>('all');
+  const [crewExposureFilter, setCrewExposureFilter] = useState<'all' | 'exposed' | 'private'>('all');
   const [execPage, setExecPage] = useState(1);
   const [execPageSize, setExecPageSize] = useState(8);
   const [executionQuery, setExecutionQuery] = useState('');
+  const [executionStatusFilter, setExecutionStatusFilter] = useState<'all' | 'running' | 'completed' | 'failed' | 'canceled'>('all');
   const [templates, setTemplates] = useState<CrewTemplate[]>([]);
   const [failureAnalytics, setFailureAnalytics] = useState<{ topFailingTools: any[]; timeoutHotspots: any[]; tokenSpikes: any[] }>({
     topFailingTools: [],
@@ -183,34 +186,40 @@ export default function Dashboard() {
   }, [crews.length]);
   useEffect(() => {
     setCrewsPage(1);
-  }, [crewQuery]);
+  }, [crewQuery, crewProcessFilter, crewExposureFilter]);
 
   useEffect(() => {
     setExecPage(1);
   }, [recentExecutions.length]);
   useEffect(() => {
     setExecPage(1);
-  }, [executionQuery]);
+  }, [executionQuery, executionStatusFilter]);
 
   const filteredCrews = useMemo(() => {
     const query = crewQuery.trim().toLowerCase();
-    if (!query) return crews;
-    return crews.filter((crew) =>
-      [crew.name, crew.process, crew.is_exposed ? 'exposed' : 'private']
+    return crews.filter((crew) => {
+      const matchesQuery = !query || [crew.name, crew.process, crew.is_exposed ? 'exposed' : 'private']
         .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(query))
-    );
-  }, [crews, crewQuery]);
+        .some((value) => String(value).toLowerCase().includes(query));
+      const matchesProcess = crewProcessFilter === 'all' || crew.process === crewProcessFilter;
+      const matchesExposure = crewExposureFilter === 'all' || (crewExposureFilter === 'exposed' ? Boolean(crew.is_exposed) : !crew.is_exposed);
+      return matchesQuery && matchesProcess && matchesExposure;
+    });
+  }, [crews, crewExposureFilter, crewProcessFilter, crewQuery]);
 
   const filteredExecutions = useMemo(() => {
     const query = executionQuery.trim().toLowerCase();
-    if (!query) return recentExecutions;
-    return recentExecutions.filter((exec) =>
-      [exec.agent_name, exec.status, exec.input, exec.output]
+    return recentExecutions.filter((exec) => {
+      const matchesQuery = !query || [exec.agent_name, exec.status, exec.input, exec.output]
         .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(query))
-    );
-  }, [recentExecutions, executionQuery]);
+        .some((value) => String(value).toLowerCase().includes(query));
+      const normalizedStatus = String(exec.status || 'completed').toLowerCase();
+      const matchesStatus = executionStatusFilter === 'all' || normalizedStatus === executionStatusFilter;
+      return matchesQuery && matchesStatus;
+    });
+  }, [recentExecutions, executionQuery, executionStatusFilter]);
+  const hasCrewFilters = crewQuery.trim().length > 0 || crewProcessFilter !== 'all' || crewExposureFilter !== 'all';
+  const hasExecutionFilters = executionQuery.trim().length > 0 || executionStatusFilter !== 'all';
 
   const pagedCrews = useMemo(() => {
     const start = (crewsPage - 1) * crewsPageSize;
@@ -1301,14 +1310,47 @@ export default function Dashboard() {
           </Link>
         </div>
         <div className="mb-4 panel-chrome rounded-2xl p-3">
-          <div className="flex items-center gap-2 border border-slate-200 rounded-xl px-3 py-2 bg-white/80">
-            <Clock3 size={15} className="text-slate-400" />
-            <input
-              value={crewQuery}
-              onChange={(e) => setCrewQuery(e.target.value)}
-              className="w-full bg-transparent text-sm outline-none text-slate-700 placeholder:text-slate-400"
-              placeholder="Filter crews by name, process, or exposure..."
-            />
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-[minmax(0,1.4fr)_repeat(2,minmax(0,0.8fr))_auto]">
+            <div className="flex items-center gap-2 border border-slate-200 rounded-xl px-3 py-2 bg-white/80">
+              <Clock3 size={15} className="text-slate-400" />
+              <input
+                value={crewQuery}
+                onChange={(e) => setCrewQuery(e.target.value)}
+                className="w-full bg-transparent text-sm outline-none text-slate-700 placeholder:text-slate-400"
+                placeholder="Filter crews by name, process, or exposure..."
+              />
+            </div>
+            <select
+              value={crewProcessFilter}
+              onChange={(e) => setCrewProcessFilter(e.target.value as 'all' | 'sequential' | 'hierarchical' | 'parallel')}
+              className="rounded-xl border border-slate-200 bg-white/80 px-3 py-2 text-sm text-slate-700"
+            >
+              <option value="all">All Process</option>
+              <option value="sequential">Sequential</option>
+              <option value="hierarchical">Hierarchical</option>
+              <option value="parallel">Parallel</option>
+            </select>
+            <select
+              value={crewExposureFilter}
+              onChange={(e) => setCrewExposureFilter(e.target.value as 'all' | 'exposed' | 'private')}
+              className="rounded-xl border border-slate-200 bg-white/80 px-3 py-2 text-sm text-slate-700"
+            >
+              <option value="all">All Exposure</option>
+              <option value="exposed">Exposed</option>
+              <option value="private">Private</option>
+            </select>
+            <button
+              type="button"
+              disabled={!hasCrewFilters}
+              onClick={() => {
+                setCrewQuery('');
+                setCrewProcessFilter('all');
+                setCrewExposureFilter('all');
+              }}
+              className="rounded-xl border border-slate-200 bg-white/80 px-3 py-2 text-sm font-semibold text-slate-600 disabled:opacity-45"
+            >
+              Reset
+            </button>
           </div>
         </div>
 
@@ -1405,6 +1447,30 @@ export default function Dashboard() {
               className="w-full bg-transparent text-sm outline-none text-slate-700 placeholder:text-slate-400"
               placeholder="Filter execution streams..."
             />
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              value={executionStatusFilter}
+              onChange={(e) => setExecutionStatusFilter(e.target.value as 'all' | 'running' | 'completed' | 'failed' | 'canceled')}
+              className="rounded-xl border border-slate-200 bg-white/80 px-3 py-2 text-sm text-slate-700"
+            >
+              <option value="all">All Status</option>
+              <option value="running">Running</option>
+              <option value="completed">Completed</option>
+              <option value="failed">Failed</option>
+              <option value="canceled">Canceled</option>
+            </select>
+            <button
+              type="button"
+              disabled={!hasExecutionFilters}
+              onClick={() => {
+                setExecutionQuery('');
+                setExecutionStatusFilter('all');
+              }}
+              className="rounded-xl border border-slate-200 bg-white/80 px-3 py-2 text-sm font-semibold text-slate-600 disabled:opacity-45"
+            >
+              Reset
+            </button>
           </div>
           <Link
             to="/agent-executions"
