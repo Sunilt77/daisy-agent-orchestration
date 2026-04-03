@@ -1093,26 +1093,8 @@ export default function VoicePage() {
             <h1 className="text-3xl font-black text-white">Voice Console</h1>
             <p className="text-slate-300 mt-1">Run realtime voice sessions with fast turn control, barge-in, and live latency feedback.</p>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={isConnected ? disconnect : connect}
-              className={`rounded-xl px-4 py-2 text-sm font-semibold inline-flex items-center gap-2 ${
-                isConnected ? 'bg-red-500 text-white' : 'bg-white text-slate-900'
-              }`}
-            >
-              {isConnected ? <PhoneOff size={14} /> : <PhoneCall size={14} />}
-              {isConnected ? 'Disconnect' : 'Connect'}
-            </button>
-            <button
-              onClick={isRecording ? stopRecording : startRecording}
-              disabled={!isConnected}
-              className={`rounded-xl px-4 py-2 text-sm font-semibold text-white inline-flex items-center gap-2 disabled:opacity-40 ${
-                isRecording ? 'bg-red-500' : 'bg-emerald-600'
-              }`}
-            >
-              {isRecording ? <MicOff size={14} /> : <Mic size={14} />}
-              {isRecording ? 'Stop Mic' : 'Start Mic'}
-            </button>
+          <div className="rounded-full bg-white/10 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-200">
+            Manage session actions in Session Setup
           </div>
         </div>
       </div>
@@ -1220,6 +1202,36 @@ export default function VoicePage() {
                     </option>
                   ))}
                 </select>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-cyan-200 bg-cyan-50/80 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-700">Session Actions</div>
+                  <div className="mt-1 text-sm text-cyan-900">Step 1: connect socket. Step 2: start microphone streaming.</div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={isConnected ? disconnect : connect}
+                    className={`rounded-xl px-4 py-2 text-sm font-semibold inline-flex items-center gap-2 ${
+                      isConnected ? 'bg-red-500 text-white' : 'bg-slate-900 text-white'
+                    }`}
+                  >
+                    {isConnected ? <PhoneOff size={14} /> : <PhoneCall size={14} />}
+                    {isConnected ? 'Disconnect' : 'Connect'}
+                  </button>
+                  <button
+                    onClick={isRecording ? stopRecording : startRecording}
+                    disabled={!isConnected}
+                    className={`rounded-xl px-4 py-2 text-sm font-semibold text-white inline-flex items-center gap-2 disabled:opacity-40 ${
+                      isRecording ? 'bg-red-500' : 'bg-emerald-600'
+                    }`}
+                  >
+                    {isRecording ? <MicOff size={14} /> : <Mic size={14} />}
+                    {isRecording ? 'Stop Mic' : 'Start Mic'}
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -1468,7 +1480,7 @@ export default function VoicePage() {
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold text-slate-900">Realtime Voice Controls</div>
-                <div className="mt-1 text-xs text-slate-500">Use manual text, transcript commit, mic control, and attachments from one dock.</div>
+                <div className="mt-1 text-xs text-slate-500">Use manual text, transcript commit, and attachments from one dock.</div>
               </div>
               <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
                 isConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'
@@ -1504,16 +1516,6 @@ export default function VoicePage() {
                 className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-700 disabled:opacity-40"
               >
                 Commit Transcript
-              </button>
-              <button
-                onClick={isRecording ? stopRecording : startRecording}
-                disabled={!isConnected}
-                className={`rounded-xl px-4 py-2 text-sm font-semibold text-white inline-flex items-center gap-2 disabled:opacity-40 ${
-                  isRecording ? 'bg-red-500' : 'bg-emerald-600'
-                }`}
-              >
-                {isRecording ? <MicOff size={14} /> : <Mic size={14} />}
-                {isRecording ? 'Stop Recording' : 'Record Audio'}
               </button>
               {pushToTalk && isRecording ? (
                 <button
