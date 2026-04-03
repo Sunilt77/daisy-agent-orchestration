@@ -126,13 +126,6 @@
     @apply h-8 rounded-lg border border-slate-200 bg-white/80 px-2 text-slate-600 shadow-sm hover:text-slate-900 hover:bg-white transition-colors inline-flex items-center justify-center;
   }
 
-  .topbar-glass {
-    background:
-      linear-gradient(180deg, rgba(255,255,255,0.92), rgba(255,255,255,0.78));
-    border-bottom: 1px solid rgba(148, 163, 184, 0.22);
-    backdrop-filter: blur(18px);
-  }
-
   .glass-card {
     @apply backdrop-blur-xl border shadow-xl;
     background: linear-gradient(155deg, rgba(255,255,255,0.86), rgba(247,251,253,0.72));
@@ -380,11 +373,5 @@
 
   .card-surface {
     @apply rounded-2xl border border-slate-200 bg-white/86 shadow-sm backdrop-blur;
-  }
-}
-
-@media (max-width: 1024px) {
-  .app-content-shell {
-    padding-top: 6.2rem !important;
   }
 }
