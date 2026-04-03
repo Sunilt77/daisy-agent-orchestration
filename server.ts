@@ -74,7 +74,7 @@ import { subscribeAgentExecution, subscribeCrewExecution, subscribeWorkflowRun }
 import { spawn } from 'child_process';
 import rateLimit from 'express-rate-limit';
 import { randomUUID } from 'node:crypto';
-import { readFile, unlink } from 'node:fs/promises';
+import { mkdir, readFile, unlink } from 'node:fs/promises';
 import * as z from 'zod/v4';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -190,6 +190,182 @@ function buildWrappedStdioCommand(command: string, args: string[]) {
   };
 }
 
+type CommandRunResult = {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+};
+
+const mcpPackageInstallLocks = new Map<string, Promise<boolean>>();
+const mcpPackageReady = new Set<string>();
+const MCP_PACKAGE_PREFIX = path.resolve(process.cwd(), '.mcp-packages');
+
+function normalizeNpmPackageName(value: string) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function shellSingleQuote(value: string) {
+  return `'${String(value || '').replace(/'/g, `'\\''`)}'`;
+}
+
+async function runCommandCapture(command: string, args: string[], timeoutMs = 30000): Promise<CommandRunResult> {
+  return await new Promise<CommandRunResult>((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let finished = false;
+    const child = spawn(command, args, {
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const timer = setTimeout(() => {
+      if (finished) return;
+      try { child.kill('SIGKILL'); } catch {}
+    }, Math.max(1000, timeoutMs));
+    child.stdout.on('data', (chunk) => { stdout += String(chunk || ''); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk || ''); });
+    child.on('error', (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve({ code: -1, stdout, stderr: `${stderr}\n${String(error?.message || error)}`.trim() });
+    });
+    child.on('close', (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve({ code: typeof code === 'number' ? code : null, stdout, stderr });
+    });
+  });
+}
+
+async function commandExists(command: string) {
+  const normalized = String(command || '').trim();
+  if (!normalized) return false;
+  const result = await runCommandCapture('sh', ['-lc', `command -v ${shellSingleQuote(normalized)} >/dev/null 2>&1`], 10000);
+  return result.code === 0;
+}
+
+async function ensureGlobalNpmPackageInstalled(packageName: string, reason = 'runtime') {
+  const normalized = normalizeNpmPackageName(packageName);
+  if (!normalized) return false;
+  if (mcpPackageReady.has(normalized)) return true;
+  const inflight = mcpPackageInstallLocks.get(normalized);
+  if (inflight) return await inflight;
+
+  const installer = (async () => {
+    await mkdir(MCP_PACKAGE_PREFIX, { recursive: true }).catch(() => undefined);
+
+    const lsLocal = await runCommandCapture('npm', ['ls', '--prefix', MCP_PACKAGE_PREFIX, '--depth=0', normalized], 30000);
+    if (lsLocal.code === 0) {
+      mcpPackageReady.add(normalized);
+      return true;
+    }
+
+    const installLocal = await runCommandCapture('npm', ['install', '--prefix', MCP_PACKAGE_PREFIX, normalized], 180000);
+    if (installLocal.code === 0) {
+      console.log(`[mcp-package] ensured ${normalized} in local prefix (${reason})`);
+      mcpPackageReady.add(normalized);
+      return true;
+    }
+
+    const lsGlobal = await runCommandCapture('npm', ['ls', '-g', '--depth=0', normalized], 30000);
+    if (lsGlobal.code === 0) {
+      mcpPackageReady.add(normalized);
+      return true;
+    }
+    const installGlobal = await runCommandCapture('npm', ['install', '-g', normalized], 180000);
+    if (installGlobal.code !== 0) {
+      console.warn(
+        `[mcp-package] failed to install ${normalized} (${reason}): ${installLocal.stderr || installLocal.stdout || installGlobal.stderr || installGlobal.stdout || 'unknown error'}`
+      );
+      return false;
+    }
+    console.log(`[mcp-package] ensured ${normalized} globally (${reason})`);
+    mcpPackageReady.add(normalized);
+    return true;
+  })().finally(() => {
+    mcpPackageInstallLocks.delete(normalized);
+  });
+
+  mcpPackageInstallLocks.set(normalized, installer);
+  return await installer;
+}
+
+async function removeGlobalNpmPackageIfUnused(packageName: string) {
+  const normalized = normalizeNpmPackageName(packageName);
+  if (!normalized) return;
+  const prisma = getPrisma();
+  const tools = await prisma.orchestratorTool.findMany({
+    where: { type: 'mcp_stdio_proxy' },
+    select: { config: true },
+  });
+  const stillReferenced = tools.some((tool) => {
+    try {
+      const cfg = tool?.config ? JSON.parse(String(tool.config)) : {};
+      return normalizeNpmPackageName(String(cfg?.packageName || '')) === normalized;
+    } catch {
+      return false;
+    }
+  });
+  if (stillReferenced) return;
+  await runCommandCapture('npm', ['uninstall', '--prefix', MCP_PACKAGE_PREFIX, normalized], 120000);
+  const result = await runCommandCapture('npm', ['uninstall', '-g', normalized], 120000);
+  if (result.code === 0 || result.code === 1) {
+    mcpPackageReady.delete(normalized);
+    console.log(`[mcp-package] removed ${normalized} (no remaining tools)`);
+  }
+}
+
+function extractPackageNameFromToolConfig(toolConfig: any) {
+  return normalizeNpmPackageName(String(toolConfig?.packageName || ''));
+}
+
+async function resolveMcpRawInvocationFromConfig(config: any) {
+  const packageName = extractPackageNameFromToolConfig(config);
+  let rawCommand = String(config?.rawCommand || '').trim() || String(config?.command || '').trim();
+  let rawArgs = Array.isArray(config?.rawArgs)
+    ? config.rawArgs.map((x: any) => String(x))
+    : (Array.isArray(config?.args) ? config.args.map((x: any) => String(x)) : []);
+
+  if (!rawCommand && packageName) {
+    rawCommand = 'npx';
+    rawArgs = ['-y', packageName];
+  }
+
+  if (!rawCommand) return { command: '', args: rawArgs, packageName };
+
+  const existsBefore = await commandExists(rawCommand);
+  if (existsBefore) return { command: rawCommand, args: rawArgs, packageName };
+
+  if (packageName) {
+    await ensureGlobalNpmPackageInstalled(packageName, 'tool-restore');
+    const existsAfterInstall = await commandExists(rawCommand);
+    if (existsAfterInstall) return { command: rawCommand, args: rawArgs, packageName };
+    return { command: 'npx', args: ['--yes', '--prefix', MCP_PACKAGE_PREFIX, packageName], packageName };
+  }
+
+  return { command: rawCommand, args: rawArgs, packageName };
+}
+
+async function warmPersistedMcpPackagesFromTools() {
+  const prisma = getPrisma();
+  const tools = await prisma.orchestratorTool.findMany({
+    where: { type: 'mcp_stdio_proxy' },
+    select: { config: true },
+  });
+  const packages = new Set<string>();
+  for (const tool of tools) {
+    try {
+      const cfg = tool?.config ? JSON.parse(String(tool.config)) : {};
+      const pkg = extractPackageNameFromToolConfig(cfg);
+      if (pkg) packages.add(pkg);
+    } catch {}
+  }
+  for (const pkg of packages) {
+    await ensureGlobalNpmPackageInstalled(pkg, 'startup');
+  }
+}
+
 async function discoverMcpPackageTools(params: {
   command: string;
   args: string[];
@@ -254,10 +430,11 @@ async function getToolInputSchemaForRecord(tool: any): Promise<any> {
   }
 
   if (tool.type === 'mcp_stdio_proxy') {
-    const rawCommand = String(config?.rawCommand || '').trim() || String(config?.command || '').trim();
-    const rawArgs = Array.isArray(config?.rawArgs) ? config.rawArgs.map((x: any) => String(x)) : [];
+    const resolved = await resolveMcpRawInvocationFromConfig(config);
+    const rawCommand = String(resolved.command || '').trim();
+    const rawArgs = Array.isArray(resolved.args) ? resolved.args.map((x: any) => String(x)) : [];
     const envFromConfig = config?.env && typeof config.env === 'object' ? (config.env as Record<string, string>) : {};
-    const packageName = String(config?.packageName || '').trim();
+    const packageName = String(resolved.packageName || '').trim();
     const discovered = await discoverMcpPackageTools({
       command: rawCommand,
       args: rawArgs.length ? rawArgs : (Array.isArray(config?.args) ? config.args.map((x: any) => String(x)) : []),
@@ -4256,6 +4433,7 @@ app.post('/api/tools/import-mcp-package', requireUser, async (req, res) => {
 
     const normalizedPackageName = String(packageName || '').trim();
     if (!normalizedPackageName) return res.status(400).json({ error: 'packageName is required' });
+    await ensureGlobalNpmPackageInstalled(normalizedPackageName, 'import-mcp-package');
 
     const command = String(packageCommand || 'npx').trim();
     const args = Array.isArray(packageArgs) && packageArgs.length
@@ -4554,8 +4732,15 @@ app.delete('/api/tools/:id', requireUser, async (req, res) => {
     if (!Number.isFinite(idNum)) return res.status(400).json({ error: 'Invalid tool id' });
     requireVisibleToolId(scope, idNum);
     if (!scope.isAdmin) requireManageableResource(scope, 'tool', idNum);
-    const tool = db.prepare('SELECT id, name FROM tools WHERE id = ?').get(idNum) as any;
+    const tool = db.prepare('SELECT id, name, type, config FROM tools WHERE id = ?').get(idNum) as any;
     if (!tool) return res.status(404).json({ error: 'Tool not found' });
+    let packageNameToMaybeRemove = '';
+    if (String(tool.type || '') === 'mcp_stdio_proxy') {
+      try {
+        const cfg = tool?.config ? JSON.parse(String(tool.config)) : {};
+        packageNameToMaybeRemove = extractPackageNameFromToolConfig(cfg);
+      } catch {}
+    }
     const dependencies = getToolDependencies(idNum, scope);
     const hasDependencies = Boolean(
       dependencies.agents_count ||
@@ -4577,6 +4762,9 @@ app.delete('/api/tools/:id', requireUser, async (req, res) => {
     await prisma.orchestratorTool.delete({ where: { id: idNum } });
     await refreshPersistentMirror();
     deleteResourceAccess('tool', idNum);
+    if (packageNameToMaybeRemove) {
+      await removeGlobalNpmPackageIfUnused(packageNameToMaybeRemove);
+    }
     console.log(`Tool ${req.params.id} deleted successfully`);
     res.json({ success: true, forced: force, deleted_tool_id: idNum });
   } catch (e: any) {
@@ -8849,9 +9037,11 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
   }
 
   if (tool.type === 'mcp_stdio_proxy') {
-    const command = String(config?.command || '').trim();
+    const resolvedInvocation = await resolveMcpRawInvocationFromConfig(config);
+    const wrapped = buildWrappedStdioCommand(String(resolvedInvocation.command || ''), Array.isArray(resolvedInvocation.args) ? resolvedInvocation.args : []);
+    const command = String(wrapped.command || '').trim();
     const mcpToolName = String(config?.mcpToolName || '').trim();
-    const cmdArgs = Array.isArray(config?.args) ? config.args.map((x: any) => String(x)) : [];
+    const cmdArgs = Array.isArray(wrapped.args) ? wrapped.args.map((x: any) => String(x)) : [];
     if (!command || !mcpToolName) {
       return '[MCP Stdio Error] Missing command or mcpToolName in tool config.';
     }
@@ -12465,6 +12655,7 @@ async function startServer() {
       data: { status: 'idle' },
     });
     await ensureAgentCronJobsTable();
+    await warmPersistedMcpPackagesFromTools();
     await ensureBuiltInInternalTools();
     await refreshPersistentMirror();
     
