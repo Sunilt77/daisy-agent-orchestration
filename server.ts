@@ -92,6 +92,7 @@ import {
   getScopedToolIds,
   getScopedVoiceConfigIds,
   getResourceAccess,
+  getLocalAccessSubsystemInfo,
   requireManageableResource,
   deleteResourceAccess,
   requireVisibleAgentId,
@@ -11235,6 +11236,10 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
 
 async function startServer() {
   await ensurePrismaReady();
+  const localAccessInfo = getLocalAccessSubsystemInfo();
+  console.log(
+    `[orchestrator-access] subsystem=${localAccessInfo.store} tables=${localAccessInfo.tables.join(',')} mode=${localAccessInfo.ownership}`
+  );
 
   async function ensureBuiltInInternalTools() {
     const prisma = getPrisma();

@@ -5,6 +5,12 @@ import { HttpError } from '../platform/httpErrors';
 
 type AuthedUser = NonNullable<Request['user']>;
 
+export const LOCAL_ACCESS_SUBSYSTEM = {
+  store: 'sqlite',
+  tables: ['resource_owners', 'resource_shares'],
+  ownership: 'local_only',
+} as const;
+
 export type OrchestratorAccessScope = {
   user: AuthedUser;
   isAdmin: boolean;
@@ -216,6 +222,13 @@ export function deleteResourceAccess(
   if (options.deleteOwner !== false) {
     db.prepare('DELETE FROM resource_owners WHERE resource_type = ? AND resource_id = ?').run(resourceType, resourceId);
   }
+}
+
+export function getLocalAccessSubsystemInfo() {
+  return {
+    ...LOCAL_ACCESS_SUBSYSTEM,
+    notes: 'Resource ownership and sharing are intentionally local SQLite access tables for now.',
+  };
 }
 
 export function requireVisibleProjectId(scope: OrchestratorAccessScope, projectId: number | null | undefined) {

@@ -153,6 +153,26 @@ The Postgres + SQLite mirror approach is practical during migration, but it adds
 
 Some runtime and CRUD paths intentionally fall back to SQLite-backed reads or local compatibility checks when Postgres and the mirror are temporarily out of sync.
 
+### 4. Access-control ownership is an intentional local subsystem
+
+Resource ownership and sharing metadata currently live in SQLite-only tables:
+
+- `resource_owners`
+- `resource_shares`
+
+This is intentionally isolated as a local access-control subsystem while core orchestrator execution state continues moving to Prisma/Postgres-first persistence.
+
+Current behavior:
+
+- runtime and orchestration state are Postgres-first
+- ownership/share checks for local resources use SQLite
+- cleanup of ownership/share rows is centralized in `src/server/orchestratorAccess.ts`
+
+Migration note:
+
+- if this subsystem is moved to Postgres, migrate as one unit (owner + shares + access resolution), not endpoint-by-endpoint
+- until then, treat these tables as local-only access metadata rather than mirrored runtime state
+
 ## Scalability Recommendations
 
 ### Near Term
