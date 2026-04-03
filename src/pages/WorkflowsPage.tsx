@@ -477,6 +477,12 @@ export default function WorkflowsPage() {
       return haystack.includes(query);
     });
   }, [workflowLibraryStatus, workflowSearch, workflows]);
+  const workflowInsights = useMemo(() => {
+    const active = workflows.filter((workflow) => String(workflow.status || '').toLowerCase() === 'active').length;
+    const totalRuns = workflows.reduce((sum, workflow) => sum + Number(workflow.runs_count || 0), 0);
+    const withWebhook = workflows.filter((workflow) => String(workflow.trigger_type || '').toLowerCase() === 'webhook').length;
+    return { active, totalRuns, withWebhook };
+  }, [workflows]);
 
   const updateSelectedNode = (patch: Partial<WorkflowNodeData>) => {
     if (!selectedNodeId) return;
@@ -677,6 +683,20 @@ export default function WorkflowsPage() {
             </button>
           </div>
         </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {[
+          { label: 'Workflows', value: workflows.length },
+          { label: 'Active', value: workflowInsights.active },
+          { label: 'Total Runs', value: workflowInsights.totalRuns },
+          { label: 'Webhook Triggers', value: workflowInsights.withWebhook },
+        ].map((item) => (
+          <div key={item.label} className="telemetry-tile p-4">
+            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">{item.label}</div>
+            <div className="mt-2 text-2xl font-black text-white">{item.value}</div>
+          </div>
+        ))}
       </div>
 
       <div className="grid grid-cols-12 gap-6">
