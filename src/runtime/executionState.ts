@@ -201,6 +201,58 @@ export async function recoverCrewExecutionState(options: {
   return { count: runningExecutions.length };
 }
 
+export async function syncAgentStatus(options: {
+  db: any;
+  prisma: any;
+  agentId: number;
+  status: string;
+}) {
+  const { db, prisma, agentId, status } = options;
+  await prisma.orchestratorAgent.updateMany({
+    where: { id: agentId },
+    data: { status, updatedAt: new Date() },
+  });
+  db.prepare('UPDATE agents SET status = ? WHERE id = ?').run(status, agentId);
+}
+
+export async function syncAgentStatuses(options: {
+  db: any;
+  prisma: any;
+  fromStatus: string;
+  toStatus: string;
+}) {
+  const { db, prisma, fromStatus, toStatus } = options;
+  const result = await prisma.orchestratorAgent.updateMany({
+    where: { status: fromStatus },
+    data: { status: toStatus, updatedAt: new Date() },
+  });
+  db.prepare('UPDATE agents SET status = ? WHERE status = ?').run(toStatus, fromStatus);
+  return result.count;
+}
+
+export async function syncAgentExecutionStatuses(options: {
+  db: any;
+  prisma: any;
+  agentId?: number;
+  fromStatus: string;
+  toStatus: string;
+}) {
+  const { db, prisma, agentId, fromStatus, toStatus } = options;
+  const where = agentId != null
+    ? { agentId, status: fromStatus }
+    : { status: fromStatus };
+  const result = await prisma.orchestratorAgentExecution.updateMany({
+    where,
+    data: { status: toStatus },
+  });
+  if (agentId != null) {
+    db.prepare('UPDATE agent_executions SET status = ? WHERE agent_id = ? AND status = ?').run(toStatus, agentId, fromStatus);
+  } else {
+    db.prepare('UPDATE agent_executions SET status = ? WHERE status = ?').run(toStatus, fromStatus);
+  }
+  return result.count;
+}
+
 export async function syncCrewExecutionStatus(options: {
   db: any;
   prisma: any;

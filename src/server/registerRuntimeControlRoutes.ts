@@ -1,6 +1,13 @@
 import type express from 'express';
 import { acceptedExecutionResponse, shouldWaitForExecution } from '../runtime/httpExecution';
-import { appendCrewExecutionLog, createCrewExecutionRecord, syncCrewExecutionStatus } from '../runtime/executionState';
+import {
+  appendCrewExecutionLog,
+  createCrewExecutionRecord,
+  syncAgentExecutionStatuses,
+  syncAgentStatus,
+  syncAgentStatuses,
+  syncCrewExecutionStatus,
+} from '../runtime/executionState';
 
 type CancelToken = { canceled: boolean; reason?: string };
 
@@ -160,7 +167,12 @@ export function registerRuntimeControlRoutes({
     await updateRuntimeAgentExecution(execId, { status: 'canceled' });
     await cascadeCancelDelegatedChildren(execId, 'Canceled by user');
     if (exec.agent_id) {
-      db.prepare("UPDATE agents SET status = 'idle' WHERE id = ?").run(exec.agent_id);
+      await syncAgentStatus({
+        db,
+        prisma: getPrisma(),
+        agentId: Number(exec.agent_id),
+        status: 'idle',
+      });
     }
     res.json({ success: true });
   });
@@ -182,17 +194,19 @@ export function registerRuntimeControlRoutes({
       token.reason = 'Canceled by user (stop-all)';
     }
 
-    await prisma.orchestratorAgentExecution.updateMany({
-      where: { agentId, status: 'running' },
-      data: { status: 'canceled' }
+    await syncAgentExecutionStatuses({
+      db,
+      prisma,
+      agentId,
+      fromStatus: 'running',
+      toStatus: 'canceled',
     });
-    await prisma.orchestratorAgent.update({
-      where: { id: agentId },
-      data: { status: 'idle' }
+    await syncAgentStatus({
+      db,
+      prisma,
+      agentId,
+      status: 'idle',
     });
-
-    db.prepare("UPDATE agent_executions SET status = 'canceled' WHERE agent_id = ? AND status = 'running'").run(agentId);
-    db.prepare("UPDATE agents SET status = 'idle' WHERE id = ?").run(agentId);
 
     let canceledQueued = 0;
     let matchedQueued = 0;
@@ -339,19 +353,20 @@ export function registerRuntimeControlRoutes({
       token.reason = 'Canceled by user (bulk stop)';
     }
 
-    const updateResult = await prisma.orchestratorAgentExecution.updateMany({
-      where: { status: 'running' },
-      data: { status: 'canceled' }
+    const updateCount = await syncAgentExecutionStatuses({
+      db,
+      prisma,
+      fromStatus: 'running',
+      toStatus: 'canceled',
     });
-    await prisma.orchestratorAgent.updateMany({
-      where: { status: 'running' },
-      data: { status: 'idle' }
+    await syncAgentStatuses({
+      db,
+      prisma,
+      fromStatus: 'running',
+      toStatus: 'idle',
     });
 
-    db.prepare("UPDATE agent_executions SET status = 'canceled' WHERE status = 'running'").run();
-    db.prepare("UPDATE agents SET status = 'idle' WHERE status = 'running'").run();
-
-    res.json({ success: true, canceled_running_executions: updateResult.count });
+    res.json({ success: true, canceled_running_executions: updateCount });
   });
 
   app.post('/api/task-control/stop-running-crews', async (_req, res) => {

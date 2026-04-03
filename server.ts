@@ -64,6 +64,7 @@ import {
   getCrewExecutionStatus,
   readCrewExecutionLogs as readCrewExecutionLogsFromStore,
   recoverCrewExecutionState,
+  syncAgentStatus,
   syncCrewExecutionMetrics,
   syncCrewExecutionStatus,
 } from './src/runtime/executionState';
@@ -6658,9 +6659,25 @@ function buildMcpServer(options?: { toolExposedName?: string; bundleSlug?: strin
             description: `[CREW] ${crew.description || 'A collaborative AI crew.'} Process: ${crew.process}.`,
             inputSchema: crewInput
         }, async ({ kickoff_message, task }) => {
-            const stmt = db.prepare('INSERT INTO crew_executions (crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?)');
-            const info = stmt.run(crew.id, 'running', JSON.stringify([]), kickoff_message || task || '', null);
-            const executionId = info.lastInsertRowid as number;
+            const execution = await createCrewExecutionRecord({
+                db,
+                prisma: getPrisma(),
+                crewId: Number(crew.id),
+                initialInput: kickoff_message || task || '',
+                retryOf: null,
+                status: 'pending',
+            });
+            const executionId = execution.id as number;
+            await appendCrewExecutionLog({
+                db,
+                prisma: getPrisma(),
+                executionId,
+                type: 'thought',
+                payload: {
+                    agent: 'system',
+                    message: 'MCP-triggered crew run queued. Waiting for a worker to claim execution.',
+                },
+            });
 
             await enqueueJob('run_crew', {
                 crewId: crew.id,
@@ -7062,9 +7079,25 @@ app.post('/mcp/call/:toolName', localRunLimiter, async (req, res) => {
 
         if (!crew) return res.status(404).json({ error: "Tool (Crew) not found" });
 
-        const stmt = db.prepare('INSERT INTO crew_executions (crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?)');
-        const info = stmt.run(crew.id, 'running', JSON.stringify([]), kickoff_message || task || '', null);
-        const executionId = info.lastInsertRowid;
+        const execution = await createCrewExecutionRecord({
+          db,
+          prisma: getPrisma(),
+          crewId: Number(crew.id),
+          initialInput: kickoff_message || task || '',
+          retryOf: null,
+          status: 'pending',
+        });
+        const executionId = execution.id;
+        await appendCrewExecutionLog({
+          db,
+          prisma: getPrisma(),
+          executionId: Number(executionId),
+          type: 'thought',
+          payload: {
+            agent: 'system',
+            message: 'MCP-triggered crew run queued. Waiting for a worker to claim execution.',
+          },
+        });
 
         // Start background process (same as kickoff endpoint)
         await enqueueJob('run_crew', {
@@ -8698,7 +8731,12 @@ async function runDelegatedAgentExecution(options: {
     terminalOutput = message;
     await finalizeSupervisorExecution(parentExecutionId, terminalStatus, message, await collectExecutionUsage(childExecutionIds));
   } finally {
-    db.prepare("UPDATE agents SET status = 'idle' WHERE id = ?").run(supervisorAgent.id);
+    await syncAgentStatus({
+      db,
+      prisma: getPrisma(),
+      agentId: Number(supervisorAgent.id),
+      status: 'idle',
+    });
     agentCancelTokens.delete(parentExecutionId);
     delegatedExecutionPromises.delete(parentExecutionId);
   }
@@ -8990,7 +9028,12 @@ async function runAgent(
 	    span.setAttribute('task.description', task.description);
 
 	    // Set status to running
-	    db.prepare("UPDATE agents SET status = 'running' WHERE id = ?").run(agent.id);
+	    await syncAgentStatus({
+	      db,
+	      prisma: getPrisma(),
+	      agentId: Number(agent.id),
+	      status: 'running',
+	    });
 
 	    if (platformRunId) {
 	      try {
@@ -9801,7 +9844,12 @@ async function runAgent(
             }
         }
         // Set status back to idle
-        db.prepare("UPDATE agents SET status = 'idle' WHERE id = ?").run(agent.id);
+        await syncAgentStatus({
+          db,
+          prisma: getPrisma(),
+          agentId: Number(agent.id),
+          status: 'idle',
+        });
         
         agentCancelTokens.delete(execId);
 
