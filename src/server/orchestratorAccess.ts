@@ -196,7 +196,7 @@ export function getResourceAccess(resourceType: string, resourceId: number) {
 export function setResourceAccess(resourceType: string, resourceId: number, user: AuthedUser, payload: any) {
   const visibility = payload?.visibility === 'org' ? 'org' : 'private';
   assignResourceOwner(resourceType, resourceId, user, visibility);
-  db.prepare('DELETE FROM resource_shares WHERE resource_type = ? AND resource_id = ?').run(resourceType, resourceId);
+  deleteResourceAccess(resourceType, resourceId, { deleteOwner: false });
   const sharedUsers = Array.isArray(payload?.shared_user_ids) ? payload.shared_user_ids.map((x: any) => String(x || '').trim()).filter(Boolean) : [];
   const sharedOrgs = Array.isArray(payload?.shared_org_ids) ? payload.shared_org_ids.map((x: any) => String(x || '').trim()).filter(Boolean) : [];
   const insert = db.prepare(`
@@ -205,6 +205,17 @@ export function setResourceAccess(resourceType: string, resourceId: number, user
   `);
   for (const userId of sharedUsers) insert.run(resourceType, resourceId, userId, null);
   for (const orgId of sharedOrgs) insert.run(resourceType, resourceId, null, orgId);
+}
+
+export function deleteResourceAccess(
+  resourceType: string,
+  resourceId: number,
+  options: { deleteOwner?: boolean } = {},
+) {
+  db.prepare('DELETE FROM resource_shares WHERE resource_type = ? AND resource_id = ?').run(resourceType, resourceId);
+  if (options.deleteOwner !== false) {
+    db.prepare('DELETE FROM resource_owners WHERE resource_type = ? AND resource_id = ?').run(resourceType, resourceId);
+  }
 }
 
 export function requireVisibleProjectId(scope: OrchestratorAccessScope, projectId: number | null | undefined) {

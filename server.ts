@@ -93,6 +93,7 @@ import {
   getScopedVoiceConfigIds,
   getResourceAccess,
   requireManageableResource,
+  deleteResourceAccess,
   requireVisibleAgentId,
   requireVisibleBundleId,
   requireVisibleCrewId,
@@ -4385,8 +4386,7 @@ app.delete('/api/tools/:id', requireUser, async (req, res) => {
     await prisma.orchestratorToolVersion.deleteMany({ where: { toolId: idNum } });
     await prisma.orchestratorTool.delete({ where: { id: idNum } });
     await refreshPersistentMirror();
-    db.prepare('DELETE FROM resource_shares WHERE resource_type = ? AND resource_id = ?').run('tool', idNum);
-    db.prepare('DELETE FROM resource_owners WHERE resource_type = ? AND resource_id = ?').run('tool', idNum);
+    deleteResourceAccess('tool', idNum);
     console.log(`Tool ${req.params.id} deleted successfully`);
     res.json({ success: true, forced: force, deleted_tool_id: idNum });
   } catch (e: any) {
@@ -6287,8 +6287,7 @@ app.delete('/api/voice/configs/:id', requireUser, async (req, res) => {
   requireVisibleVoiceConfigId(scope, presetId);
   if (!scope.isAdmin) requireManageableResource(scope, 'voice_config', presetId);
   db.prepare('DELETE FROM voice_config_presets WHERE id = ?').run(presetId);
-  db.prepare('DELETE FROM resource_shares WHERE resource_type = ? AND resource_id = ?').run('voice_config', presetId);
-  db.prepare('DELETE FROM resource_owners WHERE resource_type = ? AND resource_id = ?').run('voice_config', presetId);
+  deleteResourceAccess('voice_config', presetId);
   res.json({ ok: true });
 });
 

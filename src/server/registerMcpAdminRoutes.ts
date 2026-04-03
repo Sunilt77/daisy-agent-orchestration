@@ -2,6 +2,7 @@ import type express from 'express';
 import { requireUser } from '../platform/auth';
 import {
   assignResourceOwner,
+  deleteResourceAccess,
   getScopedAgentIds,
   getScopedBundleIds,
   getScopedToolIds,
@@ -901,8 +902,7 @@ export function registerMcpAdminRoutes({
       await prisma.orchestratorMcpBundleTool.deleteMany({ where: { bundleId: id } });
       await prisma.orchestratorMcpBundleVersion.deleteMany({ where: { bundleId: id } });
       await prisma.orchestratorMcpBundle.delete({ where: { id } });
-      db.prepare('DELETE FROM resource_shares WHERE resource_type = ? AND resource_id = ?').run('mcp_bundle', id);
-      db.prepare('DELETE FROM resource_owners WHERE resource_type = ? AND resource_id = ?').run('mcp_bundle', id);
+      deleteResourceAccess('mcp_bundle', id);
       await refreshPersistentMirror();
       res.json({ success: true, forced: force });
     } catch (e: any) {
