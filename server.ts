@@ -4385,7 +4385,6 @@ app.delete('/api/tools/:id', requireUser, async (req, res) => {
     await prisma.orchestratorToolVersion.deleteMany({ where: { toolId: idNum } });
     await prisma.orchestratorTool.delete({ where: { id: idNum } });
     await refreshPersistentMirror();
-    db.prepare('DELETE FROM tool_executions WHERE tool_id = ?').run(idNum);
     db.prepare('DELETE FROM resource_shares WHERE resource_type = ? AND resource_id = ?').run('tool', idNum);
     db.prepare('DELETE FROM resource_owners WHERE resource_type = ? AND resource_id = ?').run('tool', idNum);
     console.log(`Tool ${req.params.id} deleted successfully`);
@@ -5033,12 +5032,6 @@ app.delete('/api/agents/:id', requireUser, async (req, res) => {
     await prisma.orchestratorToolExecution.deleteMany({ where: { agentId } });
     await prisma.orchestratorAgentSession.deleteMany({ where: { agentId } });
     await refreshPersistentMirror();
-    // Mirror to SQLite
-    try {
-      db.prepare('DELETE FROM agent_executions WHERE agent_id = ?').run(agentId);
-      db.prepare('DELETE FROM tool_executions WHERE agent_id = ?').run(agentId);
-      db.prepare('DELETE FROM agent_sessions WHERE agent_id = ?').run(agentId);
-    } catch {}
     console.log(`Agent ${agentId} deleted successfully`);
     res.json({ success: true });
   } catch (e: any) {
@@ -7928,16 +7921,6 @@ app.delete('/api/crews/:id', requireUser, async (req, res) => {
         const prisma = getPrisma();
         await prisma.orchestratorCrew.delete({ where: { id: crewId } });
         await refreshPersistentMirror();
-        try {
-          const executionIds = (db.prepare('SELECT id FROM crew_executions WHERE crew_id = ?').all(crewId) as any[]).map((row) => Number(row.id));
-          if (executionIds.length) {
-            db.prepare(`DELETE FROM crew_execution_logs WHERE execution_id IN (${executionIds.map(() => '?').join(',')})`).run(...executionIds);
-          }
-        } catch {}
-        try { db.prepare('DELETE FROM crew_executions WHERE crew_id = ?').run(crewId); } catch {}
-        try { db.prepare('DELETE FROM tasks WHERE crew_id = ?').run(crewId); } catch {}
-        try { db.prepare('DELETE FROM crew_agents WHERE crew_id = ?').run(crewId); } catch {}
-        try { db.prepare('DELETE FROM crews WHERE id = ?').run(crewId); } catch {}
         console.log(`Crew ${crewId} deleted successfully`);
         res.json({ success: true });
     } catch (e: any) {
