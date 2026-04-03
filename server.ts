@@ -4551,31 +4551,71 @@ app.put('/api/resource-access/:resourceType/:resourceId', requireUser, async (re
   }
 });
 
-app.post('/api/tools/autobuild', async (req, res) => {
+app.post('/api/tools/autobuild', requireUser, async (req, res) => {
   const { goal, agent_ids, provider = 'google', model = 'gemini-1.5-flash' } = req.body || {};
-
-  if (!goal || typeof goal !== 'string') {
+  const normalizedGoal = String(goal || '').trim();
+  if (!normalizedGoal) {
     return res.status(400).json({ error: 'Goal is required.' });
+  }
+  if (normalizedGoal.length > 4000) {
+    return res.status(400).json({ error: 'Goal is too long (max 4000 characters).' });
   }
 
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const config = await getProviderConfig(provider);
     const apiKey = config.apiKey;
     if (!apiKey) {
       return res.status(500).json({ error: `API Key not configured for provider: ${provider}` });
     }
 
-    const availableAgents = Array.isArray(agent_ids) && agent_ids.length
-      ? db.prepare('SELECT id, name, role, goal, backstory, model, provider FROM agents WHERE id IN (' + agent_ids.map(() => '?').join(',') + ')').all(...agent_ids)
-      : db.prepare('SELECT id, name, role, goal, backstory, model, provider FROM agents').all();
+    const scopedAgentIds = getScopedAgentIds(scope);
+    const scopedToolIds = getScopedToolIds(scope);
+    const requestedAgentIds = Array.isArray(agent_ids)
+      ? agent_ids.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id) && id > 0)
+      : [];
+    for (const id of requestedAgentIds) requireVisibleAgentId(scope, id);
 
-    const availableTools = db.prepare('SELECT id, name, description, type, config FROM tools').all();
+    const prisma = getPrisma();
+    const [availableAgentsRaw, availableToolsRaw] = await Promise.all([
+      prisma.orchestratorAgent.findMany({
+        where: requestedAgentIds.length
+          ? { id: { in: requestedAgentIds } }
+          : (scopedAgentIds ? { id: { in: scopedAgentIds } } : undefined),
+        select: { id: true, name: true, role: true, goal: true, backstory: true, model: true, provider: true },
+      }),
+      prisma.orchestratorTool.findMany({
+        where: scopedToolIds ? { id: { in: scopedToolIds } } : undefined,
+        select: { id: true, name: true, description: true, category: true, type: true, config: true },
+      }),
+    ]);
+
+    if (requestedAgentIds.length && !availableAgentsRaw.length) {
+      return res.status(400).json({ error: 'No visible agents matched the selected assignment list.' });
+    }
+
+    const availableAgents = availableAgentsRaw.map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      role: agent.role,
+      goal: compactPromptText(String(agent.goal || ''), 220),
+      backstory: compactPromptText(String(agent.backstory || ''), 160),
+      model: agent.model,
+      provider: agent.provider,
+    }));
+    const availableTools = availableToolsRaw.map((tool) => ({
+      id: tool.id,
+      name: tool.name,
+      description: compactPromptText(String(tool.description || ''), 180),
+      category: tool.category,
+      type: tool.type,
+    }));
 
     const prompt = `
     You are an expert Tool Builder for AI agents.
     Your goal is to design the right tools so the agents can accomplish the user's objective.
 
-    User Objective: "${goal}"
+    User Objective: "${normalizedGoal}"
 
     Available Agents (use these IDs for assignment):
     ${JSON.stringify(availableAgents)}
@@ -4681,15 +4721,14 @@ app.post('/api/tools/autobuild', async (req, res) => {
       return cfg;
     };
 
-    const prisma = getPrisma();
     const createdToolIds: number[] = [];
-    const existingToolById = new Set((availableTools as any[]).map((t: any) => Number(t.id)));
+    const existingToolById = new Set((availableToolsRaw as any[]).map((t: any) => Number(t.id)));
 
     for (const toolDef of design.tools) {
       const normalizedType = normalizeToolType(toolDef);
       const normalizedConfig = normalizeToolConfig(toolDef, normalizedType);
       const normalizedName = String(toolDef?.name || '').trim() || `Auto ${normalizedType} tool`;
-      const normalizedDescription = String(toolDef?.description || '').trim() || `Auto-generated ${normalizedType} tool for: ${goal}`;
+      const normalizedDescription = String(toolDef?.description || '').trim() || `Auto-generated ${normalizedType} tool for: ${normalizedGoal}`;
       const normalizedCategory = inferToolCategory(
         normalizedName,
         normalizedDescription,

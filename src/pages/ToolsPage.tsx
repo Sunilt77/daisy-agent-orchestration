@@ -809,7 +809,12 @@ export default function ToolsPage() {
   };
 
   const autoBuildTools = async () => {
-    if (!autoBuildGoal) return;
+    const normalizedGoal = autoBuildGoal.trim();
+    if (!normalizedGoal) return;
+    if (normalizedGoal.length > 4000) {
+      setBuildError('Goal is too long (max 4000 characters).');
+      return;
+    }
     setIsBuilding(true);
     setBuildError('');
     try {
@@ -817,7 +822,7 @@ export default function ToolsPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          goal: autoBuildGoal,
+          goal: normalizedGoal,
           provider: autoBuildProvider,
           model: autoBuildModel,
           agent_ids: autoBuildAgentIds
@@ -3023,7 +3028,7 @@ export default function ToolsPage() {
               </button>
               <button
                 onClick={autoBuildTools}
-                disabled={isBuilding || !autoBuildGoal}
+                disabled={isBuilding || !autoBuildGoal.trim() || autoBuildGoal.trim().length > 4000}
                 className="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
               >
                 {isBuilding ? 'Building...' : 'Build Tools'}
