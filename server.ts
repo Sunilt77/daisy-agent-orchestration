@@ -7112,8 +7112,21 @@ async function handleStreamableMcp(req: express.Request, res: express.Response, 
     }
 }
 
+function isBrowserHtmlNavigation(req: express.Request): boolean {
+    if (req.method !== 'GET') return false;
+    const mcpSessionId = String(req.headers['mcp-session-id'] || '').trim();
+    if (mcpSessionId) return false;
+    const accept = String(req.headers.accept || '').toLowerCase();
+    return accept.includes('text/html');
+}
+
 // Streamable HTTP (recommended) MCP server
-app.all('/mcp', async (req, res) => handleStreamableMcp(req, res));
+app.all('/mcp', async (req, res, next) => {
+    if (isBrowserHtmlNavigation(req)) {
+        return next();
+    }
+    return handleStreamableMcp(req, res);
+});
 app.all('/mcp/tool/:exposedName', async (req, res) => handleStreamableMcp(req, res, { toolExposedName: String(req.params.exposedName || '') }));
 app.all('/mcp/bundle/:slug', async (req, res) => handleStreamableMcp(req, res, { bundleSlug: String(req.params.slug || '') }));
 
