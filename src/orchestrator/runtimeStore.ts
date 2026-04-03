@@ -575,3 +575,51 @@ export async function updateToolExecution(id: number, data: {
     },
   });
 }
+
+export async function getExecutionCostTotals(options: {
+  crewIds?: number[];
+  agentIds?: number[];
+}) {
+  const prisma = getPrisma();
+  const crewIds = Array.from(new Set((options.crewIds || []).map(Number).filter((id) => Number.isFinite(id) && id > 0)));
+  const agentIds = Array.from(new Set((options.agentIds || []).map(Number).filter((id) => Number.isFinite(id) && id > 0)));
+
+  const [crewAggregate, agentAggregate] = await Promise.all([
+    crewIds.length
+      ? prisma.orchestratorCrewExecution.aggregate({
+          where: { crewId: { in: crewIds } },
+          _sum: { totalCost: true },
+        })
+      : Promise.resolve({ _sum: { totalCost: 0 } }),
+    agentIds.length
+      ? prisma.orchestratorAgentExecution.aggregate({
+          where: { agentId: { in: agentIds } },
+          _sum: { totalCost: true },
+        })
+      : Promise.resolve({ _sum: { totalCost: 0 } }),
+  ]);
+
+  return {
+    crewCost: Number(crewAggregate._sum.totalCost || 0),
+    agentCost: Number(agentAggregate._sum.totalCost || 0),
+  };
+}
+
+export async function pruneRuntimeRetention(cutoffDate: Date) {
+  const prisma = getPrisma();
+  const [crewLogs, crewExecutions, agentExecutions, toolExecutions, jobs] = await Promise.all([
+    prisma.orchestratorCrewExecutionLog.deleteMany({ where: { timestamp: { lt: cutoffDate } } }),
+    prisma.orchestratorCrewExecution.deleteMany({ where: { createdAt: { lt: cutoffDate }, status: { not: 'running' } } }),
+    prisma.orchestratorAgentExecution.deleteMany({ where: { createdAt: { lt: cutoffDate }, status: { not: 'running' } } }),
+    prisma.orchestratorToolExecution.deleteMany({ where: { createdAt: { lt: cutoffDate }, status: { not: 'running' } } }),
+    prisma.orchestratorJobQueue.deleteMany({ where: { startedAt: { lt: cutoffDate }, status: { notIn: ['pending', 'running'] } } }),
+  ]);
+
+  return {
+    crewLogs: crewLogs.count,
+    crewExecutions: crewExecutions.count,
+    agentExecutions: agentExecutions.count,
+    toolExecutions: toolExecutions.count,
+    jobs: jobs.count,
+  };
+}

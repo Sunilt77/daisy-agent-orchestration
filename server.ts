@@ -39,11 +39,13 @@ import {
   finalizeSupervisorExecution as finalizeRuntimeSupervisorExecution,
   getAgentExecution as getRuntimeAgentExecution,
   getDelegationRows as getRuntimeDelegationRows,
+  getExecutionCostTotals as getRuntimeExecutionCostTotals,
   getJobRow as getRuntimeJobRow,
   getWorkflowRun as getRuntimeWorkflowRun,
   loadSessionConversation as loadRuntimeSessionConversation,
   loadSessionSummary as loadRuntimeSessionSummary,
   persistWorkflowRun as persistRuntimeWorkflowRun,
+  pruneRuntimeRetention,
   recoverRuntimeState,
   saveSessionConversation as saveRuntimeSessionConversation,
   saveSessionSummary as saveRuntimeSessionSummary,
@@ -5076,30 +5078,24 @@ app.get('/api/projects', requireUser, async (req, res) => {
     const projectsWithStats = projects.map((p) => {
       const crewIds = crewIdsByProject.get(p.id) || [];
       const agentIds = agentIdsByProject.get(p.id) || [];
-      let crewCost = 0;
-      if (crewIds.length > 0) {
-        const placeholders = crewIds.map(() => '?').join(',');
-        const result = db.prepare(`SELECT SUM(total_cost) as cost FROM crew_executions WHERE crew_id IN (${placeholders})`).get(...crewIds) as any;
-        crewCost = result.cost || 0;
-      }
-      let agentCost = 0;
-      if (agentIds.length > 0) {
-        const placeholders = agentIds.map(() => '?').join(',');
-        const result = db.prepare(`SELECT SUM(total_cost) as cost FROM agent_executions WHERE agent_id IN (${placeholders})`).get(...agentIds) as any;
-        agentCost = result.cost || 0;
-      }
+      return { project: p, crewIds, agentIds };
+    });
+
+    const projectCostStats = await Promise.all(projectsWithStats.map(async ({ project, crewIds, agentIds }) => {
+      const costs = await getRuntimeExecutionCostTotals({ crewIds, agentIds });
       return {
-        id: p.id,
-        name: p.name,
-        description: p.description,
-        platform_project_id: (p as any).platformProjectId ?? null,
-        created_at: p.createdAt,
+        id: project.id,
+        name: project.name,
+        description: project.description,
+        platform_project_id: (project as any).platformProjectId ?? null,
+        created_at: project.createdAt,
         crews_count: crewIds.length,
         agents_count: agentIds.length,
-        total_cost: crewCost + agentCost,
+        total_cost: costs.crewCost + costs.agentCost,
       };
-    });
-    res.json(projectsWithStats);
+    }));
+
+    res.json(projectCostStats);
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
@@ -10888,12 +10884,7 @@ function scheduleRetention() {
       const cutoffIso = cutoffDate.toISOString();
       try {
         const prisma = getPrisma();
-        // Prune PostgreSQL (Primary)
-        await prisma.orchestratorCrewExecutionLog.deleteMany({ where: { timestamp: { lt: cutoffDate } } });
-        await prisma.orchestratorCrewExecution.deleteMany({ where: { createdAt: { lt: cutoffDate }, status: { not: 'running' } } });
-        await prisma.orchestratorAgentExecution.deleteMany({ where: { createdAt: { lt: cutoffDate }, status: { not: 'running' } } });
-        await prisma.orchestratorToolExecution.deleteMany({ where: { createdAt: { lt: cutoffDate }, status: { not: 'running' } } });
-        await prisma.orchestratorJobQueue.deleteMany({ where: { startedAt: { lt: cutoffDate }, status: { notIn: ['pending', 'running'] } } });
+        await pruneRuntimeRetention(cutoffDate);
 
         // Prune SQLite (Legacy Mirror)
         try {
