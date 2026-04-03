@@ -64,13 +64,30 @@ async function wipeAllDbs() {
   tx();
 }
 
+async function createAuthedAgent() {
+  const email = `orchestrator_${Date.now()}_${Math.random().toString(16).slice(2)}@test.com`;
+  process.env.PLATFORM_ADMIN_EMAILS = email;
+  const authed = request.agent(app);
+  await authed
+    .post('/api/auth/signup')
+    .send({
+      org_name: 'Orchestrator Test Org',
+      email,
+      password: 'Password123!',
+    })
+    .expect(200);
+  return authed;
+}
+
 describe.sequential('orchestrator local APIs', () => {
   beforeEach(async () => {
     await wipeAllDbs();
   });
 
   it('supports providers, credentials, pricing, and projects CRUD', async () => {
-    await request(app)
+    const authed = await createAuthedAgent();
+
+    await authed
       .post('/api/credentials')
       .send({
         provider: 'maps_api_key',
@@ -81,14 +98,14 @@ describe.sequential('orchestrator local APIs', () => {
       })
       .expect(200);
 
-    const credentials = await request(app).get('/api/credentials?category=http').expect(200);
+    const credentials = await authed.get('/api/credentials?category=http').expect(200);
     expect(Array.isArray(credentials.body)).toBe(true);
     expect(credentials.body.length).toBe(1);
     expect(credentials.body[0].provider).toBe('maps_api_key');
 
-    await request(app).delete(`/api/credentials/${credentials.body[0].id}`).expect(200);
+    await authed.delete(`/api/credentials/${credentials.body[0].id}`).expect(200);
 
-    const p1 = await request(app)
+    const p1 = await authed
       .post('/api/providers')
       .send({
         name: 'OpenAI Primary',
@@ -100,7 +117,7 @@ describe.sequential('orchestrator local APIs', () => {
       .expect(200);
     expect(p1.body.id).toBeTruthy();
 
-    const p2 = await request(app)
+    const p2 = await authed
       .post('/api/providers')
       .send({
         name: 'OpenAI Backup',
@@ -112,7 +129,7 @@ describe.sequential('orchestrator local APIs', () => {
       .expect(200);
     expect(p2.body.id).toBeTruthy();
 
-    const providers = await request(app).get('/api/providers').expect(200);
+    const providers = await authed.get('/api/providers').expect(200);
     const openaiProviders = providers.body.filter((x: any) => x.provider === 'openai');
     expect(openaiProviders.length).toBe(2);
     expect(openaiProviders.filter((x: any) => Number(x.is_default) === 1).length).toBe(1);
@@ -133,20 +150,22 @@ describe.sequential('orchestrator local APIs', () => {
 
     await request(app).delete(`/api/pricing/${pricing.body.id}`).expect(200);
 
-    const project = await request(app)
+    const project = await authed
       .post('/api/projects')
       .send({ name: 'Core Project', description: 'local project test' })
       .expect(200);
     expect(project.body.id).toBeTruthy();
 
-    const projects = await request(app).get('/api/projects').expect(200);
+    const projects = await authed.get('/api/projects').expect(200);
     expect(projects.body.some((x: any) => Number(x.id) === Number(project.body.id))).toBe(true);
 
-    await request(app).delete(`/api/projects/${project.body.id}`).expect(200);
+    await authed.delete(`/api/projects/${project.body.id}`).expect(200);
   });
 
   it('supports tools, mcp exposure, bundles, agents, crews, tasks, and task-control flows', async () => {
-    const tool1 = await request(app)
+    const authed = await createAuthedAgent();
+
+    const tool1 = await authed
       .post('/api/tools')
       .send({
         name: 'CurrentDateTimeTool',
@@ -156,7 +175,7 @@ describe.sequential('orchestrator local APIs', () => {
         config: {},
       })
       .expect(200);
-    const tool2 = await request(app)
+    const tool2 = await authed
       .post('/api/tools')
       .send({
         name: 'SearchPlaces',
@@ -167,16 +186,16 @@ describe.sequential('orchestrator local APIs', () => {
       })
       .expect(200);
 
-    await request(app)
+    await authed
       .put(`/api/mcp/exposed-tools/${tool1.body.id}`)
       .send({ exposed: true, exposed_name: 'tool_currentdatetimetool', description: 'datetime exposure' })
       .expect(200);
 
-    const exposed = await request(app).get('/api/mcp/exposed-tools').expect(200);
+    const exposed = await authed.get('/api/mcp/exposed-tools').expect(200);
     const exposedRow = exposed.body.find((x: any) => Number(x.tool_id) === Number(tool1.body.id));
-    expect(exposedRow.exposed_name).toBe('tool_currentdatetimetool');
+    expect(exposedRow.exposed_name).toBe('currentdatetimetool');
 
-    const bundle = await request(app)
+    const bundle = await authed
       .post('/api/mcp/bundles')
       .send({
         name: 'Core Bundle',
@@ -187,7 +206,7 @@ describe.sequential('orchestrator local APIs', () => {
       .expect(200);
     expect(bundle.body.id).toBeTruthy();
 
-    const manifest = await request(app).get('/mcp/manifest').expect(200);
+    const manifest = await authed.get('/mcp/manifest').expect(200);
     expect(Array.isArray(manifest.body.tools)).toBe(true);
     expect(manifest.body.tools.some((x: any) => x.name === 'bundle_core_bundle')).toBe(true);
     expect(Array.isArray(manifest.body.bundles)).toBe(true);
@@ -197,14 +216,14 @@ describe.sequential('orchestrator local APIs', () => {
     expect(Array.isArray(manifestBundle.tools)).toBe(true);
     expect(manifestBundle.tools.length).toBeGreaterThanOrEqual(2);
 
-    const bundleInventory = await request(app)
+    const bundleInventory = await authed
       .post('/mcp/call/bundle_core_bundle')
       .send({})
       .expect(200);
     expect(String(bundleInventory.body.content?.[0]?.text || '')).toContain('"slug": "core_bundle"');
     expect(String(bundleInventory.body.content?.[0]?.text || '')).toContain('CurrentDateTimeTool');
 
-    const agent1 = await request(app)
+    const agent1 = await authed
       .post('/api/agents')
       .send({
         name: 'Coordinator Agent',
@@ -218,7 +237,7 @@ describe.sequential('orchestrator local APIs', () => {
         mcp_bundle_ids: [Number(bundle.body.id)],
       })
       .expect(200);
-    const agent2 = await request(app)
+    const agent2 = await authed
       .post('/api/agents')
       .send({
         name: 'Specialist Agent',
@@ -230,7 +249,7 @@ describe.sequential('orchestrator local APIs', () => {
       })
       .expect(200);
 
-    const agentWithDefaults = await request(app)
+    const agentWithDefaults = await authed
       .post('/api/agents')
       .send({
         name: 'Defaults Agent',
@@ -241,12 +260,12 @@ describe.sequential('orchestrator local APIs', () => {
       .expect(200);
     expect(agentWithDefaults.body.id).toBeTruthy();
 
-    await request(app)
+    await authed
       .post('/api/agents')
       .send({ role: 'Invalid' })
       .expect(400);
 
-    const agents = await request(app).get('/api/agents').expect(200);
+    const agents = await authed.get('/api/agents').expect(200);
     const createdAgent = agents.body.find((x: any) => Number(x.id) === Number(agent1.body.id));
     expect(createdAgent).toBeTruthy();
     expect(Array.isArray(createdAgent.tools)).toBe(true);
@@ -254,7 +273,7 @@ describe.sequential('orchestrator local APIs', () => {
     expect(createdAgent.mcp_tool_ids.includes(Number(tool1.body.id))).toBe(true);
     expect(createdAgent.mcp_bundle_ids.includes(Number(bundle.body.id))).toBe(true);
 
-    const crew = await request(app)
+    const crew = await authed
       .post('/api/crews')
       .send({
         name: 'Hierarchy Crew',
@@ -266,18 +285,18 @@ describe.sequential('orchestrator local APIs', () => {
       .expect(200);
     expect(crew.body.id).toBeTruthy();
 
-    const crews = await request(app).get('/api/crews').expect(200);
+    const crews = await authed.get('/api/crews').expect(200);
     const createdCrew = crews.body.find((x: any) => Number(x.id) === Number(crew.body.id));
     expect(createdCrew).toBeTruthy();
     expect(createdCrew.process).toBe('hierarchical');
     expect(Number(createdCrew.coordinator_agent_id)).toBe(Number(agent1.body.id));
 
-    const tasksInitial = await request(app).get(`/api/tasks?crew_id=${crew.body.id}`).expect(200);
+    const tasksInitial = await authed.get(`/api/tasks?crew_id=${crew.body.id}`).expect(200);
     expect(Array.isArray(tasksInitial.body)).toBe(true);
     expect(tasksInitial.body.length).toBeGreaterThanOrEqual(2);
 
     const firstTask = tasksInitial.body[0];
-    await request(app)
+    await authed
       .put(`/api/tasks/${firstTask.id}`)
       .send({
         description: 'Updated description',
@@ -286,7 +305,7 @@ describe.sequential('orchestrator local APIs', () => {
       })
       .expect(200);
 
-    const manualTask = await request(app)
+    const manualTask = await authed
       .post('/api/tasks')
       .send({
         description: 'Manual task',
@@ -297,11 +316,11 @@ describe.sequential('orchestrator local APIs', () => {
       .expect(200);
     expect(manualTask.body.id).toBeTruthy();
 
-    await request(app)
+    await authed
       .delete(`/api/tasks/${manualTask.body.id}`)
       .expect(200);
 
-    await request(app)
+    await authed
       .put(`/api/crews/${crew.body.id}`)
       .send({
         name: 'Hierarchy Crew v2',
@@ -312,22 +331,22 @@ describe.sequential('orchestrator local APIs', () => {
       })
       .expect(200);
 
-    const taskControl = await request(app).get('/api/task-control').expect(200);
+    const taskControl = await authed.get('/api/task-control').expect(200);
     expect(Array.isArray(taskControl.body.runningAgentExecutions)).toBe(true);
     expect(Array.isArray(taskControl.body.runningCrewExecutions)).toBe(true);
     expect(Array.isArray(taskControl.body.pendingJobs)).toBe(true);
 
-    await request(app).post('/api/task-control/stop-running-agents').expect(200);
-    await request(app).post('/api/task-control/stop-running-crews').expect(200);
-    await request(app).post('/api/task-control/cancel-pending-jobs').expect(200);
+    await authed.post('/api/task-control/stop-running-agents').expect(200);
+    await authed.post('/api/task-control/stop-running-crews').expect(200);
+    await authed.post('/api/task-control/cancel-pending-jobs').expect(200);
 
-    await request(app).delete(`/api/agents/${agent1.body.id}`).expect(200);
-    await request(app).delete(`/api/agents/${agent2.body.id}`).expect(200);
-    await request(app).delete(`/api/agents/${agentWithDefaults.body.id}`).expect(200);
-    await request(app).delete(`/api/crews/${crew.body.id}`).expect(200);
+    await authed.delete(`/api/agents/${agent1.body.id}`).expect(200);
+    await authed.delete(`/api/agents/${agent2.body.id}`).expect(200);
+    await authed.delete(`/api/agents/${agentWithDefaults.body.id}`).expect(200);
+    await authed.delete(`/api/crews/${crew.body.id}`).expect(200);
 
-    await request(app).delete(`/api/tools/${tool1.body.id}`).expect(200);
-    await request(app).delete(`/api/tools/${tool2.body.id}`).expect(200);
-    await request(app).delete(`/api/mcp/bundles/${bundle.body.id}`).expect(200);
+    await authed.delete(`/api/tools/${tool1.body.id}`).expect(200);
+    await authed.delete(`/api/tools/${tool2.body.id}`).expect(200);
+    await authed.delete(`/api/mcp/bundles/${bundle.body.id}`).expect(200);
   });
 });

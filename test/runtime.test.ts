@@ -131,6 +131,21 @@ async function createCrew(name = 'Runtime Crew') {
   return crew.id;
 }
 
+async function createAuthedAgent() {
+  const email = `runtime_${Date.now()}_${Math.random().toString(16).slice(2)}@test.com`;
+  process.env.PLATFORM_ADMIN_EMAILS = email;
+  const authed = request.agent(app);
+  await authed
+    .post('/api/auth/signup')
+    .send({
+      org_name: 'Runtime Test Org',
+      email,
+      password: 'Password123!',
+    })
+    .expect(200);
+  return authed;
+}
+
 describe.sequential('runtime + streaming + control APIs', () => {
   beforeEach(async () => {
     await wipeLocalDb();
@@ -188,6 +203,7 @@ describe.sequential('runtime + streaming + control APIs', () => {
   });
 
   it('supports crew execution status APIs including stream/result, cancel, retry, and resume', async () => {
+    const authed = await createAuthedAgent();
     const crewId = await createCrew();
     const prisma = getPrisma();
     const completedExec = await prisma.orchestratorCrewExecution.create({
@@ -248,18 +264,25 @@ describe.sequential('runtime + streaming + control APIs', () => {
 
     await request(app).post(`/api/executions/${runningExecId}/cancel`).expect(409);
 
-    const retryRes = await request(app).post(`/api/executions/${completedExecId}/retry`).expect(200);
+    const retryRes = await authed
+      .post(`/api/executions/${completedExecId}/retry`)
+      .send({ wait: true })
+      .expect(200);
     expect(retryRes.body.executionId).toBeTruthy();
     const retriedRow = await prisma.orchestratorCrewExecution.findUnique({ where: { id: Number(retryRes.body.executionId) } });
     expect(retriedRow?.retryOf).toBe(completedExecId);
 
-    const resumeRes = await request(app).post(`/api/executions/${completedExecId}/resume`).expect(200);
+    const resumeRes = await authed
+      .post(`/api/executions/${completedExecId}/resume`)
+      .send({ wait: true })
+      .expect(200);
     expect(resumeRes.body.executionId).toBeTruthy();
     const resumedRow = await prisma.orchestratorCrewExecution.findUnique({ where: { id: Number(resumeRes.body.executionId) } });
     expect(resumedRow?.retryOf).toBe(completedExecId);
   });
 
   it('supports agent sessions API and stop-all cancellation semantics', async () => {
+    const authed = await createAuthedAgent();
     const agentId = await createAgent('Session Agent');
     const prisma = await ensurePrismaReady();
     const runningExec = await prisma.orchestratorAgentExecution.create({
@@ -310,17 +333,17 @@ describe.sequential('runtime + streaming + control APIs', () => {
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(runningExecId, agentId, 'running', 'pending task', 'in', null);
 
-    const sessions = await request(app).get(`/api/agents/${agentId}/sessions`).expect(200);
+    const sessions = await authed.get(`/api/agents/${agentId}/sessions`).expect(200);
     expect(sessions.body.length).toBe(1);
     expect(sessions.body[0].message_count).toBe(2);
     expect(String(sessions.body[0].preview)).toContain('acknowledged');
 
-    const messages = await request(app).get(`/api/agents/${agentId}/sessions/sess_1/messages`).expect(200);
+    const messages = await authed.get(`/api/agents/${agentId}/sessions/sess_1/messages`).expect(200);
     expect(Array.isArray(messages.body.messages)).toBe(true);
     expect(messages.body.messages.length).toBe(2);
-    await request(app).get(`/api/agents/${agentId}/sessions/unknown/messages`).expect(404);
+    await authed.get(`/api/agents/${agentId}/sessions/unknown/messages`).expect(404);
 
-    const stopAll = await request(app).post(`/api/agents/${agentId}/stop-all`).expect(200);
+    const stopAll = await authed.post(`/api/agents/${agentId}/stop-all`).expect(200);
     expect(stopAll.body.canceled_running_executions).toBeGreaterThanOrEqual(1);
     expect(stopAll.body.canceled_pending_jobs).toBeGreaterThanOrEqual(1);
 
@@ -392,6 +415,7 @@ describe.sequential('runtime + streaming + control APIs', () => {
   });
 
   it('supports workflow CRUD, execution, and run history for graph-based automation', async () => {
+    const authed = await createAuthedAgent();
     const prisma = getPrisma();
     const org = await prisma.org.create({ data: { name: 'Test Org' } });
     const project = await prisma.project.create({
@@ -438,7 +462,7 @@ describe.sequential('runtime + streaming + control APIs', () => {
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(toolId, 'workflow_echo_tool', 'Echoes workflow inputs', 'Automation', 'custom', '{}');
 
-    const create = await request(app)
+    const create = await authed
       .post('/api/workflows')
       .send({
         name: 'Workflow Alpha',
@@ -464,7 +488,7 @@ describe.sequential('runtime + streaming + control APIs', () => {
     const workflowId = Number(create.body.id);
     expect(workflowId).toBeGreaterThan(0);
 
-    await request(app)
+    await authed
       .put(`/api/workflows/${workflowId}`)
       .send({
         name: 'Workflow Alpha v2',
@@ -486,7 +510,7 @@ describe.sequential('runtime + streaming + control APIs', () => {
       })
       .expect(200);
 
-    const execute = await request(app)
+    const execute = await authed
       .post(`/api/workflows/${workflowId}/execute?wait=true`)
       .send({ input: { message: 'hello workflow' }, wait: true })
       .expect(200);
@@ -495,21 +519,22 @@ describe.sequential('runtime + streaming + control APIs', () => {
     expect(execute.body.status).toBe('completed');
     expect(String(JSON.stringify(execute.body.output))).toContain('workflow_echo_tool');
 
-    const workflow = await request(app).get(`/api/workflows/${workflowId}`).expect(200);
+    const workflow = await authed.get(`/api/workflows/${workflowId}`).expect(200);
     expect(Array.isArray(workflow.body.runs)).toBe(true);
     expect(workflow.body.runs.length).toBeGreaterThanOrEqual(1);
 
-    const versions = await request(app).get(`/api/workflows/${workflowId}/versions`).expect(200);
+    const versions = await authed.get(`/api/workflows/${workflowId}/versions`).expect(200);
     expect(Array.isArray(versions.body.versions)).toBe(true);
     expect(versions.body.versions.length).toBeGreaterThanOrEqual(2);
 
     const runId = Number(execute.body.run_id);
-    const runDetail = await request(app).get(`/api/workflow-runs/${runId}`).expect(200);
+    const runDetail = await authed.get(`/api/workflow-runs/${runId}`).expect(200);
     expect(Array.isArray(runDetail.body.logs)).toBe(true);
     expect(runDetail.body.logs.some((log: any) => log.type === 'node_complete')).toBe(true);
   });
 
   it('streams workflow run snapshots for live workflow observability', async () => {
+    const authed = await createAuthedAgent();
     const prisma = getPrisma();
     const workflow = await prisma.orchestratorWorkflow.create({
       data: {
@@ -557,7 +582,7 @@ describe.sequential('runtime + streaming + control APIs', () => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
     `).run(runId, workflowId, 'completed', 'manual', run.input, run.output, run.logs, run.graphSnapshot);
 
-    const stream = await request(app).get(`/api/workflow-runs/${runId}/stream`).expect(200);
+    const stream = await authed.get(`/api/workflow-runs/${runId}/stream`).expect(200);
     expect(stream.headers['content-type']).toContain('text/event-stream');
     expect(stream.text).toContain('event: update');
     expect(stream.text).toContain('event: done');
@@ -566,7 +591,8 @@ describe.sequential('runtime + streaming + control APIs', () => {
   });
 
   it('supports webhook-triggered workflow runs with loop nodes', async () => {
-    const workflow = await request(app)
+    const authed = await createAuthedAgent();
+    const workflow = await authed
       .post('/api/workflows')
       .send({
         name: 'Webhook Loop Workflow',
@@ -598,7 +624,7 @@ describe.sequential('runtime + streaming + control APIs', () => {
       .expect(200);
 
     const workflowId = Number(workflow.body.id);
-    const invoke = await request(app)
+    const invoke = await authed
       .post(`/api/workflows/${workflowId}/webhook?wait=true`)
       .send({ message: 'hello', items: ['ads', 'audiences'] })
       .expect(200);
@@ -608,26 +634,27 @@ describe.sequential('runtime + streaming + control APIs', () => {
     expect(String(JSON.stringify(invoke.body.output))).toContain('Handled audiences');
 
     const runId = Number(invoke.body.run_id);
-    const runDetail = await request(app).get(`/api/workflow-runs/${runId}`).expect(200);
+    const runDetail = await authed.get(`/api/workflow-runs/${runId}`).expect(200);
     expect(runDetail.body.trigger_type).toBe('webhook');
     expect(runDetail.body.logs.some((log: any) => log.payload?.type === 'loop' || log.payload?.node_id === 'loop_1')).toBe(true);
   });
 
   it('enforces MCP auth token and validates task-control job cancellation edge cases', async () => {
+    const authed = await createAuthedAgent();
     const prisma = getPrisma();
-    await request(app).put('/api/mcp/config').send({ auth_token: 'demo-token' }).expect(200);
-    const cfg = await request(app).get('/api/mcp/config').expect(200);
+    await authed.put('/api/mcp/config').send({ auth_token: 'demo-token' }).expect(200);
+    const cfg = await authed.get('/api/mcp/config').expect(200);
     expect(cfg.body.auth_token).toBe('demo-token');
 
     await request(app).post('/mcp').send({}).expect(401);
 
-    const authed = await request(app)
+    const mcpAuthed = await request(app)
       .post('/mcp')
       .set('X-API-Key', 'demo-token')
       .send({});
-    expect(authed.status).not.toBe(401);
+    expect(mcpAuthed.status).not.toBe(401);
 
-    await request(app).post('/api/task-control/jobs/not-a-number/cancel').expect(400);
+    await authed.post('/api/task-control/jobs/not-a-number/cancel').expect(400);
 
     const pending = await prisma.orchestratorJobQueue.create({
       data: {
@@ -642,7 +669,7 @@ describe.sequential('runtime + streaming + control APIs', () => {
       VALUES (?, ?, ?, ?)
     `).run(pending.id, 'run_agent', '{}', 'pending');
 
-    await request(app).post(`/api/task-control/jobs/${pending.id}/cancel`).expect(200);
+    await authed.post(`/api/task-control/jobs/${pending.id}/cancel`).expect(200);
 
     const running = await prisma.orchestratorJobQueue.create({
       data: {
@@ -657,6 +684,6 @@ describe.sequential('runtime + streaming + control APIs', () => {
       VALUES (?, ?, ?, ?)
     `).run(running.id, 'run_agent', '{}', 'running');
 
-    await request(app).post(`/api/task-control/jobs/${running.id}/cancel`).expect(409);
+    await authed.post(`/api/task-control/jobs/${running.id}/cancel`).expect(409);
   });
 });
