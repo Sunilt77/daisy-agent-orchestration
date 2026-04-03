@@ -8763,6 +8763,22 @@ async function getProviderConfig(providerIdentifier: string): Promise<{ apiKey?:
       };
   }
 
+  // 2b. Fallback: if no explicit default exists, use any provider for that type.
+  // This keeps runtime execution working when teams add a provider but forget to
+  // mark one as default.
+  const anyProviderForType = db
+    .prepare('SELECT * FROM llm_providers WHERE provider = ? ORDER BY id ASC LIMIT 1')
+    .get(providerIdentifier) as any;
+  if (anyProviderForType) {
+      return {
+          apiKey: anyProviderForType.api_key,
+          apiBase: anyProviderForType.api_base,
+          providerType: anyProviderForType.provider,
+          source: 'provider_fallback',
+          sourceName: anyProviderForType.name
+      };
+  }
+
   // 3. Fallback to legacy credentials table
   const cred = db.prepare('SELECT api_key FROM credentials WHERE provider = ?').get(providerIdentifier) as any;
   if (cred) return { 
