@@ -231,6 +231,18 @@ function slugify(input: string) {
     .replace(/^_+|_+$/g, '');
 }
 
+function parsePackageList(input: string): string[] {
+  const validPackage = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i;
+  return Array.from(
+    new Set(
+      String(input || '')
+        .split(/[\n,]/g)
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0 && validPackage.test(item))
+    )
+  );
+}
+
 function isBuiltInTool(tool?: Pick<Tool, 'type' | 'name'> | null) {
   if (!tool) return false;
   return tool.type === 'internal';
@@ -422,6 +434,13 @@ export default function ToolsPage() {
   
   // Dynamic config states
   const [pythonCode, setPythonCode] = useState('result = "Hello World"');
+  const [javascriptPackages, setJavascriptPackages] = useState('');
+  const [jsPackagesInstalling, setJsPackagesInstalling] = useState(false);
+  const [jsPackagesNotice, setJsPackagesNotice] = useState<string | null>(null);
+  const [jsTestArgs, setJsTestArgs] = useState('{}');
+  const [jsTestResult, setJsTestResult] = useState<string | null>(null);
+  const [jsTestError, setJsTestError] = useState<string | null>(null);
+  const [jsTestLoading, setJsTestLoading] = useState(false);
   const [httpConfig, setHttpConfig] = useState({ method: 'GET', url: '', body: '' });
   const [httpHeaders, setHttpHeaders] = useState<HttpHeader[]>([{ key: '', value: '', isVariable: false }]);
   const [httpFormData, setHttpFormData] = useState<HttpHeader[]>([{ key: '', value: '', isVariable: false }]);
@@ -523,6 +542,8 @@ export default function ToolsPage() {
       }
       if (persisted.formData) setFormData((prev) => ({ ...prev, ...persisted.formData }));
       if (typeof persisted.pythonCode === 'string') setPythonCode(persisted.pythonCode);
+      if (typeof persisted.javascriptPackages === 'string') setJavascriptPackages(persisted.javascriptPackages);
+      if (typeof persisted.jsTestArgs === 'string') setJsTestArgs(persisted.jsTestArgs);
       if (persisted.httpConfig) setHttpConfig((prev) => ({ ...prev, ...persisted.httpConfig }));
       if (Array.isArray(persisted.httpHeaders)) setHttpHeaders(persisted.httpHeaders);
       if (Array.isArray(persisted.httpFormData)) setHttpFormData(persisted.httpFormData);
@@ -549,6 +570,8 @@ export default function ToolsPage() {
       quickFilter,
       formData,
       pythonCode,
+      javascriptPackages,
+      jsTestArgs,
       httpConfig,
       httpHeaders,
       httpFormData,
@@ -560,7 +583,7 @@ export default function ToolsPage() {
       httpTestArgs,
       curlImportText,
     });
-  }, [stateReady, selectedToolId, toolsPage, toolsPageSize, toolSearch, categoryFilter, typeFilter, quickFilter, formData, pythonCode, httpConfig, httpHeaders, httpFormData, httpBodyMode, httpRequiredArgs, httpArgTypes, httpAuth, mcpConfig, httpTestArgs, curlImportText]);
+  }, [stateReady, selectedToolId, toolsPage, toolsPageSize, toolSearch, categoryFilter, typeFilter, quickFilter, formData, pythonCode, javascriptPackages, jsTestArgs, httpConfig, httpHeaders, httpFormData, httpBodyMode, httpRequiredArgs, httpArgTypes, httpAuth, mcpConfig, httpTestArgs, curlImportText]);
 
   useEffect(() => {
     fetchTools();
@@ -975,6 +998,10 @@ export default function ToolsPage() {
           const cfg = JSON.parse(tool.config);
           if (tool.type === 'python' || tool.type === 'javascript') {
               setPythonCode(cfg.code || '');
+              setJavascriptPackages(Array.isArray(cfg.packages) ? cfg.packages.join(', ') : '');
+              setJsPackagesNotice(null);
+              setJsTestResult(null);
+              setJsTestError(null);
           } else if (tool.type === 'http') {
               setHttpConfig({ method: cfg.method || 'GET', url: cfg.url || '', body: cfg.body || '' });
               const formObj = cfg.formData || {};
@@ -1049,6 +1076,11 @@ export default function ToolsPage() {
       setSelectedToolId('new');
       setFormData({ name: '', description: '', category: 'General', type: 'custom', config: '{}' });
       setPythonCode('result = "Hello World"');
+      setJavascriptPackages('');
+      setJsPackagesNotice(null);
+      setJsTestArgs('{}');
+      setJsTestResult(null);
+      setJsTestError(null);
       setHttpConfig({ method: 'GET', url: '', body: '' });
       setHttpHeaders([{ key: '', value: '', isVariable: false }]);
       setHttpFormData([{ key: '', value: '', isVariable: false }]);
@@ -1157,7 +1189,10 @@ export default function ToolsPage() {
     
     try {
         if (formData.type === 'javascript') {
-            finalConfig = { code: pythonCode };
+            finalConfig = {
+              code: pythonCode,
+              packages: parsePackageList(javascriptPackages),
+            };
         } else if (formData.type === 'http') {
             const headersObj: Record<string, string> = {};
             httpHeaders.forEach(h => {
@@ -2009,7 +2044,109 @@ export default function ToolsPage() {
                                                   spellCheck={false}
                                               />
                                           </div>
-                                          <p className="text-xs text-slate-500 mt-2">Set a value in <code className="bg-white px-1 rounded">result</code> (for example: <code className="bg-white px-1 rounded">result = new Date().toISOString()</code>). Tool inputs are available in <code className="bg-white px-1 rounded">args</code>.</p>
+                                          <p className="text-xs text-slate-500 mt-2">Set a value in <code className="bg-white px-1 rounded">result</code> (for example: <code className="bg-white px-1 rounded">result = new Date().toISOString()</code>). Tool inputs are available in <code className="bg-white px-1 rounded">args</code>. You can use <code className="bg-white px-1 rounded">require('package-name')</code> for installed npm packages.</p>
+
+                                          <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+                                              <label className="block text-sm font-medium text-slate-700">npm Packages (optional)</label>
+                                              <input
+                                                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-sm"
+                                                  value={javascriptPackages}
+                                                  onChange={e => setJavascriptPackages(e.target.value)}
+                                                  placeholder="dayjs, lodash, @google-cloud/storage"
+                                              />
+                                              <div className="flex items-center gap-3">
+                                                  <button
+                                                      type="button"
+                                                      className="px-3 py-1.5 text-xs rounded-md bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
+                                                      disabled={jsPackagesInstalling}
+                                                      onClick={async () => {
+                                                          setJsPackagesNotice(null);
+                                                          const packages = parsePackageList(javascriptPackages);
+                                                          if (!packages.length) {
+                                                            setJsPackagesNotice('Enter at least one valid package name.');
+                                                            return;
+                                                          }
+                                                          setJsPackagesInstalling(true);
+                                                          try {
+                                                            const res = await fetch('/api/tools/javascript-packages/install', {
+                                                              method: 'POST',
+                                                              headers: { 'Content-Type': 'application/json' },
+                                                              body: JSON.stringify({ packages }),
+                                                            });
+                                                            const data = await safeJson(res) as any;
+                                                            if (!res.ok) throw new Error(data?.error || 'Failed to install packages');
+                                                            setJsPackagesNotice(`Installed: ${(data?.installed || packages).join(', ')}`);
+                                                          } catch (e: any) {
+                                                            setJsPackagesNotice(e?.message || 'Failed to install packages');
+                                                          } finally {
+                                                            setJsPackagesInstalling(false);
+                                                          }
+                                                      }}
+                                                  >
+                                                      {jsPackagesInstalling ? 'Installing...' : 'Install Packages'}
+                                                  </button>
+                                                  {jsPackagesNotice && (
+                                                      <span className={`text-xs ${jsPackagesNotice.startsWith('Installed:') ? 'text-emerald-700' : 'text-red-600'}`}>
+                                                          {jsPackagesNotice}
+                                                      </span>
+                                                  )}
+                                              </div>
+                                          </div>
+
+                                          <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+                                              <label className="block text-sm font-medium text-slate-700 mb-1">Test Invoke (Args JSON)</label>
+                                              <textarea
+                                                  className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none h-28 font-mono text-sm"
+                                                  value={jsTestArgs}
+                                                  onChange={e => setJsTestArgs(e.target.value)}
+                                                  placeholder='{"input":"hello"}'
+                                              />
+                                              <div className="flex items-center justify-between mt-2">
+                                                  <button
+                                                      type="button"
+                                                      className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60"
+                                                      disabled={jsTestLoading || typeof selectedToolId !== 'number'}
+                                                      onClick={async () => {
+                                                          setJsTestError(null);
+                                                          setJsTestResult(null);
+                                                          let args: any = {};
+                                                          try {
+                                                            args = jsTestArgs.trim() ? JSON.parse(jsTestArgs) : {};
+                                                          } catch {
+                                                            setJsTestError('Invalid JSON in args.');
+                                                            return;
+                                                          }
+                                                          if (typeof selectedToolId !== 'number') {
+                                                            setJsTestError('Save the tool first, then run test invoke.');
+                                                            return;
+                                                          }
+                                                          setJsTestLoading(true);
+                                                          try {
+                                                            const res = await fetch(`/api/tools/${selectedToolId}/test-run`, {
+                                                              method: 'POST',
+                                                              headers: { 'Content-Type': 'application/json' },
+                                                              body: JSON.stringify({ args }),
+                                                            });
+                                                            const data = await safeJson(res) as any;
+                                                            if (!res.ok) throw new Error(data?.error || 'Test invoke failed');
+                                                            setJsTestResult(String(data?.result || ''));
+                                                          } catch (e: any) {
+                                                            setJsTestError(e?.message || 'Test invoke failed');
+                                                          } finally {
+                                                            setJsTestLoading(false);
+                                                          }
+                                                      }}
+                                                  >
+                                                      {jsTestLoading ? 'Running...' : 'Run Test Invoke'}
+                                                  </button>
+                                                  {jsTestError && <span className="text-xs text-red-600">{jsTestError}</span>}
+                                              </div>
+                                              {jsTestResult && (
+                                                  <pre className="mt-3 text-xs bg-slate-900 text-slate-100 p-3 rounded-lg overflow-x-auto whitespace-pre-wrap">
+                                                      {jsTestResult}
+                                                  </pre>
+                                              )}
+                                          </div>
                                       </div>
                                   )}
 

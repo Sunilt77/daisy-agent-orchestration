@@ -84,6 +84,7 @@ import { registerMcpAdminRoutes } from './src/server/registerMcpAdminRoutes';
 import { registerRuntimeControlRoutes } from './src/server/registerRuntimeControlRoutes';
 import { getNextCronOccurrenceUtc, parseCronExpression } from './src/server/cron';
 import { WebSocketServer, WebSocket } from 'ws';
+import { createRequire } from 'node:module';
 import { requireUser } from './src/platform/auth';
 import {
   assignResourceOwner,
@@ -109,6 +110,8 @@ import {
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
+const runtimeRequire = createRequire(import.meta.url);
+const jsPackageInstallInFlight = new Map<string, Promise<void>>();
 
 // Test suites import `app` without calling `startServer()`, so the local mirror
 // schema must be ready at module load time as well.
@@ -4393,6 +4396,19 @@ app.post('/api/tools/http-test', requireUser, async (req, res) => {
     res.json({ result });
   } catch (e: any) {
     res.status(500).json({ error: e.message || 'HTTP test failed.' });
+  }
+});
+
+app.post('/api/tools/javascript-packages/install', requireUser, async (req, res) => {
+  try {
+    const packages = normalizeJavascriptPackages(req.body?.packages);
+    if (!packages.length) {
+      return res.status(400).json({ error: 'Provide at least one valid package name.' });
+    }
+    await ensureJavascriptPackagesInstalled(packages);
+    return res.json({ success: true, installed: packages });
+  } catch (e: any) {
+    return res.status(400).json({ error: e?.message || 'Failed to install JavaScript packages' });
   }
 });
 
@@ -8684,14 +8700,90 @@ async function runPythonTool(code: string, args: any): Promise<string> {
   });
 }
 
-async function runJavascriptTool(code: string, args: any): Promise<string> {
+function normalizeJavascriptPackages(input: any): string[] {
+  const values: string[] = [];
+  if (Array.isArray(input)) {
+    for (const item of input) values.push(String(item || '').trim());
+  } else if (typeof input === 'string') {
+    for (const part of input.split(',')) values.push(part.trim());
+  }
+  const validPackage = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i;
+  const deduped = Array.from(new Set(values.filter(Boolean)));
+  return deduped.filter((name) => validPackage.test(name));
+}
+
+async function installJavascriptPackages(packages: string[]): Promise<void> {
+  if (!packages.length) return;
+  await new Promise<void>((resolve, reject) => {
+    let output = '';
+    let finished = false;
+    const proc = spawn('npm', ['install', '--no-save', '--omit=dev', ...packages], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        NPM_CONFIG_AUDIT: 'false',
+        NPM_CONFIG_FUND: 'false',
+      },
+    });
+    const timeout = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      try { proc.kill('SIGKILL'); } catch {}
+      reject(new Error('npm install timed out after 120s'));
+    }, 120000);
+    proc.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    proc.stderr.on('data', (chunk) => { output += chunk.toString(); });
+    proc.on('error', (err) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      reject(new Error(`Failed to run npm install: ${String((err as any)?.message || err)}`));
+    });
+    proc.on('close', (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(output.trim() || `npm install exited with code ${code}`));
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+async function ensureJavascriptPackagesInstalled(packages: string[]): Promise<void> {
+  const normalized = normalizeJavascriptPackages(packages);
+  if (!normalized.length) return;
+  const missing = normalized.filter((pkg) => {
+    try {
+      runtimeRequire.resolve(pkg);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  if (!missing.length) return;
+  const lockKey = missing.slice().sort().join('|');
+  let inFlight = jsPackageInstallInFlight.get(lockKey);
+  if (!inFlight) {
+    inFlight = installJavascriptPackages(missing).finally(() => {
+      jsPackageInstallInFlight.delete(lockKey);
+    });
+    jsPackageInstallInFlight.set(lockKey, inFlight);
+  }
+  await inFlight;
+}
+
+async function runJavascriptTool(code: string, args: any, packages: string[] = []): Promise<string> {
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as any;
   const source = `'use strict';\nlet result;\n${String(code || '')}\nreturn result;`;
   try {
-    const fn = new AsyncFunction('args', 'fetch', source);
+    await ensureJavascriptPackagesInstalled(packages);
+    const fn = new AsyncFunction('args', 'fetch', 'require', 'console', source);
     const timeoutMs = 15000;
     const output = await Promise.race([
-      fn(args ?? {}, fetch),
+      fn(args ?? {}, fetch, runtimeRequire, console),
       sleep(timeoutMs).then(() => {
         throw new Error(`JavaScript tool timed out after ${timeoutMs}ms`);
       }),
@@ -9058,7 +9150,8 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
   if (tool.type === 'javascript') {
     const code = String(config?.code || '');
     if (!code.trim()) return '[JavaScript Error] No code provided in tool config.';
-    return runJavascriptTool(code, args);
+    const packages = normalizeJavascriptPackages(config?.packages);
+    return runJavascriptTool(code, args, packages);
   }
 
   if (tool.type === 'http') {
