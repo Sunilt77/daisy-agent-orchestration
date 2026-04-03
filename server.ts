@@ -4552,7 +4552,7 @@ app.put('/api/resource-access/:resourceType/:resourceId', requireUser, async (re
 });
 
 app.post('/api/tools/autobuild', requireUser, async (req, res) => {
-  const { goal, agent_ids, provider = 'google', model = 'gemini-1.5-flash' } = req.body || {};
+  const { goal, agent_ids, provider = 'google', model = 'gemini-1.5-flash', stream = false } = req.body || {};
   const normalizedGoal = String(goal || '').trim();
   if (!normalizedGoal) {
     return res.status(400).json({ error: 'Goal is required.' });
@@ -4561,20 +4561,42 @@ app.post('/api/tools/autobuild', requireUser, async (req, res) => {
     return res.status(400).json({ error: 'Goal is too long (max 4000 characters).' });
   }
 
-  try {
-    const scope = await resolveOrchestratorAccessScope(req);
-    const config = await getProviderConfig(provider);
-    const apiKey = config.apiKey;
-    if (!apiKey) {
-      return res.status(500).json({ error: `API Key not configured for provider: ${provider}` });
+  if (stream) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+  }
+  const sendEvent = (type: string, data: any) => {
+    if (!stream) return;
+    try {
+      res.write(`data: ${JSON.stringify({ type, timestamp: new Date().toISOString(), ...data })}\n\n`);
+    } catch (error) {
+      console.error('Tool auto-build stream write failed:', error);
     }
+  };
 
-    const scopedAgentIds = getScopedAgentIds(scope);
-    const scopedToolIds = getScopedToolIds(scope);
+  try {
+    sendEvent('status', { message: 'Validating scope and available resources...', step: 1 });
+    const scope = await resolveOrchestratorAccessScope(req);
     const requestedAgentIds = Array.isArray(agent_ids)
       ? agent_ids.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id) && id > 0)
       : [];
     for (const id of requestedAgentIds) requireVisibleAgentId(scope, id);
+
+    const config = await getProviderConfig(provider);
+    const apiKey = config.apiKey;
+    if (!apiKey) {
+      const message = `API Key not configured for provider: ${provider}`;
+      if (stream) {
+        sendEvent('error', { message });
+        return res.end();
+      }
+      return res.status(500).json({ error: message });
+    }
+
+    const scopedAgentIds = getScopedAgentIds(scope);
+    const scopedToolIds = getScopedToolIds(scope);
 
     const prisma = getPrisma();
     const [availableAgentsRaw, availableToolsRaw] = await Promise.all([
@@ -4591,7 +4613,12 @@ app.post('/api/tools/autobuild', requireUser, async (req, res) => {
     ]);
 
     if (requestedAgentIds.length && !availableAgentsRaw.length) {
-      return res.status(400).json({ error: 'No visible agents matched the selected assignment list.' });
+      const message = 'No visible agents matched the selected assignment list.';
+      if (stream) {
+        sendEvent('error', { message });
+        return res.end();
+      }
+      return res.status(400).json({ error: message });
     }
 
     const availableAgents = availableAgentsRaw.map((agent) => ({
@@ -4611,6 +4638,7 @@ app.post('/api/tools/autobuild', requireUser, async (req, res) => {
       type: tool.type,
     }));
 
+    sendEvent('status', { message: 'Designing tools with AI architect...', step: 2 });
     const prompt = `
     You are an expert Tool Builder for AI agents.
     Your goal is to design the right tools so the agents can accomplish the user's objective.
@@ -4689,6 +4717,14 @@ app.post('/api/tools/autobuild', requireUser, async (req, res) => {
       throw new Error("Invalid design: 'tools' array is missing");
     }
 
+    const MAX_AUTOBUILD_TOOLS = 12;
+    const requestedTools = design.tools as any[];
+    const toolDefinitions = requestedTools.slice(0, MAX_AUTOBUILD_TOOLS);
+    sendEvent('status', { message: `Applying tool plan (${toolDefinitions.length}/${requestedTools.length})...`, step: 3 });
+    if (requestedTools.length > MAX_AUTOBUILD_TOOLS) {
+      sendEvent('status', { message: `Tool plan capped at ${MAX_AUTOBUILD_TOOLS} items for safety.` });
+    }
+
     const supportedTypes = new Set(['python', 'http', 'mcp', 'search', 'calculator', 'custom']);
     const availableAgentIdSet = new Set((availableAgents as any[]).map((a: any) => Number(a.id)));
     const normalizeToolType = (toolDef: any) => {
@@ -4724,7 +4760,7 @@ app.post('/api/tools/autobuild', requireUser, async (req, res) => {
     const createdToolIds: number[] = [];
     const existingToolById = new Set((availableToolsRaw as any[]).map((t: any) => Number(t.id)));
 
-    for (const toolDef of design.tools) {
+    for (const toolDef of toolDefinitions) {
       const normalizedType = normalizeToolType(toolDef);
       const normalizedConfig = normalizeToolConfig(toolDef, normalizedType);
       const normalizedName = String(toolDef?.name || '').trim() || `Auto ${normalizedType} tool`;
@@ -4784,11 +4820,27 @@ app.post('/api/tools/autobuild', requireUser, async (req, res) => {
     }
 
     await refreshPersistentMirror();
-    const newToolIds = createdToolIds;
-    res.json({ tool_ids: newToolIds, design });
+    const result = {
+      tool_ids: createdToolIds,
+      design,
+      processed_tools: toolDefinitions.length,
+      capped_tools: requestedTools.length > MAX_AUTOBUILD_TOOLS ? requestedTools.length - MAX_AUTOBUILD_TOOLS : 0,
+    };
+    if (stream) {
+      sendEvent('done', result);
+      return res.end();
+    }
+    res.json(result);
   } catch (e: any) {
     console.error("Tool auto-build failed:", e);
-    res.status(500).json({ error: "Failed to auto-build tools: " + e.message });
+    const statusCode = Number(e?.status || e?.statusCode || 500);
+    const safeStatus = Number.isFinite(statusCode) && statusCode >= 400 && statusCode < 600 ? statusCode : 500;
+    const message = String(e?.message || 'Failed to auto-build tools');
+    if (stream) {
+      sendEvent('error', { message: safeStatus >= 500 ? `Failed to auto-build tools: ${message}` : message });
+      return res.end();
+    }
+    res.status(safeStatus).json({ error: safeStatus >= 500 ? `Failed to auto-build tools: ${message}` : message });
   }
 });
 

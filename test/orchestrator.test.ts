@@ -64,9 +64,16 @@ async function wipeAllDbs() {
   tx();
 }
 
-async function createAuthedAgent() {
+async function createAuthedAgent(options: { isAdmin?: boolean } = {}) {
+  const { isAdmin = true } = options;
   const email = `orchestrator_${Date.now()}_${Math.random().toString(16).slice(2)}@test.com`;
-  process.env.PLATFORM_ADMIN_EMAILS = email;
+  if (isAdmin) {
+    const existing = String(process.env.PLATFORM_ADMIN_EMAILS || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+    process.env.PLATFORM_ADMIN_EMAILS = Array.from(new Set([...existing, email])).join(',');
+  }
   const authed = request.agent(app);
   await authed
     .post('/api/auth/signup')
@@ -81,11 +88,17 @@ async function createAuthedAgent() {
 
 describe.sequential('orchestrator local APIs', () => {
   beforeEach(async () => {
+    process.env.PLATFORM_ADMIN_EMAILS = '';
     await wipeAllDbs();
   });
 
   it('supports providers, credentials, pricing, and projects CRUD', async () => {
     const authed = await createAuthedAgent();
+
+    await request(app)
+      .post('/api/tools/autobuild')
+      .send({ goal: 'build one helper tool' })
+      .expect(401);
 
     await authed
       .post('/api/credentials')
@@ -248,6 +261,15 @@ describe.sequential('orchestrator local APIs', () => {
         model: 'gemini-1.5-flash',
       })
       .expect(200);
+
+    const nonAdmin = await createAuthedAgent({ isAdmin: false });
+    await nonAdmin
+      .post('/api/tools/autobuild')
+      .send({
+        goal: 'create tools for another tenant',
+        agent_ids: [Number(agent1.body.id)],
+      })
+      .expect(403);
 
     const agentWithDefaults = await authed
       .post('/api/agents')

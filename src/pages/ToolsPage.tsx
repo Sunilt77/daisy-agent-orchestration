@@ -119,6 +119,16 @@ interface McpInputSchema {
   additionalProperties?: boolean;
 }
 
+interface ToolAutoBuildEvent {
+  type: 'status' | 'error' | 'done';
+  message?: string;
+  timestamp?: string;
+  received_at?: string;
+  tool_ids?: number[];
+  processed_tools?: number;
+  capped_tools?: number;
+}
+
 interface ResourceAccessPayload {
   owner?: {
     owner_user_id?: string;
@@ -408,6 +418,7 @@ export default function ToolsPage() {
   const [autoBuildAgentIds, setAutoBuildAgentIds] = useState<number[]>([]);
   const [isBuilding, setIsBuilding] = useState(false);
   const [buildError, setBuildError] = useState('');
+  const [buildEvents, setBuildEvents] = useState<ToolAutoBuildEvent[]>([]);
   
   // Dynamic config states
   const [pythonCode, setPythonCode] = useState('print("Hello World")');
@@ -817,6 +828,7 @@ export default function ToolsPage() {
     }
     setIsBuilding(true);
     setBuildError('');
+    setBuildEvents([]);
     try {
       const res = await fetch('/api/tools/autobuild', {
         method: 'POST',
@@ -825,21 +837,64 @@ export default function ToolsPage() {
           goal: normalizedGoal,
           provider: autoBuildProvider,
           model: autoBuildModel,
-          agent_ids: autoBuildAgentIds
+          agent_ids: autoBuildAgentIds,
+          stream: true,
         })
       });
-      const text = await res.text();
-      let data: any = {};
-      try {
-        data = text ? JSON.parse(text) : {};
-      } catch {
-        data = {};
+      if (!res.ok) {
+        const text = await res.text();
+        let data: any = {};
+        try {
+          data = text ? JSON.parse(text) : {};
+        } catch {
+          data = {};
+        }
+        throw new Error(data.error || text || 'Failed to auto-build tools');
       }
-      if (!res.ok) throw new Error(data.error || text || 'Failed to auto-build tools');
-      setShowAutoBuild(false);
-      setAutoBuildGoal('');
-      setAutoBuildAgentIds([]);
-      fetchTools();
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('Streaming is not available in this browser');
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+            setBuildEvents((prev) => [...prev, { ...event, received_at: new Date().toISOString() }]);
+            if (event.type === 'error') {
+              throw new Error(event.message || 'Failed to auto-build tools');
+            }
+            if (event.type === 'done') {
+              setShowAutoBuild(false);
+              setAutoBuildGoal('');
+              setAutoBuildAgentIds([]);
+              fetchTools();
+            }
+          } catch (e: any) {
+            if (e instanceof Error) throw e;
+          }
+        }
+      }
+      const finalLine = buffer.trim();
+      if (finalLine.startsWith('data: ')) {
+        const event = JSON.parse(finalLine.slice(6));
+        setBuildEvents((prev) => [...prev, { ...event, received_at: new Date().toISOString() }]);
+        if (event.type === 'error') {
+          throw new Error(event.message || 'Failed to auto-build tools');
+        }
+        if (event.type === 'done') {
+          setShowAutoBuild(false);
+          setAutoBuildGoal('');
+          setAutoBuildAgentIds([]);
+          fetchTools();
+        }
+      }
     } catch (e: any) {
       setBuildError(e.message || 'Failed to auto-build tools');
     } finally {
@@ -3014,6 +3069,17 @@ export default function ToolsPage() {
                 </div>
                 <p className="text-xs text-slate-500 mt-2">If none selected, tools are created unassigned.</p>
               </div>
+
+              {buildEvents.length > 0 && (
+                <div className="rounded-xl border border-slate-200 bg-slate-900 p-3 font-mono text-xs max-h-48 overflow-y-auto space-y-2">
+                  {buildEvents.map((event, index) => (
+                    <div key={`${event.type}-${index}`} className={event.type === 'error' ? 'text-red-300' : event.type === 'done' ? 'text-emerald-300' : 'text-slate-200'}>
+                      <span className="text-slate-500 mr-2">[{new Date(event.timestamp || event.received_at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}]</span>
+                      <span>{event.message || (event.type === 'done' ? 'Build completed.' : event.type)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {buildError && (
                 <div className="text-sm text-red-600">{buildError}</div>
