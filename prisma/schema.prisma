@@ -743,6 +743,8 @@ model OrchestratorJobQueue {
   status     String   @default("pending")
   result     String?
   error      String?
+  priority   Int      @default(100)
+  readyAt    DateTime @default(now()) @map("ready_at")
   workerId   String?  @map("worker_id")
   heartbeatAt DateTime? @map("heartbeat_at")
   leaseExpiresAt DateTime? @map("lease_expires_at")
@@ -754,6 +756,7 @@ model OrchestratorJobQueue {
   delegations OrchestratorAgentDelegation[]
 
   @@index([status])
+  @@index([status, readyAt, priority])
   @@map("orchestrator_job_queue")
 }
 

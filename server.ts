@@ -593,11 +593,23 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 
 const JOB_CONCURRENCY = Number(process.env.JOB_CONCURRENCY) || 2;
 const JOB_TIMEOUT_MS = Number(process.env.JOB_TIMEOUT_MS) || 120000;
+const JOB_PRIORITY = {
+  CRITICAL: 300,
+  HIGH: 200,
+  NORMAL: 100,
+  LOW: 50,
+} as const;
 let workerTimer: NodeJS.Timeout | null = null;
 let workerRunning = 0;
 const agentCancelTokens = new Map<number, CancelToken>();
 const crewCancelTokens = new Map<number, CancelToken>();
 const delegatedExecutionPromises = new Map<number, Promise<void>>();
+
+function readJobPriority(rawValue: unknown, fallback: number = JOB_PRIORITY.NORMAL) {
+  const value = Number(rawValue);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(1000, Math.max(0, Math.round(value)));
+}
 
 function getCancelToken(map: Map<number, CancelToken>, id: number) {
   const existing = map.get(id);
@@ -5633,7 +5645,9 @@ app.post('/api/workflows/:id/execute', requireUser, async (req, res) => {
     const runId = await createWorkflowRun(id, triggerType, input, workflow.graph);
     const shouldWait = shouldWaitForExecution(req);
     if (!shouldWait) {
-      const jobId = await enqueueJob('run_workflow', { workflowId: id, runId, userId });
+      const jobId = await enqueueJob('run_workflow', { workflowId: id, runId, userId }, {
+        priority: readJobPriority(req.body?.priority, JOB_PRIORITY.HIGH),
+      });
       return acceptedExecutionResponse(res, { run_id: runId, job_id: jobId });
     }
     await persistWorkflowRun(runId, 'running', null, []);
@@ -5666,7 +5680,9 @@ app.post('/api/workflows/:id/webhook', async (req, res) => {
     const runId = await createWorkflowRun(id, 'webhook', input, workflow.graph);
     const shouldWait = shouldWaitForExecution(req);
     if (!shouldWait) {
-      const jobId = await enqueueJob('run_workflow', { workflowId: id, runId, userId: null });
+      const jobId = await enqueueJob('run_workflow', { workflowId: id, runId, userId: null }, {
+        priority: readJobPriority(req.body?.priority, JOB_PRIORITY.HIGH),
+      });
       return acceptedExecutionResponse(res, { run_id: runId, job_id: jobId });
     }
     await persistWorkflowRun(runId, 'running', null, []);
@@ -6026,6 +6042,8 @@ app.post('/api/agents/:id/run', localRunLimiter, async (req, res) => {
           session_id,
           user_id,
           initiatedBy: 'direct_agent_api',
+        }, {
+          priority: readJobPriority(req.body?.priority, JOB_PRIORITY.HIGH),
         });
 
         if (!shouldWaitForExecution(req)) {
@@ -6140,6 +6158,8 @@ app.post('/api/agents/:id/chat', requireUser, localRunLimiter, async (req, res) 
         userMessage: effectiveTask,
         attachments: normalizedAttachments,
         initiatedBy: 'agent_chat_ui',
+      }, {
+        priority: readJobPriority(req.body?.priority, JOB_PRIORITY.CRITICAL),
       });
       const result = await waitForJob(jobId, 120000);
       res.json({
@@ -8520,8 +8540,12 @@ function getProviderBaselinePricing(providerType: string): { input: number; outp
 }
 
 
-async function enqueueJob(type: string, payload: any) {
-  return await enqueueRuntimeJob(type, payload);
+async function enqueueJob(
+  type: string,
+  payload: any,
+  options?: { priority?: number; delayMs?: number }
+) {
+  return await enqueueRuntimeJob(type, payload, options);
 }
 
 async function updateJobResult(jobId: number, status: 'completed' | 'failed' | 'canceled', result?: any, error?: string) {
@@ -8627,11 +8651,34 @@ async function runDelegatedAgentExecution(options: {
 
       pending = false;
       const rows = await getDelegationRows(parentExecutionId);
+      const childJobIds = Array.from(new Set(
+        rows
+          .filter((row) => row.role === 'delegate')
+          .map((row) => Number(row.child_job_id || 0))
+          .filter((id) => Number.isFinite(id) && id > 0)
+      ));
+      const batchedJobRows = childJobIds.length
+        ? await getPrisma().orchestratorJobQueue.findMany({
+            where: { id: { in: childJobIds } },
+            select: { id: true, status: true, result: true, error: true },
+          })
+        : [];
+      const jobById = new Map<number, { id: number; status: JobStatus; result: string | null; error: string | null }>(
+        batchedJobRows.map((row: any) => [
+          Number(row.id),
+          {
+            id: Number(row.id),
+            status: String(row.status || 'pending') as JobStatus,
+            result: row.result ?? null,
+            error: row.error ?? null,
+          },
+        ])
+      );
       for (const row of rows) {
         if (row.role !== 'delegate') continue;
         const jobId = Number(row.child_job_id || 0);
         if (!jobId) continue;
-        const job = await getJobRow(jobId);
+        const job = jobById.get(jobId);
         if (!job) {
           await getPrisma().orchestratorAgentDelegation.update({
             where: { id: Number(row.id) },
@@ -10470,6 +10517,8 @@ app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
     initialInput: initialInput || "",
     initiatedBy: 'crew_kickoff_http',
     userId,
+  }, {
+    priority: readJobPriority(req.body?.priority, JOB_PRIORITY.NORMAL),
   });
 
   const shouldWait = shouldWaitForExecution(req) || wait === true;
@@ -10707,6 +10756,8 @@ app.post('/api/agent-executions/:id/retry', async (req, res) => {
     task,
     initiatedBy: 'retry_agent_execution',
     retryOfExecutionId: execId,
+  }, {
+    priority: JOB_PRIORITY.HIGH,
   });
   if (!shouldWaitForExecution(req)) {
     return acceptedExecutionResponse(res, { job_id: jobId });
@@ -10727,6 +10778,8 @@ app.post('/api/agent-executions/:id/resume', async (req, res) => {
     task,
     initiatedBy: 'resume_agent_execution',
     retryOfExecutionId: execId,
+  }, {
+    priority: JOB_PRIORITY.HIGH,
   });
   if (!shouldWaitForExecution(req)) {
     return acceptedExecutionResponse(res, { job_id: jobId });

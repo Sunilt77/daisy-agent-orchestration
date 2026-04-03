@@ -2,8 +2,18 @@ import { getPrisma } from '../platform/prisma';
 import { uuid } from '../platform/crypto';
 
 export type RuntimeJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'canceled';
+export const DEFAULT_JOB_PRIORITY = 100;
 
 const DEFAULT_JOB_LEASE_MS = Math.max(15_000, Number(process.env.JOB_LEASE_MS || 45_000));
+const WAIT_POLL_FALLBACK_MS = Math.max(250, Number(process.env.JOB_WAIT_POLL_MS || 1000));
+
+type JobTerminalSignal = {
+  status: RuntimeJobStatus;
+  result: string | null;
+  error: string | null;
+};
+
+const jobWaiters = new Map<number, Set<(signal: JobTerminalSignal) => void>>();
 
 function parseJson(value: string | null | undefined, fallback: any) {
   if (!value) return fallback;
@@ -16,6 +26,12 @@ function parseJson(value: string | null | undefined, fallback: any) {
 
 function asIso(value: Date | null | undefined): string | null {
   return value ? value.toISOString() : null;
+}
+
+function normalizePriority(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DEFAULT_JOB_PRIORITY;
+  return Math.min(1_000, Math.max(0, Math.round(numeric)));
 }
 
 export async function getJobRow(jobId: number) {
@@ -31,6 +47,8 @@ export async function getJobRow(jobId: number) {
       heartbeatAt: true,
       leaseExpiresAt: true,
       attempts: true,
+      priority: true,
+      readyAt: true,
     },
   });
   return row
@@ -43,18 +61,30 @@ export async function getJobRow(jobId: number) {
         heartbeat_at: asIso(row.heartbeatAt),
         lease_expires_at: asIso(row.leaseExpiresAt),
         attempts: Number(row.attempts || 0),
+        priority: Number(row.priority ?? DEFAULT_JOB_PRIORITY),
+        ready_at: asIso(row.readyAt),
       }
     : undefined;
 }
 
-export async function enqueueJob(type: string, payload: any) {
+export async function enqueueJob(
+  type: string,
+  payload: any,
+  options?: {
+    priority?: number;
+    delayMs?: number;
+  }
+) {
   const jobQueue = getPrisma().orchestratorJobQueue as any;
+  const readyAt = new Date(Date.now() + Math.max(0, Number(options?.delayMs || 0)));
   const row = await jobQueue.create({
     data: {
       type,
       payload: JSON.stringify(payload ?? {}),
       status: 'pending',
       attempts: 0,
+      priority: normalizePriority(options?.priority),
+      readyAt,
     },
     select: { id: true },
   });
@@ -69,15 +99,16 @@ export async function updateJobResult(
   options?: { workerId?: string | null }
 ) {
   const jobQueue = getPrisma().orchestratorJobQueue as any;
+  const serializedResult = result != null ? JSON.stringify(result) : null;
   const where =
     options?.workerId
       ? { id: jobId, workerId: options.workerId }
       : { id: jobId };
-  await jobQueue.updateMany({
+  const updated = await jobQueue.updateMany({
     where,
     data: {
       status,
-      result: result != null ? JSON.stringify(result) : null,
+      result: serializedResult,
       error: error ?? null,
       finishedAt: new Date(),
       workerId: null,
@@ -85,18 +116,71 @@ export async function updateJobResult(
       leaseExpiresAt: null,
     },
   });
+  if (updated.count > 0) {
+    const waiters = jobWaiters.get(jobId);
+    if (waiters?.size) {
+      const signal: JobTerminalSignal = { status, result: serializedResult, error: error ?? null };
+      for (const waiter of waiters) waiter(signal);
+      jobWaiters.delete(jobId);
+    }
+  }
 }
 
 export async function claimNextJob(workerId: string, leaseMs: number = DEFAULT_JOB_LEASE_MS) {
-  const jobQueue = getPrisma().orchestratorJobQueue as any;
+  const prisma = getPrisma();
+  const jobQueue = prisma.orchestratorJobQueue as any;
+  const now = new Date();
+  const leaseExpiresAt = new Date(now.getTime() + Math.max(5_000, leaseMs));
+
+  // Single-statement claim avoids race conditions under concurrent workers/processes.
+  try {
+    const rows = await prisma.$queryRawUnsafe<Array<{ id: number; type: string; payload: string | null }>>(
+      `
+      WITH candidate AS (
+        SELECT id
+        FROM orchestrator_job_queue
+        WHERE status = 'pending'
+          AND COALESCE(ready_at, NOW()) <= NOW()
+        ORDER BY
+          COALESCE(priority, ${DEFAULT_JOB_PRIORITY}) DESC,
+          id ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+      )
+      UPDATE orchestrator_job_queue q
+      SET
+        status = 'running',
+        started_at = $1,
+        worker_id = $2,
+        heartbeat_at = $1,
+        lease_expires_at = $3,
+        attempts = COALESCE(attempts, 0) + 1
+      FROM candidate
+      WHERE q.id = candidate.id
+      RETURNING q.id, q.type, q.payload
+      `,
+      now,
+      workerId,
+      leaseExpiresAt
+    );
+    const row = rows?.[0];
+    if (row) {
+      return {
+        id: Number(row.id),
+        type: String(row.type || ''),
+        payload: parseJson(row.payload, {}),
+      };
+    }
+  } catch {
+    // Fallback to optimistic claim for compatibility with older environments.
+  }
+
   const job = await jobQueue.findFirst({
     where: { status: 'pending' },
     orderBy: { id: 'asc' },
     select: { id: true, type: true, payload: true },
   });
   if (!job) return null;
-  const now = new Date();
-  const leaseExpiresAt = new Date(now.getTime() + Math.max(5_000, leaseMs));
   const claimed = await jobQueue.updateMany({
     where: { id: job.id, status: 'pending' },
     data: {
@@ -109,11 +193,7 @@ export async function claimNextJob(workerId: string, leaseMs: number = DEFAULT_J
     },
   });
   if (claimed.count === 0) return null;
-  return {
-    id: Number(job.id),
-    type: job.type,
-    payload: parseJson(job.payload, {}),
-  };
+  return { id: Number(job.id), type: job.type, payload: parseJson(job.payload, {}) };
 }
 
 export async function heartbeatJobLease(jobId: number, workerId: string, leaseMs: number = DEFAULT_JOB_LEASE_MS) {
@@ -151,13 +231,41 @@ export async function failExpiredJobLeases() {
 }
 
 export async function waitForJob(jobId: number, timeoutMs: number) {
+  const signalPromise = (ms: number) =>
+    new Promise<JobTerminalSignal | null>((resolve) => {
+      const timer = setTimeout(() => {
+        const waiters = jobWaiters.get(jobId);
+        if (waiters) {
+          waiters.delete(onSignal);
+          if (!waiters.size) jobWaiters.delete(jobId);
+        }
+        resolve(null);
+      }, ms);
+      const onSignal = (signal: JobTerminalSignal) => {
+        clearTimeout(timer);
+        resolve(signal);
+      };
+      const waiters = jobWaiters.get(jobId);
+      if (waiters) {
+        waiters.add(onSignal);
+      } else {
+        jobWaiters.set(jobId, new Set([onSignal]));
+      }
+    });
+
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     const row = await getJobRow(jobId);
     if (!row) throw new Error('Job not found');
     if (row.status === 'completed') return parseJson(row.result, {});
     if (row.status === 'failed' || row.status === 'canceled') throw new Error(row.error || 'Job failed');
-    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
+    if (!remainingMs) break;
+    const signal = await signalPromise(Math.min(WAIT_POLL_FALLBACK_MS, remainingMs));
+    if (!signal) continue;
+    if (signal.status === 'completed') return parseJson(signal.result, {});
+    throw new Error(signal.error || 'Job failed');
   }
   throw new Error('Timed out waiting for job');
 }

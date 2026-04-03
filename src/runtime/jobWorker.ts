@@ -43,8 +43,12 @@ export function startRuntimeJobWorker(options: StartRuntimeJobWorkerOptions) {
   const workerId = createWorkerId();
   let workerRunning = 0;
   let lastLeaseSweepAt = 0;
+  let tickInProgress = false;
 
   return setInterval(async () => {
+    if (tickInProgress) return;
+    tickInProgress = true;
+    try {
     const now = Date.now();
     if (now - lastLeaseSweepAt >= leaseSweepMs) {
       lastLeaseSweepAt = now;
@@ -97,6 +101,9 @@ export function startRuntimeJobWorker(options: StartRuntimeJobWorkerOptions) {
       processJob(next)
         .then((result) => finalize('completed', result))
         .catch((error: any) => finalize('failed', null, error?.message || 'Job failed'));
+    }
+    } finally {
+      tickInProgress = false;
     }
   }, pollMs);
 }
