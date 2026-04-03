@@ -57,7 +57,13 @@ import {
 } from './src/orchestrator/runtimeStore';
 import { acceptedExecutionResponse, shouldWaitForExecution } from './src/runtime/httpExecution';
 import { startRuntimeJobWorker } from './src/runtime/jobWorker';
-import { syncCrewExecutionStatus } from './src/runtime/executionState';
+import {
+  appendCrewExecutionLog,
+  createCrewExecutionRecord,
+  getCrewExecutionStatus,
+  syncCrewExecutionMetrics,
+  syncCrewExecutionStatus,
+} from './src/runtime/executionState';
 import { spawn } from 'child_process';
 import rateLimit from 'express-rate-limit';
 import { randomUUID } from 'node:crypto';
@@ -9825,6 +9831,7 @@ async function runCrewExecution(
         span.setAttribute('crew.id', crewId.toString());
         span.setAttribute('execution.id', executionId.toString());
         const cancelToken = getCancelToken(crewCancelTokens, Number(executionId));
+        const prisma = getPrisma();
 
         try {
             const crewRow = db.prepare('SELECT process, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id FROM crews WHERE id = ?').get(crewId) as any;
@@ -9863,10 +9870,23 @@ async function runCrewExecution(
             const maxToolCalls = normalizeNumber(crewRow?.max_tool_calls);
             
             // Helper to append logs safely
+            let pendingCrewLogWrite = Promise.resolve();
             const appendLog = (logItem: any) => {
                 const payload = { ...logItem };
-                db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
-                  .run(executionId, String(logItem.type || 'log'), JSON.stringify(payload));
+                pendingCrewLogWrite = pendingCrewLogWrite
+                  .then(() => appendCrewExecutionLog({
+                    db,
+                    prisma,
+                    executionId: Number(executionId),
+                    type: String(logItem.type || 'log'),
+                    payload,
+                  }))
+                  .catch((error) => {
+                    console.error('Failed to append crew execution log', error);
+                  });
+            };
+            const flushCrewLogWrites = async () => {
+              await pendingCrewLogWrite;
             };
             if (generatedRuntimeTasks > 0) {
                 appendLog({
@@ -9997,14 +10017,22 @@ async function runCrewExecution(
                   total_steps: delegationRows.filter((row) => row.role === 'delegate').length,
                 });
 
-                db.prepare('UPDATE crew_executions SET prompt_tokens = ?, completion_tokens = ?, total_cost = ? WHERE id = ?')
-                  .run(executionPromptTokens, executionCompletionTokens, executionCost, executionId);
-
                 const delegatedStatus = String(parentExec?.status || 'completed');
-                db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run(
-                  delegatedStatus === 'failed' ? 'failed' : delegatedStatus === 'canceled' ? 'canceled' : 'completed',
-                  executionId
-                );
+                await flushCrewLogWrites();
+                await syncCrewExecutionMetrics({
+                  db,
+                  prisma,
+                  executionId: Number(executionId),
+                  promptTokens: executionPromptTokens,
+                  completionTokens: executionCompletionTokens,
+                  totalCost: executionCost,
+                });
+                await syncCrewExecutionStatus({
+                  db,
+                  prisma,
+                  executionId: Number(executionId),
+                  status: delegatedStatus === 'failed' ? 'failed' : delegatedStatus === 'canceled' ? 'canceled' : 'completed',
+                });
                 span.setStatus({ code: SpanStatusCode.OK });
                 return;
             }
@@ -10054,8 +10082,14 @@ async function runCrewExecution(
                     cancelToken.reason = `Guardrail: max runtime ${maxRuntimeMs}ms exceeded`;
                 }
                 if (cancelToken.canceled) {
-                    db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run('canceled', executionId);
                     appendLog({ type: 'canceled', message: cancelToken.reason || 'Execution canceled' });
+                    await flushCrewLogWrites();
+                    await syncCrewExecutionStatus({
+                      db,
+                      prisma,
+                      executionId: Number(executionId),
+                      status: 'canceled',
+                    });
                     span.setStatus({ code: SpanStatusCode.OK, message: 'canceled' });
                     return;
                 }
@@ -10169,8 +10203,14 @@ async function runCrewExecution(
                 appendLog({ type: 'finish', agent: agent.name, result: result.text, usage: result.usage });
                 
                 // Update execution stats progressively
-                db.prepare('UPDATE crew_executions SET prompt_tokens = ?, completion_tokens = ?, total_cost = ? WHERE id = ?')
-                .run(executionPromptTokens, executionCompletionTokens, executionCost, executionId);
+                await syncCrewExecutionMetrics({
+                  db,
+                  prisma,
+                  executionId: Number(executionId),
+                  promptTokens: executionPromptTokens,
+                  completionTokens: executionCompletionTokens,
+                  totalCost: executionCost,
+                });
             }
 
             // Always synthesize a cumulative crew answer so users get a real multi-agent final output.
@@ -10235,13 +10275,28 @@ async function runCrewExecution(
                   total_steps: taskOutputs.length,
                 });
 
-                db.prepare('UPDATE crew_executions SET prompt_tokens = ?, completion_tokens = ?, total_cost = ? WHERE id = ?')
-                  .run(executionPromptTokens, executionCompletionTokens, executionCost, executionId);
+                await syncCrewExecutionMetrics({
+                  db,
+                  prisma,
+                  executionId: Number(executionId),
+                  promptTokens: executionPromptTokens,
+                  completionTokens: executionCompletionTokens,
+                  totalCost: executionCost,
+                });
             }
 
-            const finalCrewStatus = (db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any)?.status;
+            await flushCrewLogWrites();
+            const finalCrewStatus = await getCrewExecutionStatus({
+              prisma,
+              executionId: Number(executionId),
+            });
             if (finalCrewStatus !== 'canceled') {
-              db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run('completed', executionId);
+              await syncCrewExecutionStatus({
+                db,
+                prisma,
+                executionId: Number(executionId),
+                status: 'completed',
+              });
             }
             span.setStatus({ code: SpanStatusCode.OK });
 
@@ -10250,11 +10305,24 @@ async function runCrewExecution(
             span.recordException(e);
             span.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
 
-            db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
-              .run(executionId, 'error', JSON.stringify({ message: e.message }));
-            const finalCrewStatus = (db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any)?.status;
+            await appendCrewExecutionLog({
+              db,
+              prisma,
+              executionId: Number(executionId),
+              type: 'error',
+              payload: { message: e.message },
+            });
+            const finalCrewStatus = await getCrewExecutionStatus({
+              prisma,
+              executionId: Number(executionId),
+            });
             if (finalCrewStatus !== 'canceled') {
-              db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run('failed', executionId);
+              await syncCrewExecutionStatus({
+                db,
+                prisma,
+                executionId: Number(executionId),
+                status: 'failed',
+              });
             }
         } finally {
             crewCancelTokens.delete(Number(executionId));
@@ -10288,21 +10356,29 @@ app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
   const crewId = req.params.id;
   const { initialInput, wait, waitMs, pollMs } = req.body || {};
   const userId = String((req as any)?.user?.id || '').trim() || null;
+  const prisma = getPrisma();
   
   // Create execution record
-  const stmt = db.prepare('INSERT INTO crew_executions (crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?)');
-  const info = stmt.run(crewId, 'pending', JSON.stringify([]), initialInput || '', null);
-  const executionId = info.lastInsertRowid;
+  const execution = await createCrewExecutionRecord({
+    db,
+    prisma,
+    crewId: Number(crewId),
+    initialInput: initialInput || '',
+    retryOf: null,
+    status: 'pending',
+  });
+  const executionId = execution.id;
 
-  db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
-    .run(
-      executionId,
-      'thought',
-      JSON.stringify({
-        agent: 'system',
-        message: 'Crew run queued. Waiting for a worker to claim execution.',
-      }),
-    );
+  await appendCrewExecutionLog({
+    db,
+    prisma,
+    executionId: Number(executionId),
+    type: 'thought',
+    payload: {
+      agent: 'system',
+      message: 'Crew run queued. Waiting for a worker to claim execution.',
+    },
+  });
 
   // Start processing in background
   const jobId = await enqueueJob('run_crew', {

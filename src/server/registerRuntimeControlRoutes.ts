@@ -1,6 +1,6 @@
 import type express from 'express';
 import { acceptedExecutionResponse, shouldWaitForExecution } from '../runtime/httpExecution';
-import { syncCrewExecutionStatus } from '../runtime/executionState';
+import { appendCrewExecutionLog, createCrewExecutionRecord, syncCrewExecutionStatus } from '../runtime/executionState';
 
 type CancelToken = { canceled: boolean; reason?: string };
 
@@ -66,19 +66,15 @@ export function registerRuntimeControlRoutes({
       ? await prisma.orchestratorCrew.findUnique({ where: { id: crewId } })
       : null;
 
-    const newExec = await prisma.orchestratorCrewExecution.create({
-      data: {
-        crewId: crew?.id ?? null,
-        status: 'pending',
-        logs: JSON.stringify([]),
-        initialInput: exec.initialInput || '',
-        retryOf: executionId,
-      },
+    const newExec = await createCrewExecutionRecord({
+      db,
+      prisma,
+      crewId: crew?.id ?? (hasValidCrewId ? crewId : null),
+      initialInput: exec.initialInput || '',
+      retryOf: executionId,
+      status: 'pending',
     });
     const newExecutionId = newExec.id;
-
-    db.prepare('INSERT INTO crew_executions (id, crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(newExecutionId, crew?.id ?? (hasValidCrewId ? crewId : null), 'pending', JSON.stringify([]), exec.initialInput || '', executionId);
 
     if (crew?.id) {
       const jobId = await enqueueJob('run_crew', {
@@ -92,12 +88,12 @@ export function registerRuntimeControlRoutes({
         return acceptedExecutionResponse(res, { execution_id: newExecutionId, job_id: jobId });
       }
     } else {
-      await prisma.orchestratorCrewExecutionLog.create({
-        data: {
-          executionId: newExecutionId,
-          type: 'warning',
-          payload: JSON.stringify({ message: 'Retry created without a live crew link; execution preserved for inspection.' }),
-        },
+      await appendCrewExecutionLog({
+        db,
+        prisma,
+        executionId: newExecutionId,
+        type: 'warning',
+        payload: { message: 'Retry created without a live crew link; execution preserved for inspection.' },
       });
     }
     res.json({ success: true, executionId: newExecutionId, retry_of: executionId, status: 'pending' });
@@ -116,19 +112,15 @@ export function registerRuntimeControlRoutes({
       ? await prisma.orchestratorCrew.findUnique({ where: { id: crewId } })
       : null;
 
-    const newExec = await prisma.orchestratorCrewExecution.create({
-      data: {
-        crewId: crew?.id ?? null,
-        status: 'pending',
-        logs: JSON.stringify([]),
-        initialInput: exec.initialInput || '',
-        retryOf: executionId,
-      },
+    const newExec = await createCrewExecutionRecord({
+      db,
+      prisma,
+      crewId: crew?.id ?? (hasValidCrewId ? crewId : null),
+      initialInput: exec.initialInput || '',
+      retryOf: executionId,
+      status: 'pending',
     });
     const newExecutionId = newExec.id;
-
-    db.prepare('INSERT INTO crew_executions (id, crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(newExecutionId, crew?.id ?? (hasValidCrewId ? crewId : null), 'pending', JSON.stringify([]), exec.initialInput || '', executionId);
 
     if (crew?.id) {
       const jobId = await enqueueJob('run_crew', {
@@ -142,12 +134,12 @@ export function registerRuntimeControlRoutes({
         return acceptedExecutionResponse(res, { execution_id: newExecutionId, job_id: jobId });
       }
     } else {
-      await prisma.orchestratorCrewExecutionLog.create({
-        data: {
-          executionId: newExecutionId,
-          type: 'warning',
-          payload: JSON.stringify({ message: 'Resume created without a live crew link; execution preserved for inspection.' }),
-        },
+      await appendCrewExecutionLog({
+        db,
+        prisma,
+        executionId: newExecutionId,
+        type: 'warning',
+        payload: { message: 'Resume created without a live crew link; execution preserved for inspection.' },
       });
     }
     res.json({ success: true, executionId: newExecutionId, resumed_from: executionId, status: 'pending' });
