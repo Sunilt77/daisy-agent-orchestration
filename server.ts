@@ -6005,7 +6005,7 @@ app.get('/api/executions/agents', requireUser, async (req, res) => {
         const scope = await resolveOrchestratorAccessScope(req);
         const visibleAgentIds = scope.isAdmin ? [] : Array.from(scope.allowedAgentIds ?? []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
         const executions = await prisma.orchestratorAgentExecution.findMany({
-            where: (visibleAgentIds.length ? { agentId: { in: visibleAgentIds } } : undefined) as any,
+            where: (scope.isAdmin ? undefined : (visibleAgentIds.length ? { agentId: { in: visibleAgentIds } } : { id: -1 })) as any,
             include: {
                 agent: {
                     select: { name: true }
@@ -6026,6 +6026,62 @@ app.get('/api/executions/agents', requireUser, async (req, res) => {
     } catch (e: any) {
         res.status(500).json({ error: e.message });
     }
+});
+
+app.get('/api/agent-executions', requireUser, async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const scope = await resolveOrchestratorAccessScope(req);
+    const visibleAgentIds = scope.isAdmin
+      ? []
+      : Array.from(scope.allowedAgentIds ?? [])
+          .map((id) => Number(id))
+          .filter((id) => Number.isFinite(id) && id > 0);
+
+    const page = Math.max(1, Number(req.query.page || 1));
+    const pageSize = Math.min(100, Math.max(5, Number(req.query.pageSize || 20)));
+    const status = String(req.query.status || '').trim().toLowerCase();
+    const q = String(req.query.q || '').trim();
+
+    const where: any = {
+      ...(scope.isAdmin ? {} : (visibleAgentIds.length ? { agentId: { in: visibleAgentIds } } : { id: -1 })),
+      ...(status ? { status } : {}),
+    };
+    if (q) {
+      where.OR = [
+        { task: { contains: q, mode: 'insensitive' } },
+        { output: { contains: q, mode: 'insensitive' } },
+        { input: { contains: q, mode: 'insensitive' } },
+        { agent: { name: { contains: q, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [total, rows] = await Promise.all([
+      prisma.orchestratorAgentExecution.count({ where }),
+      prisma.orchestratorAgentExecution.findMany({
+        where,
+        include: {
+          agent: { select: { name: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+    ]);
+
+    res.json({
+      items: rows.map((row: any) => ({
+        ...row,
+        created_at: row.createdAt,
+        agent_name: row.agent?.name || 'Unknown Agent',
+      })),
+      total,
+      page,
+      pageSize,
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message || 'Failed to load agent executions' });
+  }
 });
 
 app.post('/api/agents/:id/run', localRunLimiter, async (req, res) => {

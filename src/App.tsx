@@ -28,6 +28,7 @@ const TraceDetailPage = lazy(() => import('./pages/TraceDetailPage'));
 const TaskControlPage = lazy(() => import('./pages/TaskControlPage'));
 const AgentChatPage = lazy(() => import('./pages/AgentChatPage'));
 const AgentExecutionPage = lazy(() => import('./pages/AgentExecutionPage'));
+const AgentExecutionsPage = lazy(() => import('./pages/AgentExecutionsPage'));
 const WorkflowsPage = lazy(() => import('./pages/WorkflowsPage'));
 const KnowledgebasePage = lazy(() => import('./pages/KnowledgebasePage'));
 const VoicePage = lazy(() => import('./pages/VoicePage'));
@@ -69,6 +70,7 @@ export default function App() {
                         <Route path="/traces/:runId" element={<TraceDetailPage />} />
                         <Route path="/platform" element={<PlatformPage />} />
                         <Route path="/agents" element={<AgentsPage />} />
+                        <Route path="/agent-executions" element={<AgentExecutionsPage />} />
                         <Route path="/agent-executions/:id" element={<AgentExecutionPage />} />
                         <Route path="/agent-chat" element={<AgentChatPage />} />
                         <Route path="/voice" element={<VoicePage />} />

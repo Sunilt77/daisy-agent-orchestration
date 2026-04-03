@@ -1353,6 +1353,14 @@ export default function Dashboard() {
             </div>
             Operation Streams
         </h2>
+        <div className="mb-4 flex justify-end">
+          <Link
+            to="/agent-executions"
+            className="text-sm font-semibold text-indigo-700 hover:text-indigo-900"
+          >
+            Browse All Agent Executions
+          </Link>
+        </div>
         <div className={`${dashboardOperatorPanel} overflow-hidden p-0`}>
             {recentExecutions.length === 0 ? (
                 <div className="p-8 text-center text-slate-500">
@@ -1469,6 +1477,12 @@ export default function Dashboard() {
                 </div>
                 
                 <div className="p-6 border-t border-slate-100 bg-slate-50 rounded-b-xl flex justify-end">
+                    <Link
+                        to={`/agent-executions/${selectedExecution.id}`}
+                        className="px-4 py-2 mr-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium"
+                    >
+                        Open Full Timeline
+                    </Link>
                     <button 
                         onClick={() => setSelectedExecution(null)}
                         className="px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 font-medium"
