@@ -228,6 +228,7 @@ export default function McpPage() {
   const [toolsPageSize, setToolsPageSize] = useState(12);
   const [bundleSearch, setBundleSearch] = useState('');
   const [toolSearch, setToolSearch] = useState('');
+  const [bundleExposureFilter, setBundleExposureFilter] = useState<'all' | 'published' | 'private'>('all');
   const [toolCategoryFilter, setToolCategoryFilter] = useState('all');
   const [toolTypeFilter, setToolTypeFilter] = useState('all');
   const [toolExposureFilter, setToolExposureFilter] = useState<'all' | 'exposed' | 'available'>('all');
@@ -364,7 +365,7 @@ export default function McpPage() {
 
   useEffect(() => setBundlesPage(1), [bundles.length]);
   useEffect(() => setToolsPage(1), [rows.length]);
-  useEffect(() => setBundlesPage(1), [bundleSearch]);
+  useEffect(() => setBundlesPage(1), [bundleSearch, bundleExposureFilter]);
   useEffect(() => setToolsPage(1), [toolSearch]);
   useEffect(() => setToolsPage(1), [toolCategoryFilter, toolTypeFilter, toolExposureFilter, toolSelectionFilter]);
 
@@ -578,12 +579,21 @@ export default function McpPage() {
     });
   }, [selectedIds, sortedTools, toolCategoryFilter, toolExposureFilter, toolSearch, toolSelectionFilter, toolTypeFilter]);
 
+  const filteredBundles = useMemo(() => {
+    const query = bundleSearch.trim().toLowerCase();
+    return bundles.filter((bundle) => {
+      const matchesSearch = !query || `${bundle.name} ${bundle.slug} ${bundle.description || ''}`.toLowerCase().includes(query);
+      const matchesExposure = bundleExposureFilter === 'all'
+        || (bundleExposureFilter === 'published' && bundle.is_exposed)
+        || (bundleExposureFilter === 'private' && !bundle.is_exposed);
+      return matchesSearch && matchesExposure;
+    });
+  }, [bundleExposureFilter, bundleSearch, bundles]);
+
   const pagedBundles = useMemo(() => {
     const start = (bundlesPage - 1) * bundlesPageSize;
-    return bundles
-      .filter((bundle) => !bundleSearch.trim() || `${bundle.name} ${bundle.slug} ${bundle.description || ''}`.toLowerCase().includes(bundleSearch.trim().toLowerCase()))
-      .slice(start, start + bundlesPageSize);
-  }, [bundles, bundlesPage, bundlesPageSize, bundleSearch]);
+    return filteredBundles.slice(start, start + bundlesPageSize);
+  }, [bundlesPage, bundlesPageSize, filteredBundles]);
 
   const pagedTools = useMemo(() => {
     const start = (toolsPage - 1) * toolsPageSize;
@@ -929,10 +939,42 @@ export default function McpPage() {
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 pl-9 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
               />
             </div>
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+              {[
+                { key: 'all', label: 'All Bundles' },
+                { key: 'published', label: 'Published' },
+                { key: 'private', label: 'Private' },
+              ].map((chip) => (
+                <button
+                  key={chip.key}
+                  onClick={() => setBundleExposureFilter(chip.key as 'all' | 'published' | 'private')}
+                  className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] transition-colors ${
+                    bundleExposureFilter === chip.key
+                      ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                      : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                  }`}
+                >
+                  {chip.label}
+                </button>
+              ))}
+              <button
+                onClick={() => {
+                  setBundleSearch('');
+                  setBundleExposureFilter('all');
+                }}
+                disabled={!bundleSearch.trim() && bundleExposureFilter === 'all'}
+                className="ml-auto rounded-lg border border-slate-200 px-3 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-50 disabled:opacity-40"
+              >
+                Reset
+              </button>
+              <div className="w-full text-[11px] text-slate-500">
+                {filteredBundles.length} visible of {bundles.length}
+              </div>
+            </div>
 
-            {bundles.length === 0 && (
+            {filteredBundles.length === 0 && (
               <div className="text-sm text-slate-500 border border-dashed border-slate-200 rounded-lg p-4">
-                No bundles yet. Select tools below and create your first bundle.
+                {bundles.length === 0 ? 'No bundles yet. Select tools below and create your first bundle.' : 'No bundles match the current filters.'}
               </div>
             )}
 
@@ -1050,7 +1092,7 @@ export default function McpPage() {
               <Pagination
                 page={bundlesPage}
                 pageSize={bundlesPageSize}
-                total={bundles.length}
+                total={filteredBundles.length}
                 onPageChange={setBundlesPage}
                 onPageSizeChange={setBundlesPageSize}
                 pageSizeOptions={[5, 10, 20]}
@@ -1191,6 +1233,51 @@ export default function McpPage() {
                 <option value="all">All tools</option>
                 <option value="selected">Selected only</option>
               </select>
+            </div>
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => {
+                  setToolExposureFilter('all');
+                  setToolSelectionFilter('all');
+                }}
+                className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${
+                  toolExposureFilter === 'all' && toolSelectionFilter === 'all'
+                    ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                    : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                }`}
+              >
+                All Tools
+              </button>
+              <button
+                onClick={() => setToolExposureFilter('exposed')}
+                className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${
+                  toolExposureFilter === 'exposed'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                    : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                }`}
+              >
+                Published
+              </button>
+              <button
+                onClick={() => setToolExposureFilter('available')}
+                className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${
+                  toolExposureFilter === 'available'
+                    ? 'border-amber-200 bg-amber-50 text-amber-700'
+                    : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                }`}
+              >
+                Unpublished
+              </button>
+              <button
+                onClick={() => setToolSelectionFilter('selected')}
+                className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${
+                  toolSelectionFilter === 'selected'
+                    ? 'border-cyan-200 bg-cyan-50 text-cyan-700'
+                    : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                }`}
+              >
+                Selected
+              </button>
             </div>
             <div className="mb-5 flex flex-wrap items-center gap-2">
               <button

@@ -16,7 +16,7 @@ import {
   MarkerType,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Bot, Boxes, CheckCircle2, Clock3, GitBranch, Play, Plus, Radio, Repeat, RotateCcw, Save, Sparkles, ThumbsDown, ThumbsUp, Users, Webhook, Wrench, Zap } from 'lucide-react';
+import { Bot, Boxes, CheckCircle2, Clock3, GitBranch, Play, Plus, Radio, Repeat, RotateCcw, Save, Search, Sparkles, ThumbsDown, ThumbsUp, Users, Webhook, Wrench, Zap } from 'lucide-react';
 
 type WorkflowRecord = {
   id: number;
@@ -261,6 +261,8 @@ export default function WorkflowsPage() {
   const [showVersions, setShowVersions] = useState(false);
   const [runningWorkflowRunId, setRunningWorkflowRunId] = useState<number | null>(null);
   const [feedbackByRun, setFeedbackByRun] = useState<Record<number, FeedbackState>>({});
+  const [workflowSearch, setWorkflowSearch] = useState('');
+  const [workflowLibraryStatus, setWorkflowLibraryStatus] = useState<'all' | 'draft' | 'active'>('all');
 
   const activeRun = useMemo(() => {
     if (runningWorkflowRunId) {
@@ -458,6 +460,23 @@ export default function WorkflowsPage() {
   ), [displayEdges, workflowRuntime]);
 
   const selectedNode = useMemo(() => nodes.find((node) => node.id === selectedNodeId) || null, [nodes, selectedNodeId]);
+  const filteredWorkflows = useMemo(() => {
+    const query = workflowSearch.trim().toLowerCase();
+    return workflows.filter((workflow) => {
+      const status = String(workflow.status || '').toLowerCase();
+      const matchesStatus = workflowLibraryStatus === 'all' || status === workflowLibraryStatus;
+      if (!matchesStatus) return false;
+      if (!query) return true;
+      const haystack = [
+        workflow.name,
+        workflow.description,
+        workflow.status,
+        workflow.trigger_type,
+        workflow.project_name,
+      ].filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [workflowLibraryStatus, workflowSearch, workflows]);
 
   const updateSelectedNode = (patch: Partial<WorkflowNodeData>) => {
     if (!selectedNodeId) return;
@@ -610,6 +629,11 @@ export default function WorkflowsPage() {
   const webhookEndpoint = selectedWorkflowId === 'new'
     ? ''
     : `${window.location.origin}/api/workflows/${selectedWorkflowId}/webhook`;
+  const hasWorkflowLibraryFilters = workflowSearch.trim().length > 0 || workflowLibraryStatus !== 'all';
+  const resetWorkflowLibraryFilters = () => {
+    setWorkflowSearch('');
+    setWorkflowLibraryStatus('all');
+  };
 
   const submitWorkflowFeedback = async (runId: number, rating: 'up' | 'down') => {
     setFeedbackByRun((prev) => ({ ...prev, [runId]: { status: 'saving', rating } }));
@@ -664,8 +688,46 @@ export default function WorkflowsPage() {
                 <Plus size={12} /> New
               </button>
             </div>
+            <div className="relative mb-3">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                value={workflowSearch}
+                onChange={(e) => setWorkflowSearch(e.target.value)}
+                placeholder="Search workflows..."
+                className="w-full rounded-xl border border-slate-300 bg-white pl-9 pr-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              {[
+                { key: 'all', label: 'All' },
+                { key: 'draft', label: 'Draft' },
+                { key: 'active', label: 'Active' },
+              ].map((chip) => (
+                <button
+                  key={chip.key}
+                  onClick={() => setWorkflowLibraryStatus(chip.key as 'all' | 'draft' | 'active')}
+                  className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] transition-colors ${
+                    workflowLibraryStatus === chip.key
+                      ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                      : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                  }`}
+                >
+                  {chip.label}
+                </button>
+              ))}
+              <button
+                onClick={resetWorkflowLibraryFilters}
+                disabled={!hasWorkflowLibraryFilters}
+                className="ml-auto rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-50 disabled:opacity-40"
+              >
+                Reset
+              </button>
+            </div>
+            <div className="mb-2 text-[11px] text-slate-500">
+              {filteredWorkflows.length} visible of {workflows.length}
+            </div>
             <div className="space-y-2 max-h-[340px] overflow-auto pr-1">
-              {workflows.map((workflow) => (
+              {filteredWorkflows.map((workflow) => (
                 <button
                   key={workflow.id}
                   onClick={() => setSelectedWorkflowId(workflow.id)}
@@ -681,6 +743,11 @@ export default function WorkflowsPage() {
                   <div className="mt-2 text-[11px] text-slate-400">v{workflow.version || 1} • {workflow.runs_count || 0} runs</div>
                 </button>
               ))}
+              {filteredWorkflows.length === 0 && (
+                <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-xs text-slate-500">
+                  {workflows.length === 0 ? 'No workflows yet. Create your first workflow.' : 'No workflows match these filters.'}
+                </div>
+              )}
             </div>
           </div>
 

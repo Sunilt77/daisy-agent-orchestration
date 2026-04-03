@@ -489,6 +489,7 @@ export default function ToolsPage() {
   const [mcpUrlWarning, setMcpUrlWarning] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>('All');
   const [typeFilter, setTypeFilter] = useState<string>('All');
+  const [quickFilter, setQuickFilter] = useState<'all' | 'http' | 'python' | 'mcp' | 'exposed'>('all');
   
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -511,6 +512,9 @@ export default function ToolsPage() {
       if (typeof persisted.toolSearch === 'string') setToolSearch(persisted.toolSearch);
       if (typeof persisted.categoryFilter === 'string') setCategoryFilter(persisted.categoryFilter);
       if (typeof persisted.typeFilter === 'string') setTypeFilter(persisted.typeFilter);
+      if (typeof persisted.quickFilter === 'string' && ['all', 'http', 'python', 'mcp', 'exposed'].includes(persisted.quickFilter)) {
+        setQuickFilter(persisted.quickFilter as 'all' | 'http' | 'python' | 'mcp' | 'exposed');
+      }
       if (persisted.formData) setFormData((prev) => ({ ...prev, ...persisted.formData }));
       if (typeof persisted.pythonCode === 'string') setPythonCode(persisted.pythonCode);
       if (persisted.httpConfig) setHttpConfig((prev) => ({ ...prev, ...persisted.httpConfig }));
@@ -536,6 +540,7 @@ export default function ToolsPage() {
       toolSearch,
       categoryFilter,
       typeFilter,
+      quickFilter,
       formData,
       pythonCode,
       httpConfig,
@@ -549,7 +554,7 @@ export default function ToolsPage() {
       httpTestArgs,
       curlImportText,
     });
-  }, [stateReady, selectedToolId, toolsPage, toolsPageSize, toolSearch, categoryFilter, typeFilter, formData, pythonCode, httpConfig, httpHeaders, httpFormData, httpBodyMode, httpRequiredArgs, httpArgTypes, httpAuth, mcpConfig, httpTestArgs, curlImportText]);
+  }, [stateReady, selectedToolId, toolsPage, toolsPageSize, toolSearch, categoryFilter, typeFilter, quickFilter, formData, pythonCode, httpConfig, httpHeaders, httpFormData, httpBodyMode, httpRequiredArgs, httpArgTypes, httpAuth, mcpConfig, httpTestArgs, curlImportText]);
 
   useEffect(() => {
     fetchTools();
@@ -591,7 +596,7 @@ export default function ToolsPage() {
 
   useEffect(() => {
     setToolsPage(1);
-  }, [toolSearch, categoryFilter, typeFilter]);
+  }, [toolSearch, categoryFilter, typeFilter, quickFilter]);
 
   useEffect(() => {
     setHttpArgTypes((prev) => {
@@ -669,6 +674,18 @@ export default function ToolsPage() {
     if (typeFilter && typeFilter.toLowerCase() !== 'all') {
       list = list.filter(t => (t.type || 'custom') === typeFilter);
     }
+    if (quickFilter === 'http') {
+      list = list.filter((t) => String(t.type || '').toLowerCase() === 'http');
+    }
+    if (quickFilter === 'python') {
+      list = list.filter((t) => String(t.type || '').toLowerCase() === 'python');
+    }
+    if (quickFilter === 'mcp') {
+      list = list.filter((t) => ['mcp', 'mcp_stdio_proxy'].includes(String(t.type || '').toLowerCase()));
+    }
+    if (quickFilter === 'exposed') {
+      list = list.filter((t) => Boolean(t.linkages?.mcp_exposed));
+    }
     return [...list].sort((a, b) => {
       const catA = (a.category || 'General').toLowerCase();
       const catB = (b.category || 'General').toLowerCase();
@@ -676,7 +693,7 @@ export default function ToolsPage() {
       if (catA > catB) return 1;
       return a.name.localeCompare(b.name);
     });
-  }, [tools, toolSearch, categoryFilter, typeFilter]);
+  }, [tools, toolSearch, categoryFilter, typeFilter, quickFilter]);
 
   const pagedTools = useMemo(() => {
     const start = (toolsPage - 1) * toolsPageSize;
@@ -1468,6 +1485,14 @@ export default function ToolsPage() {
     };
   }, [tools]);
 
+  const hasListFilters = toolSearch.trim().length > 0 || categoryFilter !== 'All' || typeFilter !== 'All' || quickFilter !== 'all';
+  const resetListFilters = () => {
+    setToolSearch('');
+    setCategoryFilter('All');
+    setTypeFilter('All');
+    setQuickFilter('all');
+  };
+
   return (
     <div className="h-[calc(100vh-8rem)] flex flex-col">
       <div className="swarm-hero p-6 mb-6">
@@ -1517,6 +1542,7 @@ export default function ToolsPage() {
               <div className="p-4 border-b border-slate-100 bg-slate-50 flex flex-col gap-3">
                   <div className="flex items-center justify-between">
                       <span className="font-medium text-slate-700">Available Tools ({filteredTools.length})</span>
+                      <span className="text-[11px] text-slate-500">{tools.length} total</span>
                   </div>
                   <div className="relative">
                     <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -1542,6 +1568,34 @@ export default function ToolsPage() {
                       >
                           {toolTypes.map(t => <option key={t} value={t}>{t}</option>)}
                       </select>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {[
+                      { key: 'all', label: 'All' },
+                      { key: 'http', label: 'HTTP' },
+                      { key: 'python', label: 'Python' },
+                      { key: 'mcp', label: 'MCP' },
+                      { key: 'exposed', label: 'Exposed' },
+                    ].map((chip) => (
+                      <button
+                        key={chip.key}
+                        onClick={() => setQuickFilter(chip.key as 'all' | 'http' | 'python' | 'mcp' | 'exposed')}
+                        className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] transition-colors ${
+                          quickFilter === chip.key
+                            ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                            : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                        }`}
+                      >
+                        {chip.label}
+                      </button>
+                    ))}
+                    <button
+                      onClick={resetListFilters}
+                      disabled={!hasListFilters}
+                      className="ml-auto rounded-md border border-slate-200 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500 hover:bg-slate-100 disabled:opacity-40"
+                    >
+                      Reset
+                    </button>
                   </div>
               </div>
               <div className="flex-1 overflow-y-auto p-2 space-y-1">
