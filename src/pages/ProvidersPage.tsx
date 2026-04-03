@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { Plus, Trash2, Edit, Key, Server, Check, X, Shield, ExternalLink } from 'lucide-react';
+import { Plus, Trash2, Edit, Key, Server, Check, X, Shield, ExternalLink, Search } from 'lucide-react';
 import Pagination from '../components/Pagination';
 
 interface Provider {
@@ -27,6 +27,8 @@ export default function ProvidersPage() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [providersPage, setProvidersPage] = useState(1);
   const [providersPageSize, setProvidersPageSize] = useState(9);
+  const [search, setSearch] = useState('');
+  const [providerFilter, setProviderFilter] = useState<string>('all');
   const [testStatus, setTestStatus] = useState<{ type: 'success' | 'error' | 'testing', message: string } | null>(null);
   
   const [formData, setFormData] = useState({
@@ -51,7 +53,7 @@ export default function ProvidersPage() {
 
   useEffect(() => {
     setProvidersPage(1);
-  }, [providers.length]);
+  }, [providers.length, search, providerFilter]);
 
   const fetchProviders = () => {
     fetch('/api/providers')
@@ -147,10 +149,21 @@ export default function ProvidersPage() {
     }
   };
 
+  const filteredProviders = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return providers.filter((provider) => {
+      if (providerFilter === 'defaults' && !provider.is_default) return false;
+      if (providerFilter !== 'all' && providerFilter !== 'defaults' && provider.provider !== providerFilter) return false;
+      if (!query) return true;
+      const haystack = [provider.name, provider.provider, provider.api_base || ''].join(' ').toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [providers, search, providerFilter]);
+
   const pagedProviders = useMemo(() => {
     const start = (providersPage - 1) * providersPageSize;
-    return providers.slice(start, start + providersPageSize);
-  }, [providers, providersPage, providersPageSize]);
+    return filteredProviders.slice(start, start + providersPageSize);
+  }, [filteredProviders, providersPage, providersPageSize]);
 
   const providerInsights = useMemo(() => ({
     totalProviders: providers.length,
@@ -193,6 +206,51 @@ export default function ProvidersPage() {
               <div className="mt-2 text-3xl font-black text-white">{item.value}</div>
             </div>
           ))}
+        </div>
+      </div>
+
+      <div className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="relative w-full max-w-md">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full rounded-xl border border-slate-300 bg-white pl-10 pr-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+              placeholder="Search providers by name, type, or API base..."
+            />
+          </div>
+          <div className="flex items-center gap-2 text-xs text-slate-500">
+            <span className="font-medium text-slate-700">{filteredProviders.length}</span>
+            <span>visible of</span>
+            <span className="font-medium text-slate-700">{providers.length}</span>
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {[
+            { key: 'all', label: 'All' },
+            { key: 'defaults', label: 'Defaults' },
+            ...providerTypes.map((type) => ({ key: type.id, label: type.name })),
+          ].map((chip) => (
+            <button
+              key={chip.key}
+              onClick={() => setProviderFilter(chip.key)}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                providerFilter === chip.key
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+          <button
+            onClick={() => { setProviderFilter('all'); setSearch(''); }}
+            disabled={providerFilter === 'all' && !search.trim()}
+            className="ml-auto rounded-full px-3 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:hover:bg-white"
+          >
+            Reset
+          </button>
         </div>
       </div>
 
@@ -374,12 +432,23 @@ export default function ProvidersPage() {
             </button>
           </div>
         )}
+        {providers.length > 0 && filteredProviders.length === 0 && (
+          <div className="col-span-full text-center py-12 bg-slate-50 rounded-xl border border-dashed border-slate-300">
+            <p className="text-slate-500">No providers match the current filters.</p>
+            <button
+              onClick={() => { setProviderFilter('all'); setSearch(''); }}
+              className="mt-4 inline-flex items-center gap-2 rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-900"
+            >
+              Clear Filters
+            </button>
+          </div>
+        )}
       </div>
       <div className="mt-6">
         <Pagination
           page={providersPage}
           pageSize={providersPageSize}
-          total={providers.length}
+          total={filteredProviders.length}
           onPageChange={setProvidersPage}
           onPageSizeChange={setProvidersPageSize}
           pageSizeOptions={[6, 9, 12, 18]}

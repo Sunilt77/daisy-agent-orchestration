@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Plus, Save, Trash2, X } from 'lucide-react';
+import { ArrowUpDown, Plus, Save, Search, Trash2, X } from 'lucide-react';
 import Pagination from '../components/Pagination';
 
 interface PricingRow {
@@ -18,6 +18,8 @@ export default function PricingPage() {
   const [newRow, setNewRow] = useState({ model: '', input_usd: '', output_usd: '' });
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  const [search, setSearch] = useState('');
+  const [sortBy, setSortBy] = useState<'model-asc' | 'model-desc' | 'input-desc' | 'output-desc'>('model-asc');
 
   const load = async () => {
     setLoading(true);
@@ -33,7 +35,7 @@ export default function PricingPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [rows.length]);
+  }, [rows.length, search, sortBy]);
 
   const startEdit = (row: PricingRow) => {
     setEditingId(row.id);
@@ -81,10 +83,26 @@ export default function PricingPage() {
     await load();
   };
 
+  const filteredRows = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    const next = rows.filter((row) => {
+      if (!query) return true;
+      return row.model.toLowerCase().includes(query);
+    });
+    const sorted = [...next];
+    sorted.sort((a, b) => {
+      if (sortBy === 'model-asc') return a.model.localeCompare(b.model);
+      if (sortBy === 'model-desc') return b.model.localeCompare(a.model);
+      if (sortBy === 'input-desc') return b.input_usd - a.input_usd;
+      return b.output_usd - a.output_usd;
+    });
+    return sorted;
+  }, [rows, search, sortBy]);
+
   const pagedRows = useMemo(() => {
     const start = (page - 1) * pageSize;
-    return rows.slice(start, start + pageSize);
-  }, [rows, page, pageSize]);
+    return filteredRows.slice(start, start + pageSize);
+  }, [filteredRows, page, pageSize]);
 
   return (
     <div>
@@ -123,12 +141,48 @@ export default function PricingPage() {
               <Plus size={16} /> Add Model
             </button>
           </div>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <div className="relative w-full max-w-sm">
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                className="w-full rounded-xl border border-slate-300 bg-white pl-10 pr-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                placeholder="Search model pricing..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+            <div className="relative">
+              <ArrowUpDown size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+                className="rounded-xl border border-slate-300 bg-white pl-8 pr-8 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+              >
+                <option value="model-asc">Model A-Z</option>
+                <option value="model-desc">Model Z-A</option>
+                <option value="input-desc">Highest Input Price</option>
+                <option value="output-desc">Highest Output Price</option>
+              </select>
+            </div>
+            <button
+              onClick={() => { setSearch(''); setSortBy('model-asc'); }}
+              disabled={!search.trim() && sortBy === 'model-asc'}
+              className="rounded-full px-3 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:hover:bg-white"
+            >
+              Reset
+            </button>
+            <div className="ml-auto text-xs text-slate-500">
+              <span className="font-semibold text-slate-700">{filteredRows.length}</span> visible of <span className="font-semibold text-slate-700">{rows.length}</span>
+            </div>
+          </div>
         </div>
 
         {loading ? (
           <div className="p-6 text-sm text-slate-500">Loading pricing...</div>
         ) : rows.length === 0 ? (
           <div className="p-6 text-sm text-slate-500">No pricing configured yet.</div>
+        ) : filteredRows.length === 0 ? (
+          <div className="p-6 text-sm text-slate-500">No model pricing matches the current search.</div>
         ) : (
           <table className="w-full text-sm text-left text-slate-700">
             <thead className="bg-slate-50 border-b border-slate-200">
@@ -217,7 +271,7 @@ export default function PricingPage() {
           <Pagination
             page={page}
             pageSize={pageSize}
-            total={rows.length}
+            total={filteredRows.length}
             onPageChange={setPage}
             onPageSizeChange={setPageSize}
             pageSizeOptions={[10, 20, 50]}

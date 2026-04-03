@@ -80,6 +80,7 @@ export default function CredentialsPage() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [selectedPresetKey, setSelectedPresetKey] = useState<'custom' | string>('custom');
   const [search, setSearch] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [credPage, setCredPage] = useState(1);
   const [credPageSize, setCredPageSize] = useState(10);
 
@@ -95,7 +96,7 @@ export default function CredentialsPage() {
 
   useEffect(() => {
     setCredPage(1);
-  }, [credentials.length, search]);
+  }, [credentials.length, search, categoryFilter]);
 
   useEffect(() => {
     if (isEditing) return;
@@ -120,8 +121,9 @@ export default function CredentialsPage() {
 
   const filteredCredentials = useMemo(() => {
     const query = search.trim().toLowerCase();
-    if (!query) return credentials;
     return credentials.filter((cred) => {
+      if (categoryFilter !== 'all' && (cred.category || 'general') !== categoryFilter) return false;
+      if (!query) return true;
       const haystack = [
         cred.provider,
         cred.name || '',
@@ -130,7 +132,15 @@ export default function CredentialsPage() {
       ].join(' ').toLowerCase();
       return haystack.includes(query);
     });
-  }, [credentials, search]);
+  }, [credentials, search, categoryFilter]);
+
+  const categoryCounts = useMemo(() => {
+    return credentials.reduce<Record<string, number>>((acc, cred) => {
+      const key = cred.category || 'general';
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+  }, [credentials]);
 
   const pagedCredentials = useMemo(() => {
     const start = (credPage - 1) * credPageSize;
@@ -388,6 +398,39 @@ export default function CredentialsPage() {
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search credentials by name, internal key, category, or header key..."
               />
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {[
+                { key: 'all', label: 'All' },
+                { key: 'general', label: `General (${categoryCounts.general || 0})` },
+                { key: 'http', label: `HTTP (${categoryCounts.http || 0})` },
+                { key: 'mcp', label: `MCP (${categoryCounts.mcp || 0})` },
+                { key: 'llm', label: `LLM (${categoryCounts.llm || 0})` },
+                { key: 'voice', label: `Voice (${categoryCounts.voice || 0})` },
+                { key: 'database', label: `Database (${categoryCounts.database || 0})` },
+              ].map((chip) => (
+                <button
+                  key={chip.key}
+                  onClick={() => setCategoryFilter(chip.key)}
+                  className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                    categoryFilter === chip.key
+                      ? 'bg-indigo-600 text-white shadow-sm'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  {chip.label}
+                </button>
+              ))}
+              <button
+                onClick={() => { setCategoryFilter('all'); setSearch(''); }}
+                disabled={categoryFilter === 'all' && !search.trim()}
+                className="ml-auto rounded-full px-3 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:hover:bg-white"
+              >
+                Reset
+              </button>
+            </div>
+            <div className="text-xs text-slate-500">
+              <span className="font-semibold text-slate-700">{filteredCredentials.length}</span> visible of <span className="font-semibold text-slate-700">{credentials.length}</span>
             </div>
           </div>
 

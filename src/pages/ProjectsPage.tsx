@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Folder, Plus, Trash2, DollarSign, Layers, Users, Link2, Loader2, ExternalLink, Check } from 'lucide-react';
+import { Folder, Plus, Trash2, DollarSign, Layers, Users, Link2, Loader2, ExternalLink, Check, Search } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import Pagination from '../components/Pagination';
 
@@ -38,6 +38,8 @@ export default function ProjectsPage() {
   const [isCreatingPlatformProject, setIsCreatingPlatformProject] = useState(false);
   const [projectsPage, setProjectsPage] = useState(1);
   const [projectsPageSize, setProjectsPageSize] = useState(8);
+  const [search, setSearch] = useState('');
+  const [projectFilter, setProjectFilter] = useState<'all' | 'linked' | 'unlinked' | 'ingest-target' | 'has-crews'>('all');
 
   useEffect(() => {
     fetchProjects();
@@ -47,12 +49,27 @@ export default function ProjectsPage() {
 
   useEffect(() => {
     setProjectsPage(1);
-  }, [projects.length]);
+  }, [projects.length, search, projectFilter]);
+
+  const filteredProjects = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return projects.filter((project) => {
+      const linkedPlatformId = platformLinks[project.id];
+      const isSelectedForIngest = !!linkedPlatformId && !!ingestProjectId && linkedPlatformId === ingestProjectId;
+      if (projectFilter === 'linked' && !linkedPlatformId) return false;
+      if (projectFilter === 'unlinked' && linkedPlatformId) return false;
+      if (projectFilter === 'ingest-target' && !isSelectedForIngest) return false;
+      if (projectFilter === 'has-crews' && project.crews_count <= 0) return false;
+      if (!query) return true;
+      const haystack = [project.name, project.description || ''].join(' ').toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [projects, platformLinks, ingestProjectId, search, projectFilter]);
 
   const pagedProjects = useMemo(() => {
     const start = (projectsPage - 1) * projectsPageSize;
-    return projects.slice(start, start + projectsPageSize);
-  }, [projects, projectsPage, projectsPageSize]);
+    return filteredProjects.slice(start, start + projectsPageSize);
+  }, [filteredProjects, projectsPage, projectsPageSize]);
 
   const projectInsights = useMemo(() => {
     return {
@@ -212,6 +229,51 @@ export default function ProjectsPage() {
         </div>
       </div>
 
+      <div className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="relative w-full max-w-md">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full rounded-xl border border-slate-300 bg-white pl-10 pr-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+              placeholder="Search projects by name or description..."
+            />
+          </div>
+          <div className="text-xs text-slate-500">
+            <span className="font-semibold text-slate-700">{filteredProjects.length}</span> visible of <span className="font-semibold text-slate-700">{projects.length}</span>
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {[
+            { key: 'all', label: 'All' },
+            { key: 'linked', label: 'Linked' },
+            { key: 'unlinked', label: 'Unlinked' },
+            { key: 'ingest-target', label: 'Ingestion Target' },
+            { key: 'has-crews', label: 'Has Crews' },
+          ].map((chip) => (
+            <button
+              key={chip.key}
+              onClick={() => setProjectFilter(chip.key as typeof projectFilter)}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                projectFilter === chip.key
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+          <button
+            onClick={() => { setProjectFilter('all'); setSearch(''); }}
+            disabled={projectFilter === 'all' && !search.trim()}
+            className="ml-auto rounded-full px-3 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:hover:bg-white"
+          >
+            Reset
+          </button>
+        </div>
+      </div>
+
       {isCreating && (
         <div className="mb-8 bg-white p-6 rounded-xl border border-slate-200 shadow-sm animate-in fade-in slide-in-from-top-4">
           <h3 className="text-lg font-semibold mb-4">Create New Project</h3>
@@ -347,11 +409,22 @@ export default function ProjectsPage() {
             </button>
           </div>
         )}
+        {projects.length > 0 && filteredProjects.length === 0 && (
+          <div className="col-span-full text-center py-12 bg-slate-50 rounded-xl border border-dashed border-slate-300">
+            <p className="text-slate-500">No projects match the current filters.</p>
+            <button
+              onClick={() => { setProjectFilter('all'); setSearch(''); }}
+              className="mt-4 inline-flex items-center gap-2 rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-900"
+            >
+              Clear Filters
+            </button>
+          </div>
+        )}
         <div className="col-span-full">
           <Pagination
             page={projectsPage}
             pageSize={projectsPageSize}
-            total={projects.length}
+            total={filteredProjects.length}
             onPageChange={setProjectsPage}
             onPageSizeChange={setProjectsPageSize}
           />
