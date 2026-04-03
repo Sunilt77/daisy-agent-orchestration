@@ -1050,7 +1050,10 @@ type AgentOptionalConfig =
     fetchProjects();
     fetchProviders();
 
-    const interval = setInterval(fetchAgents, 3000);
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      fetchAgents();
+    }, 3000);
     return () => clearInterval(interval);
   }, []);
 
@@ -1202,14 +1205,17 @@ type AgentOptionalConfig =
           }
 
           const reader = response.body?.getReader();
+          if (!reader) throw new Error('Streaming is not available in this browser');
           const decoder = new TextDecoder();
+          let buffer = '';
 
           while (true) {
-              const { done, value } = await reader!.read();
+              const { done, value } = await reader.read();
               if (done) break;
 
-              const chunk = decoder.decode(value);
-              const lines = chunk.split('\n');
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split('\n');
+              buffer = lines.pop() || '';
 
               for (const line of lines) {
                   if (line.startsWith('data: ')) {
@@ -1232,6 +1238,15 @@ type AgentOptionalConfig =
                       }
                   }
               }
+          }
+          const finalLine = buffer.trim();
+          if (finalLine.startsWith('data: ')) {
+            try {
+              const event = JSON.parse(finalLine.slice(6));
+              setBuildEvents((prev) => [...prev, event]);
+            } catch (e) {
+              console.error("Failed to parse final stream event", e);
+            }
           }
       } catch (e: any) {
           setBuildError(e.message);

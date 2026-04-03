@@ -4769,6 +4769,7 @@ app.get('/api/agents', requireUser, async (req, res) => {
       prisma.orchestratorMcpBundle.findMany({ orderBy: { name: 'asc' } }),
       prisma.orchestratorMcpExposedTool.findMany(),
     ]);
+    if (!agents.length) return res.json([]);
     const toolById = new Map(tools.map((tool) => [tool.id, tool]));
     const exposureByToolId = new Map(exposures.map((row) => [row.toolId, row]));
     const bundleById = new Map(bundles.map((bundle) => [bundle.id, bundle]));
@@ -4815,36 +4816,66 @@ app.get('/api/agents', requireUser, async (req, res) => {
       });
     }
 
-    const agentsWithDetails = await Promise.all(agents.map(async (agent) => {
-      const [stats, runningExecutions, pendingJobs] = await Promise.all([
-        getPrisma().orchestratorAgentExecution.aggregate({
-          where: { agentId: agent.id },
-          _sum: {
-            promptTokens: true,
-            completionTokens: true,
-            totalCost: true,
-          },
-        }),
-        getPrisma().orchestratorAgentExecution.count({
-          where: { agentId: agent.id, status: 'running' },
-        }),
-        getPrisma().orchestratorJobQueue.findMany({
-          where: { type: 'run_agent', status: 'pending' },
-          select: { payload: true },
-        }),
-      ]);
-      const queuedJobs = pendingJobs.reduce((count, row: any) => {
-        let payload: any = {};
-        try { payload = row.payload ? JSON.parse(row.payload) : {}; } catch {}
-        const payloadAgentId = Number(
-          payload?.agentId ??
-          payload?.agent_id ??
-          payload?.agent?.id ??
-          NaN
-        );
-        return payloadAgentId === agent.id ? count + 1 : count;
-      }, 0);
-      const config = await getProviderConfig(agent.provider);
+    const agentIds = agents.map((agent) => Number(agent.id)).filter((id) => Number.isFinite(id) && id > 0);
+    const agentIdSet = new Set<number>(agentIds);
+    const [executionSums, runningExecutionCounts, pendingJobs, providerConfigs] = await Promise.all([
+      prisma.orchestratorAgentExecution.groupBy({
+        by: ['agentId'],
+        where: { agentId: { in: agentIds } },
+        _sum: { promptTokens: true, completionTokens: true, totalCost: true },
+      }),
+      prisma.orchestratorAgentExecution.groupBy({
+        by: ['agentId'],
+        where: { agentId: { in: agentIds }, status: 'running' },
+        _count: { _all: true },
+      }),
+      prisma.orchestratorJobQueue.findMany({
+        where: { type: 'run_agent', status: 'pending' },
+        select: { payload: true },
+      }),
+      Promise.all(
+        Array.from(new Set(agents.map((agent) => String(agent.provider || 'google')))).map(async (providerKey) => ({
+          providerKey,
+          config: await getProviderConfig(providerKey),
+        })),
+      ),
+    ]);
+
+    const statsByAgentId = new Map<number, { promptTokens: number; completionTokens: number; totalCost: number }>();
+    for (const row of executionSums) {
+      statsByAgentId.set(Number(row.agentId), {
+        promptTokens: Number(row._sum.promptTokens || 0),
+        completionTokens: Number(row._sum.completionTokens || 0),
+        totalCost: Number(row._sum.totalCost || 0),
+      });
+    }
+
+    const runningByAgentId = new Map<number, number>();
+    for (const row of runningExecutionCounts) {
+      runningByAgentId.set(Number(row.agentId), Number(row._count._all || 0));
+    }
+
+    const queuedByAgentId = new Map<number, number>();
+    for (const row of pendingJobs as Array<{ payload: string | null }>) {
+      let payload: any = {};
+      try { payload = row.payload ? JSON.parse(row.payload) : {}; } catch {}
+      const payloadAgentId = Number(
+        payload?.agentId ??
+        payload?.agent_id ??
+        payload?.agent?.id ??
+        NaN
+      );
+      if (!agentIdSet.has(payloadAgentId)) continue;
+      queuedByAgentId.set(payloadAgentId, Number(queuedByAgentId.get(payloadAgentId) || 0) + 1);
+    }
+
+    const providerConfigByKey = new Map(providerConfigs.map(({ providerKey, config }) => [providerKey, config]));
+
+    const agentsWithDetails = agents.map((agent) => {
+      const stats = statsByAgentId.get(agent.id) || { promptTokens: 0, completionTokens: 0, totalCost: 0 };
+      const runningExecutions = Number(runningByAgentId.get(agent.id) || 0);
+      const queuedJobs = Number(queuedByAgentId.get(agent.id) || 0);
+      const config = providerConfigByKey.get(String(agent.provider || 'google')) || { source: 'missing', sourceName: undefined };
       const mcpTools = agentMcpToolsMap.get(agent.id) || [];
       const mcpBundles = agentMcpBundlesMap.get(agent.id) || [];
       return {
@@ -4872,9 +4903,9 @@ app.get('/api/agents', requireUser, async (req, res) => {
         updated_at: agent.updatedAt,
         tools: agentToolsMap.get(agent.id) || [],
         stats: {
-          prompt_tokens: Number(stats._sum.promptTokens || 0),
-          completion_tokens: Number(stats._sum.completionTokens || 0),
-          total_cost: Number(stats._sum.totalCost || 0),
+          prompt_tokens: Number(stats.promptTokens || 0),
+          completion_tokens: Number(stats.completionTokens || 0),
+          total_cost: Number(stats.totalCost || 0),
         },
         running_count: Number(runningExecutions || 0) + Number(queuedJobs || 0),
         credential_source: config.source,
@@ -4884,7 +4915,7 @@ app.get('/api/agents', requireUser, async (req, res) => {
         mcp_tools: mcpTools,
         mcp_bundles: mcpBundles,
       };
-    }));
+    });
     res.json(agentsWithDetails);
   } catch (e: any) {
     res.status(500).json({ error: e.message });
@@ -7360,9 +7391,15 @@ app.post('/mcp/call/:toolName', localRunLimiter, async (req, res) => {
 });
 
 // --- Agents ---
-app.post('/api/agents/autobuild', async (req, res) => {
+app.post('/api/agents/autobuild', requireUser, async (req, res) => {
     try {
         const { goal, project_id, provider = 'google', model = 'gemini-1.5-flash', stream = false, agent_role_preference = 'auto' } = req.body;
+        const purifiedProjectId = project_id && !isNaN(Number(project_id)) ? Number(project_id) : null;
+        const scope = await resolveOrchestratorAccessScope(req);
+        if (!scope.isAdmin && !purifiedProjectId) {
+            return res.status(400).json({ error: 'project_id is required for non-admin users' });
+        }
+        if (purifiedProjectId) requireVisibleProjectId(scope, purifiedProjectId);
 
         if (stream) {
             res.setHeader('Content-Type', 'text/event-stream');
@@ -7462,8 +7499,6 @@ app.post('/api/agents/autobuild', async (req, res) => {
         }
 
         sendEvent('status', { message: 'Deploying agent...', step: 3, design });
-
-        const purifiedProjectId = project_id && !isNaN(Number(project_id)) ? Number(project_id) : null;
 
         const created = await getPrisma().orchestratorAgent.create({
             data: {
