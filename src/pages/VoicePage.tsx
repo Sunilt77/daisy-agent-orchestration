@@ -184,6 +184,7 @@ export default function VoicePage() {
   const [presetSharedOrgIdsText, setPresetSharedOrgIdsText] = useState('');
   const [sessionAttachments, setSessionAttachments] = useState<SessionAttachment[]>([]);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
+  const [monitorTab, setMonitorTab] = useState<'conversation' | 'events'>('conversation');
   const [latencyMetrics, setLatencyMetrics] = useState<{
     sttToReplyMs: number | null;
     replyToTtsMs: number | null;
@@ -472,6 +473,14 @@ export default function VoicePage() {
       tone: 'bg-slate-50 border-slate-200 text-slate-900',
     };
   }, [vadEnabled, vadThreshold, minSpeechDurationMs, minSilenceDurationMs, vadSilenceThresholdSecs]);
+
+  const latencyTone = useMemo(() => {
+    const total = latencyMetrics.turnTotalMs;
+    if (total == null) return 'text-slate-300';
+    if (total <= 1800) return 'text-emerald-300';
+    if (total <= 3500) return 'text-amber-300';
+    return 'text-rose-300';
+  }, [latencyMetrics.turnTotalMs]);
 
   useEffect(() => {
     if (!availableTargets.some((target) => String(target.id) === String(targetId))) {
@@ -1059,7 +1068,7 @@ export default function VoicePage() {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="text-3xl font-black text-white">Voice Console</h1>
-            <p className="text-slate-300 mt-1">Test live STT/TTS sessions against your agents and crews over the platform WebSocket.</p>
+            <p className="text-slate-300 mt-1">Run realtime voice sessions with fast turn control, barge-in, and live latency feedback.</p>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -1070,6 +1079,16 @@ export default function VoicePage() {
             >
               {isConnected ? <PhoneOff size={14} /> : <PhoneCall size={14} />}
               {isConnected ? 'Disconnect' : 'Connect'}
+            </button>
+            <button
+              onClick={isRecording ? stopRecording : startRecording}
+              disabled={!isConnected}
+              className={`rounded-xl px-4 py-2 text-sm font-semibold text-white inline-flex items-center gap-2 disabled:opacity-40 ${
+                isRecording ? 'bg-red-500' : 'bg-emerald-600'
+              }`}
+            >
+              {isRecording ? <MicOff size={14} /> : <Mic size={14} />}
+              {isRecording ? 'Stop Mic' : 'Start Mic'}
             </button>
           </div>
         </div>
@@ -1098,7 +1117,7 @@ export default function VoicePage() {
         </div>
         <div className="rounded-2xl border border-white/10 bg-slate-950/88 px-4 py-4 text-white shadow-[0_18px_65px_rgba(15,23,42,0.28)]">
           <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Latency</div>
-          <div className="mt-2 text-sm font-semibold">
+          <div className={`mt-2 text-sm font-semibold ${latencyTone}`}>
             {latencyMetrics.sttToReplyMs != null ? `${latencyMetrics.sttToReplyMs}ms` : '--'}
           </div>
           <div className="mt-1 text-[11px] text-slate-400">
@@ -1398,7 +1417,17 @@ export default function VoicePage() {
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-4">
-            <div className="text-sm font-semibold text-slate-900">Realtime Voice Preview</div>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Realtime Voice Controls</div>
+                <div className="mt-1 text-xs text-slate-500">Use manual text, transcript commit, mic control, and attachments from one dock.</div>
+              </div>
+              <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                isConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'
+              }`}>
+                {isConnected ? 'Live' : 'Offline'}
+              </span>
+            </div>
             <input
               ref={attachmentInputRef}
               type="file"
@@ -1460,6 +1489,11 @@ export default function VoicePage() {
                 {uploadingAttachment ? 'Uploading…' : 'Attach Image / File'}
               </button>
             </div>
+            {pushToTalk ? (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+                Push-to-talk is active. Hold the green button or press and hold the space bar while speaking.
+              </div>
+            ) : null}
             {sessionAttachments.length > 0 ? (
               <div className="flex flex-wrap gap-2">
                 {sessionAttachments.map((attachment) => (
@@ -1516,65 +1550,85 @@ export default function VoicePage() {
 
         <section className="space-y-4">
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 mb-3">
-              <Radio size={16} className="text-cyan-600" />
-              Live Transcript and Reply
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                <Radio size={16} className="text-cyan-600" />
+                Live Monitor
+              </div>
+              <div className="inline-flex rounded-xl border border-slate-200 bg-slate-50 p-1">
+                <button
+                  type="button"
+                  onClick={() => setMonitorTab('conversation')}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${monitorTab === 'conversation' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'}`}
+                >
+                  Conversation
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMonitorTab('events')}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${monitorTab === 'events' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'}`}
+                >
+                  Event Stream
+                </button>
+              </div>
             </div>
-            <div className="grid grid-cols-1 gap-4">
-              <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-700">Voice Progress</div>
-                <div className="mt-2 space-y-2">
-                  {voiceProgress.length ? voiceProgress.map((item) => (
-                    <div key={item.id} className="rounded-xl bg-white/70 px-3 py-2 text-sm text-slate-800 border border-amber-100">
-                      <div>{item.text}</div>
-                      <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-400">{new Date(item.ts).toLocaleTimeString()}</div>
+            {monitorTab === 'conversation' ? (
+              <div className="grid grid-cols-1 gap-4">
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-700">Voice Progress</div>
+                  <div className="mt-2 space-y-2">
+                    {voiceProgress.length ? voiceProgress.map((item) => (
+                      <div key={item.id} className="rounded-xl bg-white/70 px-3 py-2 text-sm text-slate-800 border border-amber-100">
+                        <div>{item.text}</div>
+                        <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-400">{new Date(item.ts).toLocaleTimeString()}</div>
+                      </div>
+                    )) : (
+                      <div className="text-sm text-slate-500">Short spoken progress updates will appear here during long runs.</div>
+                    )}
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Transcript</div>
+                  <div className="mt-2 text-sm text-slate-800 whitespace-pre-wrap min-h-[64px]">{liveTranscript || 'Waiting for transcript...'}</div>
+                </div>
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+                  <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700">
+                    <Bot size={12} />
+                    Agent Reply
+                  </div>
+                  <div className="mt-2 text-sm text-slate-800 whitespace-pre-wrap min-h-[100px]">{agentReply || 'Waiting for agent response...'}</div>
+                </div>
+                {lastAudioSrc ? (
+                  <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3">
+                    <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-700">
+                      <Volume2 size={12} />
+                      Synthesized Audio
+                    </div>
+                    <audio ref={audioRef} className="mt-3 w-full" controls src={lastAudioSrc} />
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-slate-200 bg-slate-950 text-slate-100 p-4">
+                <div className="flex items-center gap-2 text-sm font-semibold mb-3">
+                  <Activity size={16} className="text-emerald-400" />
+                  Session Events
+                </div>
+                <div className="max-h-[520px] overflow-auto space-y-2 font-mono text-xs">
+                  {events.length ? events.map((event) => (
+                    <div key={event.id} className="rounded-xl border border-white/5 bg-white/5 px-3 py-2">
+                      <div className="flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.18em] text-slate-400">
+                        <span>{event.type}</span>
+                        <span>{new Date(event.ts).toLocaleTimeString()}</span>
+                      </div>
+                      <pre className="mt-2 whitespace-pre-wrap text-slate-200">{JSON.stringify(event.payload, null, 2)}</pre>
                     </div>
                   )) : (
-                    <div className="text-sm text-slate-500">Short spoken progress updates will appear here during long runs.</div>
+                    <div className="text-slate-500">Connect a voice session to watch runtime events, transcripts, and TTS output.</div>
                   )}
                 </div>
               </div>
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Transcript</div>
-                <div className="mt-2 text-sm text-slate-800 whitespace-pre-wrap min-h-[64px]">{liveTranscript || 'Waiting for transcript...'}</div>
-              </div>
-              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3">
-                <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700">
-                  <Bot size={12} />
-                  Agent Reply
-                </div>
-                <div className="mt-2 text-sm text-slate-800 whitespace-pre-wrap min-h-[100px]">{agentReply || 'Waiting for agent response...'}</div>
-              </div>
-              {lastAudioSrc ? (
-                <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3">
-                  <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-700">
-                    <Volume2 size={12} />
-                    Synthesized Audio
-                  </div>
-                  <audio ref={audioRef} className="mt-3 w-full" controls src={lastAudioSrc} />
-                </div>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-slate-200 bg-slate-950 text-slate-100 p-5 shadow-sm">
-            <div className="flex items-center gap-2 text-sm font-semibold mb-3">
-              <Activity size={16} className="text-emerald-400" />
-              Session Events
-            </div>
-            <div className="max-h-[520px] overflow-auto space-y-2 font-mono text-xs">
-              {events.length ? events.map((event) => (
-                <div key={event.id} className="rounded-xl border border-white/5 bg-white/5 px-3 py-2">
-                  <div className="flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.18em] text-slate-400">
-                    <span>{event.type}</span>
-                    <span>{new Date(event.ts).toLocaleTimeString()}</span>
-                  </div>
-                  <pre className="mt-2 whitespace-pre-wrap text-slate-200">{JSON.stringify(event.payload, null, 2)}</pre>
-                </div>
-              )) : (
-                <div className="text-slate-500">Connect a voice session to watch runtime events, transcripts, and TTS output.</div>
-              )}
-            </div>
+            )}
           </div>
         </section>
       </div>
