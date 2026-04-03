@@ -240,13 +240,41 @@ const AgentCronModal = ({ agent, onClose }: { agent: Agent; onClose: () => void 
     const [saving, setSaving] = useState(false);
     const [message, setMessage] = useState('');
     const [error, setError] = useState('');
+    const [schedulePreset, setSchedulePreset] = useState<'every_n_minutes' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'custom'>('every_n_minutes');
+    const [intervalMinutes, setIntervalMinutes] = useState(15);
+    const [minute, setMinute] = useState(0);
+    const [hour, setHour] = useState(9);
+    const [dayOfWeek, setDayOfWeek] = useState(1);
+    const [dayOfMonth, setDayOfMonth] = useState(1);
     const [form, setForm] = useState({
         name: `${agent.name} schedule`,
         cron_expr: '*/15 * * * *',
         task: '',
         priority: 100,
-        enabled: true,
+        enabled: false,
     });
+
+    const generatedCronExpr = useMemo(() => {
+        const m = Math.max(0, Math.min(59, Number(minute) || 0));
+        const h = Math.max(0, Math.min(23, Number(hour) || 0));
+        const dom = Math.max(1, Math.min(31, Number(dayOfMonth) || 1));
+        const dow = Math.max(0, Math.min(6, Number(dayOfWeek) || 0));
+        const everyN = Math.max(1, Math.min(59, Number(intervalMinutes) || 1));
+        switch (schedulePreset) {
+            case 'every_n_minutes':
+                return `*/${everyN} * * * *`;
+            case 'hourly':
+                return `${m} * * * *`;
+            case 'daily':
+                return `${m} ${h} * * *`;
+            case 'weekly':
+                return `${m} ${h} * * ${dow}`;
+            case 'monthly':
+                return `${m} ${h} ${dom} * *`;
+            default:
+                return form.cron_expr.trim() || '*/15 * * * *';
+        }
+    }, [schedulePreset, intervalMinutes, minute, hour, dayOfWeek, dayOfMonth, form.cron_expr]);
 
     const loadJobs = async () => {
         setLoading(true);
@@ -264,6 +292,12 @@ const AgentCronModal = ({ agent, onClose }: { agent: Agent; onClose: () => void 
     };
 
     useEffect(() => { void loadJobs(); }, [agent.id]);
+
+    const applyGeneratedCron = () => {
+        setForm((prev) => ({ ...prev, cron_expr: generatedCronExpr }));
+        setMessage(`Cron expression set to: ${generatedCronExpr}`);
+        setError('');
+    };
 
     const createJob = async () => {
         if (!form.task.trim()) {
@@ -360,27 +394,137 @@ const AgentCronModal = ({ agent, onClose }: { agent: Agent; onClose: () => void 
                                 value={form.name}
                                 onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
                             />
-                            <input
-                                className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono"
-                                placeholder="*/15 * * * *"
-                                value={form.cron_expr}
-                                onChange={(e) => setForm((prev) => ({ ...prev, cron_expr: e.target.value }))}
-                            />
-                            <input
-                                type="number"
+                            <select
                                 className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                                placeholder="Priority"
+                                value={schedulePreset}
+                                onChange={(e) => setSchedulePreset(e.target.value as any)}
+                            >
+                                <option value="every_n_minutes">Every N Minutes</option>
+                                <option value="hourly">Hourly</option>
+                                <option value="daily">Daily</option>
+                                <option value="weekly">Weekly</option>
+                                <option value="monthly">Monthly</option>
+                                <option value="custom">Custom Cron</option>
+                            </select>
+                            <select
+                                className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
                                 value={form.priority}
                                 onChange={(e) => setForm((prev) => ({ ...prev, priority: Number(e.target.value) || 100 }))}
-                            />
+                            >
+                                <option value={50}>Low (50)</option>
+                                <option value={100}>Normal (100)</option>
+                                <option value={200}>High (200)</option>
+                                <option value={300}>Critical (300)</option>
+                            </select>
                             <label className="inline-flex items-center gap-2 text-sm text-slate-700">
                                 <input
                                     type="checkbox"
                                     checked={form.enabled}
                                     onChange={(e) => setForm((prev) => ({ ...prev, enabled: e.target.checked }))}
                                 />
-                                Enabled
+                                Enable now
                             </label>
+                        </div>
+
+                        {schedulePreset === 'every_n_minutes' && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                                <div>
+                                    <label className="block text-xs text-slate-600 mb-1">Interval (minutes)</label>
+                                    <input
+                                        type="number"
+                                        min={1}
+                                        max={59}
+                                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                        value={intervalMinutes}
+                                        onChange={(e) => setIntervalMinutes(Number(e.target.value) || 1)}
+                                    />
+                                </div>
+                                <div className="text-xs text-slate-600 mt-7">
+                                    Generated: <span className="font-mono">{generatedCronExpr}</span>
+                                </div>
+                            </div>
+                        )}
+
+                        {(schedulePreset === 'hourly' || schedulePreset === 'daily' || schedulePreset === 'weekly' || schedulePreset === 'monthly') && (
+                            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
+                                <div>
+                                    <label className="block text-xs text-slate-600 mb-1">Hour (0-23)</label>
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        max={23}
+                                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                        value={hour}
+                                        onChange={(e) => setHour(Number(e.target.value) || 0)}
+                                        disabled={schedulePreset === 'hourly'}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-slate-600 mb-1">Minute (0-59)</label>
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        max={59}
+                                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                        value={minute}
+                                        onChange={(e) => setMinute(Number(e.target.value) || 0)}
+                                    />
+                                </div>
+                                {schedulePreset === 'weekly' && (
+                                    <div>
+                                        <label className="block text-xs text-slate-600 mb-1">Day of Week</label>
+                                        <select
+                                            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                            value={dayOfWeek}
+                                            onChange={(e) => setDayOfWeek(Number(e.target.value))}
+                                        >
+                                            <option value={0}>Sunday</option>
+                                            <option value={1}>Monday</option>
+                                            <option value={2}>Tuesday</option>
+                                            <option value={3}>Wednesday</option>
+                                            <option value={4}>Thursday</option>
+                                            <option value={5}>Friday</option>
+                                            <option value={6}>Saturday</option>
+                                        </select>
+                                    </div>
+                                )}
+                                {schedulePreset === 'monthly' && (
+                                    <div>
+                                        <label className="block text-xs text-slate-600 mb-1">Day of Month</label>
+                                        <input
+                                            type="number"
+                                            min={1}
+                                            max={31}
+                                            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                            value={dayOfMonth}
+                                            onChange={(e) => setDayOfMonth(Number(e.target.value) || 1)}
+                                        />
+                                    </div>
+                                )}
+                                <div className="text-xs text-slate-600 mt-7 md:col-span-2">
+                                    Generated: <span className="font-mono">{generatedCronExpr}</span>
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3">
+                            <input
+                                className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono md:col-span-2"
+                                placeholder="*/15 * * * *"
+                                value={form.cron_expr}
+                                onChange={(e) => setForm((prev) => ({ ...prev, cron_expr: e.target.value }))}
+                            />
+                            <button
+                                type="button"
+                                onClick={applyGeneratedCron}
+                                disabled={schedulePreset === 'custom'}
+                                className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm font-semibold hover:bg-slate-50 disabled:opacity-40"
+                            >
+                                Confirm Generated Cron
+                            </button>
+                        </div>
+                        <div className="text-xs text-slate-500 mt-1">
+                            `100` means normal queue priority. Higher numbers run earlier. Cron currently supports 5 fields (minute hour day month weekday, UTC). Seconds are not supported yet.
                         </div>
                         <textarea
                             className="mt-3 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm h-24"

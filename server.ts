@@ -11477,7 +11477,7 @@ app.post('/api/agent-cron-jobs', requireUser, async (req, res) => {
     }
 
     parseCronExpression(cronExpr);
-    const enabled = req.body?.enabled !== false;
+    const enabled = req.body?.enabled === true;
     const priority = readJobPriority(req.body?.priority, JOB_PRIORITY.NORMAL);
     const tenantKey = readTenantKey(req.body?.tenant_key ?? scope.user.orgId ?? 'global');
     const nextRunAt = enabled ? getNextCronOccurrenceUtc(cronExpr, new Date()) : null;
