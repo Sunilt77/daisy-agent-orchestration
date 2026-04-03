@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Activity, Search } from 'lucide-react';
+import { Activity, Search, Link2 } from 'lucide-react';
 import Pagination from '../components/Pagination';
 
 type AgentExecutionRow = {
@@ -35,9 +35,11 @@ export default function AgentExecutionsPage() {
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
   const [status, setStatus] = useState('');
+  const [executionKind, setExecutionKind] = useState('');
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [copiedId, setCopiedId] = useState<number | null>(null);
 
   const statusParam = useMemo(() => status.trim().toLowerCase(), [status]);
   const queryParam = useMemo(() => query.trim(), [query]);
@@ -52,6 +54,7 @@ export default function AgentExecutionsPage() {
         params.set('page', String(page));
         params.set('pageSize', String(pageSize));
         if (statusParam) params.set('status', statusParam);
+        if (executionKind) params.set('execution_kind', executionKind);
         if (queryParam) params.set('q', queryParam);
 
         const res = await fetch(`/api/agent-executions?${params.toString()}`, { signal: controller.signal });
@@ -68,9 +71,20 @@ export default function AgentExecutionsPage() {
     };
     void load();
     return () => controller.abort();
-  }, [page, pageSize, statusParam, queryParam]);
+  }, [page, pageSize, statusParam, executionKind, queryParam]);
 
-  useEffect(() => setPage(1), [statusParam, queryParam, pageSize]);
+  useEffect(() => setPage(1), [statusParam, executionKind, queryParam, pageSize]);
+
+  const copyExecutionLink = async (id: number) => {
+    const url = `${window.location.origin}/agent-executions/${id}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId((value) => (value === id ? null : value)), 1500);
+    } catch {
+      setError('Failed to copy link');
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -85,7 +99,7 @@ export default function AgentExecutionsPage() {
       </div>
 
       <div className="rounded-2xl border border-slate-200 bg-white p-4">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           <div className="relative md:col-span-2">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
@@ -107,6 +121,17 @@ export default function AgentExecutionsPage() {
             <option value="failed">Failed</option>
             <option value="canceled">Canceled</option>
           </select>
+          <select
+            value={executionKind}
+            onChange={(e) => setExecutionKind(e.target.value)}
+            className="ui-select"
+          >
+            <option value="">All Kinds</option>
+            <option value="standard">Standard</option>
+            <option value="delegated_parent">Supervisor</option>
+            <option value="delegated_child">Delegate</option>
+            <option value="delegated_synthesis">Synthesis</option>
+          </select>
         </div>
       </div>
 
@@ -123,6 +148,7 @@ export default function AgentExecutionsPage() {
                 <th className="px-4 py-3">ID</th>
                 <th className="px-4 py-3">Agent</th>
                 <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Kind</th>
                 <th className="px-4 py-3">Task</th>
                 <th className="px-4 py-3 text-right">Tokens</th>
                 <th className="px-4 py-3 text-right">Cost</th>
@@ -137,6 +163,7 @@ export default function AgentExecutionsPage() {
                 const cost = Number(row.total_cost ?? row.totalCost ?? 0);
                 const createdAt = String(row.created_at ?? row.createdAt ?? '');
                 const task = String(row.task || '').trim();
+                const kind = String(row.execution_kind ?? row.executionKind ?? 'standard');
                 return (
                   <tr key={row.id} className="hover:bg-slate-50">
                     <td className="px-4 py-3 font-mono text-slate-900">#{row.id}</td>
@@ -146,6 +173,7 @@ export default function AgentExecutionsPage() {
                         {row.status || 'unknown'}
                       </span>
                     </td>
+                    <td className="px-4 py-3 text-xs text-slate-600">{kind}</td>
                     <td className="px-4 py-3 max-w-[360px] truncate" title={task || 'No task'}>
                       {task || <span className="text-slate-400">No task</span>}
                     </td>
@@ -153,12 +181,22 @@ export default function AgentExecutionsPage() {
                     <td className="px-4 py-3 text-right font-mono text-emerald-700">${cost.toFixed(6)}</td>
                     <td className="px-4 py-3 text-slate-500">{createdAt ? new Date(createdAt).toLocaleString() : '—'}</td>
                     <td className="px-4 py-3 text-right">
-                      <Link
-                        to={`/agent-executions/${row.id}`}
-                        className="text-xs px-3 py-1 rounded border border-slate-200 text-slate-700 hover:bg-slate-50"
-                      >
-                        Open
-                      </Link>
+                      <div className="inline-flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => copyExecutionLink(row.id)}
+                          className="text-xs px-3 py-1 rounded border border-slate-200 text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1"
+                        >
+                          <Link2 size={12} />
+                          {copiedId === row.id ? 'Copied' : 'Copy Link'}
+                        </button>
+                        <Link
+                          to={`/agent-executions/${row.id}`}
+                          className="text-xs px-3 py-1 rounded border border-slate-200 text-slate-700 hover:bg-slate-50"
+                        >
+                          Open
+                        </Link>
+                      </div>
                     </td>
                   </tr>
                 );

@@ -6041,11 +6041,14 @@ app.get('/api/agent-executions', requireUser, async (req, res) => {
     const page = Math.max(1, Number(req.query.page || 1));
     const pageSize = Math.min(100, Math.max(5, Number(req.query.pageSize || 20)));
     const status = String(req.query.status || '').trim().toLowerCase();
+    const executionKind = String(req.query.execution_kind || '').trim().toLowerCase();
     const q = String(req.query.q || '').trim();
+    const allowedExecutionKinds = new Set(['standard', 'delegated_parent', 'delegated_child', 'delegated_synthesis']);
 
     const where: any = {
       ...(scope.isAdmin ? {} : (visibleAgentIds.length ? { agentId: { in: visibleAgentIds } } : { id: -1 })),
       ...(status ? { status } : {}),
+      ...(allowedExecutionKinds.has(executionKind) ? { executionKind } : {}),
     };
     if (q) {
       where.OR = [
