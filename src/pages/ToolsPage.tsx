@@ -421,7 +421,7 @@ export default function ToolsPage() {
   const [buildEvents, setBuildEvents] = useState<ToolAutoBuildEvent[]>([]);
   
   // Dynamic config states
-  const [pythonCode, setPythonCode] = useState('print("Hello World")');
+  const [pythonCode, setPythonCode] = useState('result = "Hello World"');
   const [httpConfig, setHttpConfig] = useState({ method: 'GET', url: '', body: '' });
   const [httpHeaders, setHttpHeaders] = useState<HttpHeader[]>([{ key: '', value: '', isVariable: false }]);
   const [httpFormData, setHttpFormData] = useState<HttpHeader[]>([{ key: '', value: '', isVariable: false }]);
@@ -489,7 +489,7 @@ export default function ToolsPage() {
   const [mcpUrlWarning, setMcpUrlWarning] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>('All');
   const [typeFilter, setTypeFilter] = useState<string>('All');
-  const [quickFilter, setQuickFilter] = useState<'all' | 'http' | 'python' | 'mcp' | 'exposed'>('all');
+  const [quickFilter, setQuickFilter] = useState<'all' | 'http' | 'javascript' | 'mcp' | 'exposed'>('all');
   
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -503,6 +503,12 @@ export default function ToolsPage() {
   const [sharedUserIdsText, setSharedUserIdsText] = useState('');
   const [sharedOrgIdsText, setSharedOrgIdsText] = useState('');
 
+  const normalizeEditorType = (type: string): string => {
+    if (type === 'python') return 'javascript';
+    if (type === 'search' || type === 'calculator') return 'custom';
+    return type;
+  };
+
   useEffect(() => {
     const persisted = loadPersisted<any>(TOOLS_UI_KEY, {});
     if (persisted && typeof persisted === 'object') {
@@ -512,8 +518,8 @@ export default function ToolsPage() {
       if (typeof persisted.toolSearch === 'string') setToolSearch(persisted.toolSearch);
       if (typeof persisted.categoryFilter === 'string') setCategoryFilter(persisted.categoryFilter);
       if (typeof persisted.typeFilter === 'string') setTypeFilter(persisted.typeFilter);
-      if (typeof persisted.quickFilter === 'string' && ['all', 'http', 'python', 'mcp', 'exposed'].includes(persisted.quickFilter)) {
-        setQuickFilter(persisted.quickFilter as 'all' | 'http' | 'python' | 'mcp' | 'exposed');
+      if (typeof persisted.quickFilter === 'string' && ['all', 'http', 'javascript', 'mcp', 'exposed'].includes(persisted.quickFilter)) {
+        setQuickFilter(persisted.quickFilter as 'all' | 'http' | 'javascript' | 'mcp' | 'exposed');
       }
       if (persisted.formData) setFormData((prev) => ({ ...prev, ...persisted.formData }));
       if (typeof persisted.pythonCode === 'string') setPythonCode(persisted.pythonCode);
@@ -677,8 +683,8 @@ export default function ToolsPage() {
     if (quickFilter === 'http') {
       list = list.filter((t) => String(t.type || '').toLowerCase() === 'http');
     }
-    if (quickFilter === 'python') {
-      list = list.filter((t) => String(t.type || '').toLowerCase() === 'python');
+    if (quickFilter === 'javascript') {
+      list = list.filter((t) => String(t.type || '').toLowerCase() === 'javascript');
     }
     if (quickFilter === 'mcp') {
       list = list.filter((t) => ['mcp', 'mcp_stdio_proxy'].includes(String(t.type || '').toLowerCase()));
@@ -954,11 +960,12 @@ export default function ToolsPage() {
 
   const handleSelectTool = (tool: Tool) => {
       setSelectedToolId(tool.id);
+      const normalizedType = normalizeEditorType(tool.type || 'custom');
       setFormData({
           name: tool.name,
           description: tool.description,
           category: tool.category || 'General',
-          type: tool.type,
+          type: normalizedType,
           config: tool.config
       });
       setJsonError(null);
@@ -966,7 +973,7 @@ export default function ToolsPage() {
 
       try {
           const cfg = JSON.parse(tool.config);
-          if (tool.type === 'python') {
+          if (tool.type === 'python' || tool.type === 'javascript') {
               setPythonCode(cfg.code || '');
           } else if (tool.type === 'http') {
               setHttpConfig({ method: cfg.method || 'GET', url: cfg.url || '', body: cfg.body || '' });
@@ -1041,7 +1048,7 @@ export default function ToolsPage() {
   const handleCreateNew = () => {
       setSelectedToolId('new');
       setFormData({ name: '', description: '', category: 'General', type: 'custom', config: '{}' });
-      setPythonCode('print("Hello World")');
+      setPythonCode('result = "Hello World"');
       setHttpConfig({ method: 'GET', url: '', body: '' });
       setHttpHeaders([{ key: '', value: '', isVariable: false }]);
       setHttpFormData([{ key: '', value: '', isVariable: false }]);
@@ -1149,7 +1156,7 @@ export default function ToolsPage() {
     let finalConfig = {};
     
     try {
-        if (formData.type === 'python') {
+        if (formData.type === 'javascript') {
             finalConfig = { code: pythonCode };
         } else if (formData.type === 'http') {
             const headersObj: Record<string, string> = {};
@@ -1467,7 +1474,8 @@ export default function ToolsPage() {
   const getToolIcon = (type: string) => {
       switch (type) {
           case 'http': return <Globe size={18} />;
-          case 'python': return <Terminal size={18} />;
+          case 'javascript':
+            return <Terminal size={18} />;
           case 'mcp': return <Server size={18} />;
           default: return <Wrench size={18} />;
       }
@@ -1573,13 +1581,13 @@ export default function ToolsPage() {
                     {[
                       { key: 'all', label: 'All' },
                       { key: 'http', label: 'HTTP' },
-                      { key: 'python', label: 'Python' },
+                      { key: 'javascript', label: 'JavaScript' },
                       { key: 'mcp', label: 'MCP' },
                       { key: 'exposed', label: 'Exposed' },
                     ].map((chip) => (
                       <button
                         key={chip.key}
-                        onClick={() => setQuickFilter(chip.key as 'all' | 'http' | 'python' | 'mcp' | 'exposed')}
+                        onClick={() => setQuickFilter(chip.key as 'all' | 'http' | 'javascript' | 'mcp' | 'exposed')}
                         className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] transition-colors ${
                           quickFilter === chip.key
                             ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
@@ -1734,9 +1742,7 @@ export default function ToolsPage() {
                                           onChange={e => setFormData({...formData, type: e.target.value})}
                                       >
                                           <option value="custom">Custom Function</option>
-                                          <option value="search">Search</option>
-                                          <option value="calculator">Calculator</option>
-                                          <option value="python">Python Code</option>
+                                          <option value="javascript">JavaScript Code</option>
                                           <option value="http">HTTP Request</option>
                                           <option value="mcp">MCP Server</option>
                                           <option value="mcp_stdio_proxy">Local MCP Runtime Tool</option>
@@ -1986,15 +1992,15 @@ export default function ToolsPage() {
                                       </span>
                                   </div>
                                   
-                                  {formData.type === 'python' && (
+                                  {formData.type === 'javascript' && (
                                       <div>
-                                          <label className="block text-sm font-medium text-slate-700 mb-2">Python Script</label>
+                                          <label className="block text-sm font-medium text-slate-700 mb-2">JavaScript Script</label>
                                           <div className="rounded-lg overflow-hidden border border-slate-300 focus-within:ring-2 focus-within:ring-indigo-500">
                                               <div className="bg-slate-800 px-4 py-2 flex items-center gap-2">
                                                   <div className="w-3 h-3 rounded-full bg-red-500"></div>
                                                   <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
                                                   <div className="w-3 h-3 rounded-full bg-green-500"></div>
-                                                  <span className="text-xs text-slate-400 ml-2 font-mono">script.py</span>
+                                                  <span className="text-xs text-slate-400 ml-2 font-mono">script.js</span>
                                               </div>
                                               <textarea
                                                   className="w-full px-4 py-3 bg-slate-900 text-green-400 outline-none h-64 font-mono text-sm resize-y"
@@ -2003,7 +2009,7 @@ export default function ToolsPage() {
                                                   spellCheck={false}
                                               />
                                           </div>
-                                          <p className="text-xs text-slate-500 mt-2">The script will be executed in a secure sandbox. Print the final output you want returned to the agent.</p>
+                                          <p className="text-xs text-slate-500 mt-2">Set a value in <code className="bg-white px-1 rounded">result</code> (for example: <code className="bg-white px-1 rounded">result = new Date().toISOString()</code>). Tool inputs are available in <code className="bg-white px-1 rounded">args</code>.</p>
                                       </div>
                                   )}
 
@@ -2950,7 +2956,7 @@ export default function ToolsPage() {
                                       </div>
                                   )}
 
-                                  {['custom', 'search', 'calculator'].includes(formData.type) && (
+                                  {formData.type === 'custom' && (
                                       <div>
                                           <label className="block text-sm font-medium text-slate-700 mb-1">Raw JSON Config</label>
                                           <textarea

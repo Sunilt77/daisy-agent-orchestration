@@ -4926,8 +4926,8 @@ app.post('/api/tools/autobuild', requireUser, async (req, res) => {
     1. Propose tools that best enable the agents to accomplish the objective.
     2. Reuse existing tools if they already fit (by referencing existing_tool_id).
     3. Each tool can be assigned to multiple agents via assign_to_agent_ids.
-    4. Tool types supported: python, http, mcp, search, calculator, custom.
-    5. For python tools, config should include { "code": "python code" } and the code should read from a variable named args (dict).
+    4. Tool types supported: javascript, http, mcp, custom.
+    5. For javascript tools, config should include { "code": "JavaScript code" } and read inputs from the variable args.
     6. For http tools, config should include { "method": "GET|POST|PUT|DELETE", "url": "...", "headers": {...}, "body": "string or JSON" }.
     7. For mcp tools, config should include { "serverUrl": "...", "apiKey": "optional" }.
 
@@ -4938,7 +4938,7 @@ app.post('/api/tools/autobuild', requireUser, async (req, res) => {
           "name": "Tool Name",
           "description": "What it does",
           "category": "Short family or platform label like FB, Google, Research, CRM, Database",
-          "type": "python|http|mcp|search|calculator|custom",
+          "type": "javascript|http|mcp|custom",
           "config": { },
           "assign_to_agent_ids": [1,2],
           "existing_tool_id": 123
@@ -4996,23 +4996,23 @@ app.post('/api/tools/autobuild', requireUser, async (req, res) => {
       sendEvent('status', { message: `Tool plan capped at ${MAX_AUTOBUILD_TOOLS} items for safety.` });
     }
 
-    const supportedTypes = new Set(['python', 'http', 'mcp', 'search', 'calculator', 'custom']);
+    const supportedTypes = new Set(['javascript', 'http', 'mcp', 'custom']);
     const availableAgentIdSet = new Set((availableAgents as any[]).map((a: any) => Number(a.id)));
     const normalizeToolType = (toolDef: any) => {
       const raw = String(toolDef?.type || '').trim().toLowerCase();
-      if (['python', 'code', 'coding', 'script', 'python_script'].includes(raw)) return 'python';
+      if (['python', 'javascript', 'code', 'coding', 'script', 'python_script', 'js', 'node'].includes(raw)) return 'javascript';
       if (['http', 'http_request', 'api', 'rest', 'rest_api', 'webhook'].includes(raw)) return 'http';
       if (supportedTypes.has(raw)) return raw;
-      if (toolDef?.config?.code) return 'python';
+      if (toolDef?.config?.code) return 'javascript';
       if (toolDef?.config?.url || toolDef?.config?.endpoint) return 'http';
       return 'custom';
     };
     const normalizeToolConfig = (toolDef: any, normalizedType: string) => {
       const cfg = (toolDef && typeof toolDef.config === 'object' && toolDef.config !== null) ? { ...toolDef.config } : {};
-      if (normalizedType === 'python') {
+      if (normalizedType === 'javascript') {
         const code = typeof cfg.code === 'string' && cfg.code.trim()
           ? cfg.code
-          : 'result = args if isinstance(args, dict) else {"input": args}\nprint(result)';
+          : 'const payload = (args && typeof args === "object") ? args : { input: args }; result = payload;';
         return { code };
       }
       if (normalizedType === 'http') {
@@ -8660,7 +8660,12 @@ async function runPythonTool(code: string, args: any): Promise<string> {
       clearTimeout(timeout);
       if (finished) return;
       finished = true;
-      resolve(`[Python Error] ${err.message}`);
+      const msg = String(err?.message || '');
+      if (/ENOENT/i.test(msg)) {
+        resolve('[Python Error] python3 was not found in this runtime. Use an internal utility tool like "get_current_datetime" or install Python in the container.');
+        return;
+      }
+      resolve(`[Python Error] ${msg}`);
     });
 
     proc.on('close', (code) => {
@@ -8676,6 +8681,56 @@ async function runPythonTool(code: string, args: any): Promise<string> {
 
     proc.stdin.write(script);
     proc.stdin.end();
+  });
+}
+
+async function runJavascriptTool(code: string, args: any): Promise<string> {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as any;
+  const source = `'use strict';\nlet result;\n${String(code || '')}\nreturn result;`;
+  try {
+    const fn = new AsyncFunction('args', 'fetch', source);
+    const timeoutMs = 15000;
+    const output = await Promise.race([
+      fn(args ?? {}, fetch),
+      sleep(timeoutMs).then(() => {
+        throw new Error(`JavaScript tool timed out after ${timeoutMs}ms`);
+      }),
+    ]);
+    if (output == null) return '';
+    if (typeof output === 'string') return output;
+    try {
+      return JSON.stringify(output);
+    } catch {
+      return String(output);
+    }
+  } catch (error: any) {
+    return `[JavaScript Error] ${String(error?.message || error)}`;
+  }
+}
+
+function getCurrentDateTimeTool(args: any) {
+  const now = new Date();
+  const timezone = String(args?.timezone || 'UTC').trim() || 'UTC';
+  const locale = String(args?.locale || 'en-US').trim() || 'en-US';
+  const includeUnix = args?.include_unix !== false;
+
+  const formatted = new Intl.DateTimeFormat(locale, {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(now);
+
+  return JSON.stringify({
+    iso_utc: now.toISOString(),
+    formatted,
+    timezone,
+    locale,
+    unix_ms: includeUnix ? now.getTime() : undefined,
   });
 }
 
@@ -8997,9 +9052,13 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
   }
 
   if (tool.type === 'python') {
+    return '[Python Error] Python tools are deprecated in this runtime. Convert this tool to type "javascript" and keep code in config.code.';
+  }
+
+  if (tool.type === 'javascript') {
     const code = String(config?.code || '');
-    if (!code.trim()) return '[Python Error] No code provided in tool config.';
-    return runPythonTool(code, args);
+    if (!code.trim()) return '[JavaScript Error] No code provided in tool config.';
+    return runJavascriptTool(code, args);
   }
 
   if (tool.type === 'http') {
@@ -9026,6 +9085,9 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
       }
       if (fnName === 'curl_request') {
         return await curlRequestTool(args);
+      }
+      if (fnName === 'get_current_datetime') {
+        return getCurrentDateTimeTool(args);
       }
       if (fnName === 'delegate_to_agent') {
         return await delegateToAgentTool(args, execContext);
@@ -9073,12 +9135,8 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
     }
   }
 
-  if (tool.type === 'search') {
-    return await runSearchTool(args);
-  }
-
-  if (tool.type === 'calculator') {
-    return await runCalculatorTool(args);
+  if (tool.type === 'search' || tool.type === 'calculator') {
+    return '[Tool Error] Legacy "search" and "calculator" tool types are disabled. Recreate this tool as type "javascript" or "http".';
   }
 
   if (tool.type === 'knowledge_search') {
@@ -12493,6 +12551,26 @@ async function startServer() {
   async function ensureBuiltInInternalTools() {
     const prisma = getPrisma();
     const builtIns = [
+      {
+        name: 'get_current_datetime',
+        description: 'Return current date/time with UTC ISO, formatted local time, and optional unix timestamp.',
+        category: 'Utility',
+        type: 'internal',
+        config: {
+          method: 'get_current_datetime',
+          requiredArgs: [],
+          argSchema: {
+            timezone: 'string',
+            locale: 'string',
+            include_unix: 'boolean',
+          },
+          argDescriptions: {
+            timezone: 'Optional IANA timezone (for example: UTC, Asia/Kolkata, America/New_York). Default is UTC.',
+            locale: 'Optional locale for formatted output (for example: en-US).',
+            include_unix: 'Set false to omit unix_ms from the response.',
+          },
+        },
+      },
       {
         name: 'delegate_to_agent',
         description: 'Delegate a subtask to another agent so it can use its own tools and MCP bundles, then return the child result to the current agent.',
