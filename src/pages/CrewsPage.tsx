@@ -524,6 +524,12 @@ export default function CrewsPage() {
     }
     return selectedCrewAgents.find((agent) => agent.agent_role === 'supervisor') || selectedCrewAgents[0] || null;
   }, [selectedCrewAgents, formData.coordinator_agent_id]);
+  const resetCrewFilters = () => {
+    setCrewSearch('');
+    setProcessFilter('all');
+    setExposureFilter('all');
+    setCrewSortMode('size');
+  };
   const selectedSupervisorCount = useMemo(
     () => selectedCrewAgents.filter((agent) => agent.agent_role === 'supervisor').length,
     [selectedCrewAgents]
@@ -778,6 +784,30 @@ export default function CrewsPage() {
               <List size={16} />
             </button>
           </div>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {[
+            { label: 'All', onClick: () => { setProcessFilter('all'); setExposureFilter('all'); } },
+            { label: 'Hierarchical', onClick: () => setProcessFilter('hierarchical') },
+            { label: 'Parallel', onClick: () => setProcessFilter('parallel') },
+            { label: 'Exposed', onClick: () => setExposureFilter('exposed') },
+          ].map((chip) => (
+            <button
+              key={chip.label}
+              type="button"
+              onClick={chip.onClick}
+              className="px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50"
+            >
+              {chip.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={resetCrewFilters}
+            className="ml-auto px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50"
+          >
+            Reset Filters
+          </button>
         </div>
       </div>
 

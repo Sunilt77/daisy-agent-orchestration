@@ -1717,6 +1717,12 @@ type AgentOptionalConfig =
   const supervisorCount = useMemo(() => agents.filter((agent) => agent.agent_role === 'supervisor').length, [agents]);
   const specialistCount = useMemo(() => agents.filter((agent) => agent.agent_role !== 'supervisor').length, [agents]);
   const appOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+  const resetAgentFilters = () => {
+    setAgentSearch('');
+    setStatusFilter('all');
+    setArchitectureFilter('all');
+    setSortMode('activity');
+  };
 
   return (
     <div>
@@ -1835,6 +1841,30 @@ type AgentOptionalConfig =
               <List size={16} />
             </button>
           </div>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {[
+            { label: 'All', onClick: () => { setStatusFilter('all'); setArchitectureFilter('all'); } },
+            { label: 'Running', onClick: () => setStatusFilter('running') },
+            { label: 'Supervisors', onClick: () => setArchitectureFilter('supervisor') },
+            { label: 'Specialists', onClick: () => setArchitectureFilter('specialist') },
+          ].map((chip) => (
+            <button
+              key={chip.label}
+              type="button"
+              onClick={chip.onClick}
+              className="px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50"
+            >
+              {chip.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={resetAgentFilters}
+            className="ml-auto px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50"
+          >
+            Reset Filters
+          </button>
         </div>
       </div>
 
