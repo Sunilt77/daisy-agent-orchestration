@@ -626,6 +626,83 @@ function normalizeCrewProcess(value: unknown): 'sequential' | 'hierarchical' | '
   return 'sequential';
 }
 
+type CrewRoutingPolicy = {
+  allowPartialSuccess: boolean;
+  minSuccessfulUnits: number;
+  synthesisOnPartial: boolean;
+  failFastOnUnitError: boolean;
+  maxFailures: number | null;
+};
+
+function parseBooleanLike(value: unknown, fallback: boolean) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+  return fallback;
+}
+
+function parsePositiveIntLike(value: unknown): number | null {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  const rounded = Math.floor(numeric);
+  return rounded > 0 ? rounded : null;
+}
+
+function resolveCrewRoutingPolicy(
+  process: 'sequential' | 'hierarchical' | 'parallel',
+  totalUnits: number,
+  rawPolicy?: any
+): CrewRoutingPolicy {
+  const normalizedUnits = Math.max(1, Number.isFinite(totalUnits) ? Math.floor(totalUnits) : 1);
+  const defaults =
+    process === 'parallel'
+      ? {
+          allowPartialSuccess: true,
+          minSuccessfulUnits: Math.max(1, Math.ceil(normalizedUnits * 0.6)),
+          synthesisOnPartial: true,
+          failFastOnUnitError: false,
+          maxFailures: null as number | null,
+        }
+      : {
+          allowPartialSuccess: false,
+          minSuccessfulUnits: normalizedUnits,
+          synthesisOnPartial: true,
+          failFastOnUnitError: false,
+          maxFailures: null as number | null,
+        };
+  const policy = rawPolicy && typeof rawPolicy === 'object' ? rawPolicy : {};
+  const allowPartialSuccess = parseBooleanLike(
+    policy.allowPartialSuccess ?? policy.allow_partial_success,
+    defaults.allowPartialSuccess
+  );
+  const requestedMinSuccess = parsePositiveIntLike(
+    policy.minSuccessfulUnits ?? policy.min_successful_units ?? policy.quorum
+  );
+  const minSuccessfulUnits = Math.max(
+    1,
+    Math.min(
+      normalizedUnits,
+      requestedMinSuccess ?? defaults.minSuccessfulUnits
+    )
+  );
+  return {
+    allowPartialSuccess,
+    minSuccessfulUnits,
+    synthesisOnPartial: parseBooleanLike(
+      policy.synthesisOnPartial ?? policy.synthesis_on_partial,
+      defaults.synthesisOnPartial
+    ),
+    failFastOnUnitError: parseBooleanLike(
+      policy.failFastOnUnitError ?? policy.fail_fast_on_unit_error ?? policy.fail_fast,
+      defaults.failFastOnUnitError
+    ),
+    maxFailures: parsePositiveIntLike(policy.maxFailures ?? policy.max_failures),
+  };
+}
+
 function getCancelToken(map: Map<number, CancelToken>, id: number) {
   const existing = map.get(id);
   if (existing) return existing;
@@ -710,6 +787,7 @@ async function startDelegatedExecution(options: {
   sessionId?: string;
   userId?: string;
   source?: string;
+  routingPolicy?: CrewRoutingPolicy | null;
 }) {
   const parentExecutionId = await createDelegatedParentExecution({
     supervisorAgentId: Number(options.supervisorAgent.id),
@@ -728,6 +806,7 @@ async function startDelegatedExecution(options: {
     synthesize: options.synthesize !== false,
     sessionId: options.sessionId,
     userId: options.userId,
+    routingPolicy: options.routingPolicy ?? null,
   });
   delegatedExecutionPromises.set(parentExecutionId, workflow.then(() => undefined));
   return { parentExecutionId, workflow };
@@ -8664,6 +8743,7 @@ async function runDelegatedAgentExecution(options: {
   synthesize?: boolean;
   sessionId?: string;
   userId?: string;
+  routingPolicy?: CrewRoutingPolicy | null;
 }) {
   const {
     supervisorAgent,
@@ -8674,6 +8754,7 @@ async function runDelegatedAgentExecution(options: {
     synthesize = true,
     sessionId,
     userId,
+    routingPolicy,
   } = options;
   const cancelToken = getCancelToken(agentCancelTokens, parentExecutionId);
   const childExecutionIds: number[] = [];
@@ -8807,17 +8888,23 @@ async function runDelegatedAgentExecution(options: {
     }
 
     const finalDelegations = await getDelegationRows(parentExecutionId);
-    const completedDelegates = finalDelegations.filter((row) => row.role === 'delegate' && row.status === 'completed');
-    const failedDelegates = finalDelegations.filter((row) => row.role === 'delegate' && row.status !== 'completed');
-    const summary = summarizeDelegationResults(finalDelegations.filter((row) => row.role === 'delegate'));
+    const delegateRows = finalDelegations.filter((row) => row.role === 'delegate');
+    const completedDelegates = delegateRows.filter((row) => row.status === 'completed');
+    const failedDelegates = delegateRows.filter((row) => row.status !== 'completed');
+    const summary = summarizeDelegationResults(delegateRows);
+    const delegationPolicy = resolveCrewRoutingPolicy('hierarchical', Math.max(1, delegateRows.length), routingPolicy || {});
+    const meetsQuorum = completedDelegates.length >= delegationPolicy.minSuccessfulUnits;
 
     let finalText = summary || 'No delegate output was produced.';
-    let finalStatus: 'completed' | 'failed' | 'canceled' = failedDelegates.length ? 'failed' : 'completed';
+    let finalStatus: 'completed' | 'failed' | 'canceled' =
+      (!delegationPolicy.allowPartialSuccess && failedDelegates.length)
+        ? 'failed'
+        : (meetsQuorum ? 'completed' : 'failed');
 
     if (cancelToken.canceled) {
       finalStatus = 'canceled';
       finalText = cancelToken.reason || 'Delegated execution canceled';
-    } else if (synthesize && completedDelegates.length) {
+    } else if (synthesize && completedDelegates.length && (delegationPolicy.synthesisOnPartial || failedDelegates.length === 0 || meetsQuorum)) {
       const synthesisAgent = db.prepare('SELECT * FROM agents WHERE id = ?').get(Number(synthesisAgentId || supervisorAgent.id)) as any;
       if (!synthesisAgent) {
         throw new Error(`Synthesis agent ${synthesisAgentId || supervisorAgent.id} not found`);
@@ -8852,7 +8939,10 @@ async function runDelegatedAgentExecution(options: {
         },
       });
       finalText = synthesisResult.text;
-      finalStatus = failedDelegates.length && !completedDelegates.length ? 'failed' : 'completed';
+      finalStatus =
+        (!delegationPolicy.allowPartialSuccess && failedDelegates.length)
+          ? 'failed'
+          : (completedDelegates.length >= delegationPolicy.minSuccessfulUnits ? 'completed' : 'failed');
     } else if (failedDelegates.length && !completedDelegates.length) {
       finalText = summary || failedDelegates.map((row) => `${row.title || row.agent_name}: ${row.error || row.status}`).join('\n');
     }
@@ -8917,7 +9007,7 @@ async function processJob(job: { id: number; type: string; payload: any }) {
   }
 
   if (job.type === 'run_crew') {
-    const { crewId, executionId, initialInput, initiatedBy, retryOfExecutionId, userId } = job.payload || {};
+    const { crewId, executionId, initialInput, initiatedBy, retryOfExecutionId, userId, routingPolicy } = job.payload || {};
     await syncCrewExecutionStatus({
       db,
       prisma: getPrisma(),
@@ -8934,7 +9024,7 @@ async function processJob(job: { id: number; type: string; payload: any }) {
       executionId,
       initialInput || "",
       { initiatedBy: initiatedBy || 'queued_crew_run', userId: userId || undefined },
-      { retryOfExecutionId: retryOfExecutionId ?? null }
+      { retryOfExecutionId: retryOfExecutionId ?? null, routingPolicy: routingPolicy || null }
     );
     return { executionId };
   }
@@ -10056,7 +10146,7 @@ async function runCrewExecution(
   executionId: number | bigint,
   initialInput: string = "",
   invocation?: RunInvocation,
-  runMeta?: { retryOfExecutionId?: number | null }
+  runMeta?: { retryOfExecutionId?: number | null; routingPolicy?: any }
 ) {
     return tracer.startActiveSpan('runCrewExecution', async (span) => {
         span.setAttribute('crew.id', crewId.toString());
@@ -10064,11 +10154,11 @@ async function runCrewExecution(
         const cancelToken = getCancelToken(crewCancelTokens, Number(executionId));
         const prisma = getPrisma();
 
-        try {
-            const crewRow = db.prepare('SELECT process, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id FROM crews WHERE id = ?').get(crewId) as any;
-            const process = crewRow?.process || 'sequential';
-            const crewGuidance = buildCrewLearningGuidance(Number(crewId), invocation?.userId || null, initialInput);
-            let tasks = db.prepare('SELECT * FROM tasks WHERE crew_id = ? ORDER BY id ASC').all(crewId) as any[];
+	        try {
+	            const crewRow = db.prepare('SELECT process, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id FROM crews WHERE id = ?').get(crewId) as any;
+	            const process = crewRow?.process || 'sequential';
+	            const crewGuidance = buildCrewLearningGuidance(Number(crewId), invocation?.userId || null, initialInput);
+	            let tasks = db.prepare('SELECT * FROM tasks WHERE crew_id = ? ORDER BY id ASC').all(crewId) as any[];
             let generatedRuntimeTasks = 0;
             if (!tasks.length) {
                 const crewAgents = db.prepare(`
@@ -10097,10 +10187,15 @@ async function runCrewExecution(
             const taskOutputs: Array<{ agentName: string; agentRole: string; task: string; output: string }> = [];
             const parallelFailures: Array<{ step: number; agentName: string; task: string; error: string }> = [];
             const startedAt = Date.now();
-            const maxRuntimeMs = normalizeNumber(crewRow?.max_runtime_ms);
-            const maxCostUsd = normalizeNumber(crewRow?.max_cost_usd);
-            const maxToolCalls = normalizeNumber(crewRow?.max_tool_calls);
-            const isParallelProcess = process === 'parallel';
+	            const maxRuntimeMs = normalizeNumber(crewRow?.max_runtime_ms);
+	            const maxCostUsd = normalizeNumber(crewRow?.max_cost_usd);
+	            const maxToolCalls = normalizeNumber(crewRow?.max_tool_calls);
+	            const isParallelProcess = process === 'parallel';
+	            const runtimeRoutingPolicy = resolveCrewRoutingPolicy(
+	              normalizeCrewProcess(process),
+	              Math.max(1, tasks.length || 1),
+	              runMeta?.routingPolicy || {}
+	            );
             
             // Helper to append logs safely
             let pendingCrewLogWrite = Promise.resolve();
@@ -10118,10 +10213,15 @@ async function runCrewExecution(
                     console.error('Failed to append crew execution log', error);
                   });
             };
-            const flushCrewLogWrites = async () => {
-              await pendingCrewLogWrite;
-            };
-            if (generatedRuntimeTasks > 0) {
+	            const flushCrewLogWrites = async () => {
+	              await pendingCrewLogWrite;
+	            };
+	            appendLog({
+	              type: 'crew_routing_policy',
+	              process,
+	              policy: runtimeRoutingPolicy,
+	            });
+	            if (generatedRuntimeTasks > 0) {
                 appendLog({
                   type: 'thought',
                   agent: 'system',
@@ -10196,6 +10296,7 @@ async function runCrewExecution(
                   synthesisAgentId: Number(coordinatorAgent.id),
                   synthesize: true,
                   source: 'crew_hierarchical',
+                  routingPolicy: runtimeRoutingPolicy,
                 });
 
                 appendLog({
@@ -10385,6 +10486,11 @@ async function runCrewExecution(
                         error: message,
                       });
                       appendLog({ type: 'error', agent: agent.name, task: task.description, message, mode: 'parallel' });
+                      if (runtimeRoutingPolicy.failFastOnUnitError) {
+                        cancelToken.canceled = true;
+                        cancelToken.reason = `Parallel fail-fast triggered by ${agent.name}`;
+                        return;
+                      }
                     }
                   }
                 };
@@ -10398,6 +10504,17 @@ async function runCrewExecution(
                     failed_tasks: parallelFailures.length,
                     failures: parallelFailures,
                   });
+                }
+                const successfulTasks = taskOutputs.length;
+                const failedTasks = parallelFailures.length;
+                if (runtimeRoutingPolicy.maxFailures != null && failedTasks > runtimeRoutingPolicy.maxFailures) {
+                  throw new Error(`Parallel run exceeded max failures (${failedTasks}/${runtimeRoutingPolicy.maxFailures}).`);
+                }
+                if (!runtimeRoutingPolicy.allowPartialSuccess && failedTasks > 0) {
+                  throw new Error(`Parallel run does not allow partial success and had ${failedTasks} failed task(s).`);
+                }
+                if (successfulTasks < runtimeRoutingPolicy.minSuccessfulUnits) {
+                  throw new Error(`Parallel quorum not met: ${successfulTasks} successful task(s), required ${runtimeRoutingPolicy.minSuccessfulUnits}.`);
                 }
                 await syncCrewExecutionMetrics({
                   db,
@@ -10585,7 +10702,7 @@ async function runCrewExecution(
                   message: `Synthesizing ${taskOutputs.length} task outputs into one cumulative crew answer.`,
                 });
 
-                if (synthesisAgent && taskOutputs.length > 1) {
+                if (synthesisAgent && taskOutputs.length > 1 && (runtimeRoutingPolicy.synthesisOnPartial || !parallelFailures.length)) {
                   const synthesisTask = {
                     description: [
                       crewGuidance ? `Crew Guidance:\n${crewGuidance}` : '',
@@ -10698,8 +10815,12 @@ function extractCrewFinalResult(logs: any[]): string {
 
 app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
   const crewId = req.params.id;
-  const { initialInput, wait, waitMs, pollMs } = req.body || {};
+  const { initialInput, wait, waitMs, pollMs, routing_policy, routingPolicy } = req.body || {};
   const userId = String((req as any)?.user?.id || '').trim() || null;
+  const requestedRoutingPolicy =
+    routing_policy && typeof routing_policy === 'object'
+      ? routing_policy
+      : (routingPolicy && typeof routingPolicy === 'object' ? routingPolicy : null);
   const prisma = getPrisma();
   
   // Create execution record
@@ -10731,6 +10852,7 @@ app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
     initialInput: initialInput || "",
     initiatedBy: 'crew_kickoff_http',
     userId,
+    routingPolicy: requestedRoutingPolicy,
   }, {
     priority: readJobPriority(req.body?.priority, JOB_PRIORITY.NORMAL),
     tenantKey: readTenantKey((req as any)?.user?.orgId || userId || 'global'),

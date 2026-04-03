@@ -73,6 +73,10 @@ export function registerRuntimeControlRoutes({
     const crew = hasValidCrewId
       ? await prisma.orchestratorCrew.findUnique({ where: { id: crewId } })
       : null;
+    const requestedRoutingPolicy =
+      req.body?.routing_policy && typeof req.body.routing_policy === 'object'
+        ? req.body.routing_policy
+        : (req.body?.routingPolicy && typeof req.body.routingPolicy === 'object' ? req.body.routingPolicy : null);
 
     const newExec = await createCrewExecutionRecord({
       db,
@@ -91,6 +95,7 @@ export function registerRuntimeControlRoutes({
         initialInput: exec.initialInput || '',
         initiatedBy: 'retry_crew_execution',
         retryOfExecutionId: executionId,
+        routingPolicy: requestedRoutingPolicy,
       });
       if (!shouldWaitForExecution(req)) {
         return acceptedExecutionResponse(res, { execution_id: newExecutionId, job_id: jobId });
@@ -118,6 +123,10 @@ export function registerRuntimeControlRoutes({
     const crew = hasValidCrewId
       ? await prisma.orchestratorCrew.findUnique({ where: { id: crewId } })
       : null;
+    const requestedRoutingPolicy =
+      req.body?.routing_policy && typeof req.body.routing_policy === 'object'
+        ? req.body.routing_policy
+        : (req.body?.routingPolicy && typeof req.body.routingPolicy === 'object' ? req.body.routingPolicy : null);
 
     const newExec = await createCrewExecutionRecord({
       db,
@@ -136,6 +145,7 @@ export function registerRuntimeControlRoutes({
         initialInput: exec.initialInput || '',
         initiatedBy: 'resume_crew_execution',
         retryOfExecutionId: executionId,
+        routingPolicy: requestedRoutingPolicy,
       });
       if (!shouldWaitForExecution(req)) {
         return acceptedExecutionResponse(res, { execution_id: newExecutionId, job_id: jobId });
