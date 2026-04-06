@@ -4972,14 +4972,6 @@ app.post('/api/tools/autobuild', requireUser, async (req, res) => {
         config: { responseMimeType: 'application/json' }
       }));
       text = response.text;
-    } else if (config.providerType === 'openai' || config.providerType === 'openai-compatible' || config.providerType === 'litellm') {
-      const openai = new OpenAI({ apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
-      const response = await withRetry(() => openai.chat.completions.create({
-        model: model,
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: "json_object" }
-      }));
-      text = response.choices[0].message.content || '';
     } else if (config.providerType === 'anthropic') {
       const anthropic = new Anthropic({ apiKey, baseURL: config.apiBase });
       const response = await withRetry(() => anthropic.messages.create({
@@ -4989,7 +4981,14 @@ app.post('/api/tools/autobuild', requireUser, async (req, res) => {
       }));
       if (response.content[0].type === 'text') text = response.content[0].text;
     } else {
-      throw new Error(`Provider ${config.providerType} not supported for tool auto-build.`);
+      // Default to OpenAI-compatible chat JSON mode for custom/third-party providers.
+      const openai = new OpenAI({ apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
+      const response = await withRetry(() => openai.chat.completions.create({
+        model: model,
+        messages: [{ role: 'user', content: prompt }],
+        response_format: { type: "json_object" }
+      }));
+      text = response.choices[0].message.content || '';
     }
 
     let design: any;
@@ -7889,15 +7888,6 @@ app.post('/api/agents/autobuild', requireUser, async (req, res) => {
                 }));
                 return response.text || '';
             }
-            if (config.providerType === 'openai') {
-                const openai = new OpenAI({ apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
-                const response = await withRetry(() => openai.chat.completions.create({
-                    model: model,
-                    messages: [{ role: 'user', content: inputPrompt }],
-                    response_format: { type: "json_object" }
-                }));
-                return response.choices[0].message.content || '';
-            }
             if (config.providerType === 'anthropic') {
                 const anthropic = new Anthropic({ apiKey, baseURL: config.apiBase });
                 const response = await withRetry(() => anthropic.messages.create({
@@ -7910,7 +7900,14 @@ app.post('/api/agents/autobuild', requireUser, async (req, res) => {
                 }
                 return '';
             }
-            throw new Error(`Provider ${config.providerType} not supported for agent auto-build.`);
+            // Default to OpenAI-compatible chat JSON mode for custom/third-party providers.
+            const openai = new OpenAI({ apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
+            const response = await withRetry(() => openai.chat.completions.create({
+                model: model,
+                messages: [{ role: 'user', content: inputPrompt }],
+                response_format: { type: "json_object" }
+            }));
+            return response.choices[0].message.content || '';
         };
 
         const tryParseJsonObject = (rawText: string): any => {
@@ -8139,14 +8136,6 @@ app.post('/api/crews/autobuild', async (req, res) => {
                 config: { responseMimeType: 'application/json' }
             }));
             text = response.text;
-        } else if (config.providerType === 'openai') {
-            const openai = new OpenAI({ apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
-            const response = await withRetry(() => openai.chat.completions.create({
-                model: model,
-                messages: [{ role: 'user', content: prompt }],
-                response_format: { type: "json_object" }
-            }));
-            text = response.choices[0].message.content || '';
         } else if (config.providerType === 'anthropic') {
             const anthropic = new Anthropic({ apiKey, baseURL: config.apiBase });
             const response = await withRetry(() => anthropic.messages.create({
@@ -8158,7 +8147,14 @@ app.post('/api/crews/autobuild', async (req, res) => {
                 text = response.content[0].text;
             }
         } else {
-             throw new Error(`Provider ${config.providerType} not fully supported for auto-build yet.`);
+            // Default to OpenAI-compatible chat JSON mode for custom/third-party providers.
+            const openai = new OpenAI({ apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
+            const response = await withRetry(() => openai.chat.completions.create({
+                model: model,
+                messages: [{ role: 'user', content: prompt }],
+                response_format: { type: "json_object" }
+            }));
+            text = response.choices[0].message.content || '';
         }
 
         let design;
