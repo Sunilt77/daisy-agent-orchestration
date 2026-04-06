@@ -1373,6 +1373,17 @@ export default function ToolsPage() {
     setSelectedToolIdsForDelete((prev) => Array.from(new Set([...prev, ...idsOnPage])));
   };
 
+  const toggleFilteredSelection = () => {
+    const idsInFilter = filteredTools.map((t) => t.id);
+    if (!idsInFilter.length) return;
+    const allSelected = idsInFilter.every((id) => selectedToolIdsForDelete.includes(id));
+    if (allSelected) {
+      setSelectedToolIdsForDelete((prev) => prev.filter((id) => !idsInFilter.includes(id)));
+      return;
+    }
+    setSelectedToolIdsForDelete((prev) => Array.from(new Set([...prev, ...idsInFilter])));
+  };
+
   const deleteSelectedTools = async () => {
     const ids = [...selectedToolIdsForDelete];
     if (!ids.length) return;
@@ -1652,6 +1663,15 @@ export default function ToolsPage() {
                       {pagedTools.length > 0 && pagedTools.every((tool) => selectedToolIdsForDelete.includes(tool.id))
                         ? 'Unselect Page'
                         : 'Select Page'}
+                    </button>
+                    <button
+                      onClick={toggleFilteredSelection}
+                      disabled={!filteredTools.length}
+                      className="text-[11px] px-2 py-1 rounded border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                    >
+                      {filteredTools.length > 0 && filteredTools.every((tool) => selectedToolIdsForDelete.includes(tool.id))
+                        ? 'Unselect Filtered'
+                        : 'Select Filtered'}
                     </button>
                     <button
                       onClick={() => { setShowBulkDeleteConfirm(true); setBulkDeleteError(null); }}
