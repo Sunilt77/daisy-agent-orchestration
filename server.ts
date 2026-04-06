@@ -155,6 +155,9 @@ function packageToBaseName(input: string) {
 function compactMcpPackageAlias(input: string) {
   const base = packageToBaseName(input)
     .replace(/^npm_/, '')
+    .replace(/_cloud_api$/i, '')
+    .replace(/_cloud$/i, '')
+    .replace(/_api$/i, '')
     .replace(/_mcp_server$/i, '')
     .replace(/_mcp$/i, '')
     .replace(/_server$/i, '');
@@ -167,9 +170,42 @@ function buildImportedMcpPrefix(packageName: string, namePrefix?: string) {
   return compactMcpPackageAlias(packageName);
 }
 
+function splitSlugTokens(input: string): string[] {
+  return slugifyValue(input).split('_').map((token) => token.trim()).filter(Boolean);
+}
+
+function stripLeadingPrefixTokens(tokens: string[], prefix: string): string[] {
+  const prefixTokens = splitSlugTokens(prefix);
+  if (!prefixTokens.length) return tokens;
+  const output = [...tokens];
+  while (
+    output.length >= prefixTokens.length &&
+    prefixTokens.every((token, idx) => output[idx] === token)
+  ) {
+    output.splice(0, prefixTokens.length);
+  }
+  return output;
+}
+
+function normalizeImportedMcpToolSlug(prefix: string, mcpToolName: string) {
+  const rawTokens = splitSlugTokens(mcpToolName);
+  const withoutPrefix = stripLeadingPrefixTokens(rawTokens, prefix);
+  const deduped: string[] = [];
+  for (const token of withoutPrefix) {
+    if (!deduped.length || deduped[deduped.length - 1] !== token) deduped.push(token);
+  }
+  return deduped.length ? deduped.join('_') : 'tool';
+}
+
+function humanizeSlug(input: string): string {
+  const tokens = splitSlugTokens(input);
+  if (!tokens.length) return 'MCP';
+  return tokens.map((token) => token.charAt(0).toUpperCase() + token.slice(1)).join(' ');
+}
+
 function buildImportedMcpExposedName(prefix: string, mcpToolName: string) {
   const cleanPrefix = slugifyValue(prefix) || 'mcp';
-  const cleanToolName = slugifyValue(mcpToolName) || 'tool';
+  const cleanToolName = normalizeImportedMcpToolSlug(cleanPrefix, mcpToolName);
   return `${cleanPrefix}_${cleanToolName}`;
 }
 
@@ -4568,7 +4604,8 @@ app.post('/api/tools/import-mcp-package', requireUser, async (req, res) => {
     for (const discoveredTool of discoveredTools) {
       const mcpToolName = String((discoveredTool as any)?.name || '').trim();
       if (!mcpToolName) continue;
-      const localToolName = `${resolvedPrefix}_${slugifyValue(mcpToolName) || 'tool'}`;
+      const normalizedToolSlug = normalizeImportedMcpToolSlug(resolvedPrefix, mcpToolName);
+      const localToolName = `${resolvedPrefix}_${normalizedToolSlug}`;
       const toolDescription = String((discoveredTool as any)?.description || '').trim()
         || `Imported from npm MCP package "${normalizedPackageName}" as stdio tool "${mcpToolName}".`;
       const wrapped = buildWrappedStdioCommand(command, args);
@@ -4689,8 +4726,10 @@ app.post('/api/tools/import-mcp-package', requireUser, async (req, res) => {
     let createdBundle: { id: number; name: string; slug: string } | null = null;
     if (createBundle !== false && createdOrUpdatedTools.length) {
       const packageAlias = compactMcpPackageAlias(normalizedPackageName);
-      const resolvedBundleName = String(bundleName || `${normalizedPackageName} Bundle`).trim() || `${normalizedPackageName} Bundle`;
-      const resolvedBundleSlug = slugifyValue(bundleSlug || `${packageAlias}_bundle`) || `${packageAlias}_bundle`;
+      const defaultBundleName = `${humanizeSlug(resolvedPrefix || packageAlias)} MCP Bundle`;
+      const resolvedBundleName = String(bundleName || defaultBundleName).trim() || defaultBundleName;
+      const defaultBundleSlug = `${slugifyValue(resolvedPrefix || packageAlias)}_bundle`;
+      const resolvedBundleSlug = slugifyValue(bundleSlug || defaultBundleSlug) || defaultBundleSlug;
       const resolvedBundleDescription = typeof bundleDescription === 'string' && bundleDescription.trim()
         ? bundleDescription.trim()
         : `Imported bundle for npm MCP package "${normalizedPackageName}".`;
