@@ -12174,11 +12174,32 @@ app.get('/api/agent-executions/:id/stream', async (req, res) => {
       res.end();
       return;
     }
-    const tools = await getPrisma().orchestratorToolExecution.findMany({
+    const toolRows = await getPrisma().orchestratorToolExecution.findMany({
       where: { agentExecutionId: execId },
       orderBy: { id: 'asc' },
-      select: { id: true, toolName: true, status: true, durationMs: true, createdAt: true },
+      select: {
+        id: true,
+        toolName: true,
+        status: true,
+        durationMs: true,
+        createdAt: true,
+        error: true,
+        args: true,
+        result: true,
+        toolType: true,
+      },
     });
+    const tools = toolRows.map((row) => ({
+      id: row.id,
+      tool_name: row.toolName,
+      status: row.status,
+      duration_ms: row.durationMs,
+      created_at: row.createdAt,
+      error: row.error,
+      args: row.args,
+      result: row.result,
+      tool_type: row.toolType,
+    }));
     const delegations = await getDelegationRows(execId);
     const orchestration = await buildDelegationOrchestrationEvents(execId, delegations, String(exec.status || 'running'));
     res.write(`event: update\ndata: ${JSON.stringify({ execution: exec, tools, delegations, orchestration })}\n\n`);
