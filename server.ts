@@ -7879,41 +7879,121 @@ app.post('/api/agents/autobuild', requireUser, async (req, res) => {
         }
         `;
 
-        let text = '';
-        if (config.providerType === 'google') {
-            const ai = new GoogleGenAI({ apiKey });
-            const response = await withRetry(() => ai.models.generateContent({
-                model: model,
-                contents: prompt,
-                config: { responseMimeType: 'application/json' }
-            }));
-            text = response.text;
-        } else if (config.providerType === 'openai') {
-            const openai = new OpenAI({ apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
-            const response = await withRetry(() => openai.chat.completions.create({
-                model: model,
-                messages: [{ role: 'user', content: prompt }],
-                response_format: { type: "json_object" }
-            }));
-            text = response.choices[0].message.content || '';
-        } else if (config.providerType === 'anthropic') {
-            const anthropic = new Anthropic({ apiKey, baseURL: config.apiBase });
-            const response = await withRetry(() => anthropic.messages.create({
-                model: model,
-                max_tokens: 4096,
-                messages: [{ role: 'user', content: prompt }]
-            }));
-            if (response.content[0].type === 'text') {
-                text = response.content[0].text;
+        const generateDesignText = async (inputPrompt: string): Promise<string> => {
+            if (config.providerType === 'google') {
+                const ai = new GoogleGenAI({ apiKey });
+                const response = await withRetry(() => ai.models.generateContent({
+                    model: model,
+                    contents: inputPrompt,
+                    config: { responseMimeType: 'application/json' }
+                }));
+                return response.text || '';
             }
-        }
+            if (config.providerType === 'openai') {
+                const openai = new OpenAI({ apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
+                const response = await withRetry(() => openai.chat.completions.create({
+                    model: model,
+                    messages: [{ role: 'user', content: inputPrompt }],
+                    response_format: { type: "json_object" }
+                }));
+                return response.choices[0].message.content || '';
+            }
+            if (config.providerType === 'anthropic') {
+                const anthropic = new Anthropic({ apiKey, baseURL: config.apiBase });
+                const response = await withRetry(() => anthropic.messages.create({
+                    model: model,
+                    max_tokens: 4096,
+                    messages: [{ role: 'user', content: inputPrompt }]
+                }));
+                if (response.content[0].type === 'text') {
+                    return response.content[0].text || '';
+                }
+                return '';
+            }
+            throw new Error(`Provider ${config.providerType} not supported for agent auto-build.`);
+        };
 
-        let design;
+        const tryParseJsonObject = (rawText: string): any => {
+            const raw = String(rawText || '').trim();
+            if (!raw) throw new Error('Model returned empty output');
+            const unwrapped = raw.replace(/```json\n?|\n?```/g, "").trim();
+
+            try {
+                return JSON.parse(unwrapped);
+            } catch {
+                // Attempt to extract the first top-level JSON object from mixed output.
+                const start = unwrapped.indexOf('{');
+                if (start < 0) throw new Error('No JSON object found in model output');
+                let depth = 0;
+                let inString = false;
+                let escapeNext = false;
+                let end = -1;
+                for (let i = start; i < unwrapped.length; i += 1) {
+                    const ch = unwrapped[i];
+                    if (escapeNext) {
+                        escapeNext = false;
+                        continue;
+                    }
+                    if (ch === '\\') {
+                        escapeNext = true;
+                        continue;
+                    }
+                    if (ch === '"') {
+                        inString = !inString;
+                        continue;
+                    }
+                    if (inString) continue;
+                    if (ch === '{') depth += 1;
+                    if (ch === '}') {
+                        depth -= 1;
+                        if (depth === 0) {
+                            end = i;
+                            break;
+                        }
+                    }
+                }
+                if (end >= start) {
+                    return JSON.parse(unwrapped.slice(start, end + 1));
+                }
+                throw new Error('Incomplete JSON object in model output');
+            }
+        };
+
+        const ensureValidDesignShape = (design: any): any => {
+            if (!design || typeof design !== 'object') throw new Error('Invalid design payload');
+            const normalizedAgentRole = String(design.agent_role || '').trim().toLowerCase();
+            return {
+                name: String(design.name || '').trim() || 'Autobuilt Agent',
+                role: String(design.role || '').trim() || 'AI Specialist',
+                agent_role: normalizedAgentRole === 'supervisor' ? 'supervisor' : 'specialist',
+                goal: String(design.goal || '').trim() || normalizedGoal,
+                backstory: String(design.backstory || '').trim() || 'An AI agent designed automatically from the provided objective.',
+                system_prompt: String(design.system_prompt || '').trim() || 'Follow the stated goal, reason clearly, and return concise, reliable outputs.',
+            };
+        };
+
+        let design: any;
+        const initialText = await generateDesignText(prompt);
         try {
-            design = JSON.parse(text);
-        } catch (e) {
-            const jsonString = text.replace(/```json\n?|\n?```/g, "").trim();
-            design = JSON.parse(jsonString);
+            design = ensureValidDesignShape(tryParseJsonObject(initialText));
+        } catch (parseError: any) {
+            sendEvent('status', { message: 'Retrying design parsing with strict JSON mode...', step: 2 });
+            const repairPrompt = `
+Return ONLY a valid JSON object (no markdown, no commentary).
+
+Required keys:
+- name
+- role
+- agent_role ("specialist" or "supervisor")
+- goal
+- backstory
+- system_prompt
+
+Use this as source content and repair it into valid JSON:
+${initialText}
+`;
+            const repairedText = await generateDesignText(repairPrompt);
+            design = ensureValidDesignShape(tryParseJsonObject(repairedText));
         }
 
         sendEvent('status', { message: 'Deploying agent...', step: 3, design });
