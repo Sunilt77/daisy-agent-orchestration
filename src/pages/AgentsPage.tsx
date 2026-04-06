@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { Plus, Trash2, User, Brain, Target, ScrollText, Wrench, Edit, Globe, Terminal, Copy, Check, X, Folder, Activity, Key, Sparkles, Play, Loader2, ExternalLink, Gauge, Search, List, LayoutGrid, ArrowUpDown } from 'lucide-react';
+import { Plus, Trash2, User, Brain, Target, ScrollText, Wrench, Edit, Globe, Terminal, Copy, Check, X, Folder, Activity, Key, Sparkles, Play, Loader2, ExternalLink, Gauge, Search, List, LayoutGrid, ArrowUpDown, AudioLines, Radio, CalendarClock, RefreshCw, Power } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Pagination from '../components/Pagination';
 import { LiveAgentCard } from '../components/LiveAgentCard';
@@ -10,6 +10,36 @@ interface Tool {
   id: number;
   name: string;
 }
+
+interface VoiceConfigPreset {
+  id: number;
+  name: string;
+  voice_id: string;
+  tts_model_id: string;
+  stt_model_id: string;
+  output_format: string;
+  sample_rate: number;
+  language_code: string;
+  auto_tts: boolean;
+  notes?: string;
+  meta?: {
+    vad_enabled?: boolean;
+    vad_silence_threshold_secs?: number;
+    vad_threshold?: number;
+    min_speech_duration_ms?: number;
+    min_silence_duration_ms?: number;
+    max_tokens_to_recompute?: number;
+    browser_noise_suppression?: boolean;
+    browser_echo_cancellation?: boolean;
+    browser_auto_gain_control?: boolean;
+  };
+}
+
+const DEFAULT_VAD_SILENCE_THRESHOLD_SECS = 0.8;
+const DEFAULT_VAD_THRESHOLD = 0.6;
+const DEFAULT_MIN_SPEECH_DURATION_MS = 220;
+const DEFAULT_MIN_SILENCE_DURATION_MS = 420;
+const DEFAULT_MAX_TOKENS_TO_RECOMPUTE = 5;
 
 interface Agent {
   id: number;
@@ -30,6 +60,7 @@ interface Agent {
   retry_policy?: string | null;
   timeout_ms?: number | null;
   is_exposed: boolean;
+  learning_enabled?: boolean;
   project_id?: number;
   tools: Tool[];
   mcp_tool_ids?: number[];
@@ -76,6 +107,31 @@ interface AgentDelegation {
     error?: string | null;
     created_at?: string;
     updated_at?: string;
+}
+
+interface AutoBuildEvent {
+  type: 'status' | 'error' | 'done';
+  message?: string;
+  id?: number;
+  agent?: string;
+  timestamp?: string;
+  received_at?: string;
+}
+
+interface AgentCronJob {
+  id: number;
+  agent_id: number;
+  name: string;
+  cron_expr: string;
+  timezone: string;
+  task: string;
+  enabled: boolean;
+  priority: number;
+  tenant_key?: string;
+  next_run_at?: string | null;
+  last_run_at?: string | null;
+  last_status?: string | null;
+  last_error?: string | null;
 }
 
 function executionKindLabel(kind?: string) {
@@ -172,6 +228,370 @@ const AgentRunModal = ({ agent, onClose }: { agent: Agent; onClose: () => void }
                     >
                         {isRunning ? 'Running...' : 'Run'}
                     </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const AgentCronModal = ({ agent, onClose }: { agent: Agent; onClose: () => void }) => {
+    const [jobs, setJobs] = useState<AgentCronJob[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [message, setMessage] = useState('');
+    const [error, setError] = useState('');
+    const [schedulePreset, setSchedulePreset] = useState<'every_n_minutes' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'custom'>('every_n_minutes');
+    const [intervalMinutes, setIntervalMinutes] = useState(15);
+    const [minute, setMinute] = useState(0);
+    const [hour, setHour] = useState(9);
+    const [dayOfWeek, setDayOfWeek] = useState(1);
+    const [dayOfMonth, setDayOfMonth] = useState(1);
+    const [form, setForm] = useState({
+        name: `${agent.name} schedule`,
+        cron_expr: '*/15 * * * *',
+        task: '',
+        priority: 100,
+        enabled: false,
+    });
+
+    const generatedCronExpr = useMemo(() => {
+        const m = Math.max(0, Math.min(59, Number(minute) || 0));
+        const h = Math.max(0, Math.min(23, Number(hour) || 0));
+        const dom = Math.max(1, Math.min(31, Number(dayOfMonth) || 1));
+        const dow = Math.max(0, Math.min(6, Number(dayOfWeek) || 0));
+        const everyN = Math.max(1, Math.min(59, Number(intervalMinutes) || 1));
+        switch (schedulePreset) {
+            case 'every_n_minutes':
+                return `*/${everyN} * * * *`;
+            case 'hourly':
+                return `${m} * * * *`;
+            case 'daily':
+                return `${m} ${h} * * *`;
+            case 'weekly':
+                return `${m} ${h} * * ${dow}`;
+            case 'monthly':
+                return `${m} ${h} ${dom} * *`;
+            default:
+                return form.cron_expr.trim() || '*/15 * * * *';
+        }
+    }, [schedulePreset, intervalMinutes, minute, hour, dayOfWeek, dayOfMonth, form.cron_expr]);
+
+    const loadJobs = async () => {
+        setLoading(true);
+        setError('');
+        try {
+            const res = await fetch(`/api/agent-cron-jobs?agent_id=${agent.id}`);
+            const data = await res.json().catch(() => []);
+            if (!res.ok) throw new Error(data?.error || 'Failed to load schedules');
+            setJobs(Array.isArray(data) ? data : []);
+        } catch (e: any) {
+            setError(e.message || 'Failed to load schedules');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => { void loadJobs(); }, [agent.id]);
+
+    const applyGeneratedCron = () => {
+        setForm((prev) => ({ ...prev, cron_expr: generatedCronExpr }));
+        setMessage(`Cron expression set to: ${generatedCronExpr}`);
+        setError('');
+    };
+
+    const createJob = async () => {
+        if (!form.task.trim()) {
+            setError('Task is required');
+            return;
+        }
+        setSaving(true);
+        setError('');
+        setMessage('');
+        try {
+            const res = await fetch('/api/agent-cron-jobs', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    agent_id: agent.id,
+                    name: form.name.trim() || `${agent.name} schedule`,
+                    cron_expr: form.cron_expr.trim(),
+                    task: form.task.trim(),
+                    priority: Number(form.priority) || 100,
+                    enabled: !!form.enabled,
+                    timezone: 'UTC',
+                }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data?.error || 'Failed to create schedule');
+            setMessage('Schedule created');
+            setForm((prev) => ({ ...prev, task: '' }));
+            await loadJobs();
+        } catch (e: any) {
+            setError(e.message || 'Failed to create schedule');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const runNow = async (id: number) => {
+        setError('');
+        setMessage('');
+        try {
+            const res = await fetch(`/api/agent-cron-jobs/${id}/run-now`, { method: 'POST' });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data?.error || 'Failed to run schedule');
+            setMessage(`Queued job #${data?.job_id ?? ''}`.trim());
+            await loadJobs();
+        } catch (e: any) {
+            setError(e.message || 'Failed to run schedule');
+        }
+    };
+
+    const toggleEnabled = async (job: AgentCronJob) => {
+        setError('');
+        try {
+            const res = await fetch(`/api/agent-cron-jobs/${job.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: !job.enabled }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data?.error || 'Failed to update schedule');
+            await loadJobs();
+        } catch (e: any) {
+            setError(e.message || 'Failed to update schedule');
+        }
+    };
+
+    const deleteJob = async (id: number) => {
+        if (!confirm('Delete this schedule?')) return;
+        setError('');
+        try {
+            const res = await fetch(`/api/agent-cron-jobs/${id}`, { method: 'DELETE' });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data?.error || 'Failed to delete schedule');
+            await loadJobs();
+        } catch (e: any) {
+            setError(e.message || 'Failed to delete schedule');
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+            <div className="bg-white rounded-xl shadow-xl w-[min(96vw,1280px)] max-h-[92vh] overflow-y-auto">
+                <div className="flex justify-between items-center p-6 border-b border-slate-100">
+                    <h3 className="text-xl font-bold text-slate-900">Agent Schedules: {agent.name}</h3>
+                    <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+                        <X size={24} />
+                    </button>
+                </div>
+                <div className="p-6 space-y-4">
+                    <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4">
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                            <input
+                                className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                placeholder="Schedule name"
+                                value={form.name}
+                                onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+                            />
+                            <select
+                                className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                value={schedulePreset}
+                                onChange={(e) => setSchedulePreset(e.target.value as any)}
+                            >
+                                <option value="every_n_minutes">Every N Minutes</option>
+                                <option value="hourly">Hourly</option>
+                                <option value="daily">Daily</option>
+                                <option value="weekly">Weekly</option>
+                                <option value="monthly">Monthly</option>
+                                <option value="custom">Custom Cron</option>
+                            </select>
+                            <select
+                                className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                value={form.priority}
+                                onChange={(e) => setForm((prev) => ({ ...prev, priority: Number(e.target.value) || 100 }))}
+                            >
+                                <option value={50}>Low (50)</option>
+                                <option value={100}>Normal (100)</option>
+                                <option value={200}>High (200)</option>
+                                <option value={300}>Critical (300)</option>
+                            </select>
+                            <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                                <input
+                                    type="checkbox"
+                                    checked={form.enabled}
+                                    onChange={(e) => setForm((prev) => ({ ...prev, enabled: e.target.checked }))}
+                                />
+                                Enable now
+                            </label>
+                        </div>
+
+                        {schedulePreset === 'every_n_minutes' && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                                <div>
+                                    <label className="block text-xs text-slate-600 mb-1">Interval (minutes)</label>
+                                    <input
+                                        type="number"
+                                        min={1}
+                                        max={59}
+                                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                        value={intervalMinutes}
+                                        onChange={(e) => setIntervalMinutes(Number(e.target.value) || 1)}
+                                    />
+                                </div>
+                                <div className="text-xs text-slate-600 mt-7">
+                                    Generated: <span className="font-mono">{generatedCronExpr}</span>
+                                </div>
+                            </div>
+                        )}
+
+                        {(schedulePreset === 'hourly' || schedulePreset === 'daily' || schedulePreset === 'weekly' || schedulePreset === 'monthly') && (
+                            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
+                                <div>
+                                    <label className="block text-xs text-slate-600 mb-1">Hour (0-23)</label>
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        max={23}
+                                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                        value={hour}
+                                        onChange={(e) => setHour(Number(e.target.value) || 0)}
+                                        disabled={schedulePreset === 'hourly'}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-slate-600 mb-1">Minute (0-59)</label>
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        max={59}
+                                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                        value={minute}
+                                        onChange={(e) => setMinute(Number(e.target.value) || 0)}
+                                    />
+                                </div>
+                                {schedulePreset === 'weekly' && (
+                                    <div>
+                                        <label className="block text-xs text-slate-600 mb-1">Day of Week</label>
+                                        <select
+                                            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                            value={dayOfWeek}
+                                            onChange={(e) => setDayOfWeek(Number(e.target.value))}
+                                        >
+                                            <option value={0}>Sunday</option>
+                                            <option value={1}>Monday</option>
+                                            <option value={2}>Tuesday</option>
+                                            <option value={3}>Wednesday</option>
+                                            <option value={4}>Thursday</option>
+                                            <option value={5}>Friday</option>
+                                            <option value={6}>Saturday</option>
+                                        </select>
+                                    </div>
+                                )}
+                                {schedulePreset === 'monthly' && (
+                                    <div>
+                                        <label className="block text-xs text-slate-600 mb-1">Day of Month</label>
+                                        <input
+                                            type="number"
+                                            min={1}
+                                            max={31}
+                                            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                                            value={dayOfMonth}
+                                            onChange={(e) => setDayOfMonth(Number(e.target.value) || 1)}
+                                        />
+                                    </div>
+                                )}
+                                <div className="text-xs text-slate-600 mt-7 md:col-span-2">
+                                    Generated: <span className="font-mono">{generatedCronExpr}</span>
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3">
+                            <input
+                                className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono md:col-span-2"
+                                placeholder="*/15 * * * *"
+                                value={form.cron_expr}
+                                onChange={(e) => setForm((prev) => ({ ...prev, cron_expr: e.target.value }))}
+                            />
+                            <button
+                                type="button"
+                                onClick={applyGeneratedCron}
+                                disabled={schedulePreset === 'custom'}
+                                className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm font-semibold hover:bg-slate-50 disabled:opacity-40"
+                            >
+                                Confirm Generated Cron
+                            </button>
+                        </div>
+                        <div className="text-xs text-slate-500 mt-1">
+                            `100` means normal queue priority. Higher numbers run earlier. Cron currently supports 5 fields (minute hour day month weekday, UTC). Seconds are not supported yet.
+                        </div>
+                        <textarea
+                            className="mt-3 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm h-24"
+                            placeholder="Task to execute on each cron tick"
+                            value={form.task}
+                            onChange={(e) => setForm((prev) => ({ ...prev, task: e.target.value }))}
+                        />
+                        <div className="mt-3 flex justify-end">
+                            <button
+                                onClick={createJob}
+                                disabled={saving}
+                                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-60 text-sm font-semibold"
+                            >
+                                {saving ? 'Saving...' : 'Create Schedule'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {error && <div className="text-sm text-red-600">{error}</div>}
+                    {message && <div className="text-sm text-emerald-700">{message}</div>}
+
+                    <div className="flex items-center justify-between">
+                        <div className="text-sm font-semibold text-slate-700">Existing schedules</div>
+                        <button onClick={loadJobs} className="inline-flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50">
+                            <RefreshCw size={14} />
+                            Refresh
+                        </button>
+                    </div>
+
+                    <div className="space-y-3">
+                        {loading && <div className="text-sm text-slate-500">Loading schedules...</div>}
+                        {!loading && jobs.length === 0 && (
+                            <div className="text-sm text-slate-500">No schedules configured for this agent.</div>
+                        )}
+                        {jobs.map((job) => (
+                            <div key={job.id} className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                                <div className="flex flex-wrap items-center justify-between gap-3">
+                                    <div>
+                                        <div className="text-sm font-semibold text-slate-900">{job.name}</div>
+                                        <div className="mt-1 text-xs text-slate-600 font-mono">{job.cron_expr} • {job.timezone}</div>
+                                        <div className="mt-1 text-xs text-slate-600">Next: {job.next_run_at ? new Date(job.next_run_at).toLocaleString() : 'disabled'}</div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button onClick={() => runNow(job.id)} className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700">
+                                            <Play size={12} />
+                                            Run Now
+                                        </button>
+                                        <button onClick={() => toggleEnabled(job)} className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-white">
+                                            <Power size={12} />
+                                            {job.enabled ? 'Pause' : 'Enable'}
+                                        </button>
+                                        <button onClick={() => deleteJob(job.id)} className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg border border-red-200 text-red-700 hover:bg-red-50">
+                                            <Trash2 size={12} />
+                                            Delete
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="mt-3 text-sm text-slate-700 whitespace-pre-wrap">{job.task}</div>
+                                {(job.last_status || job.last_error) && (
+                                    <div className="mt-2 text-xs text-slate-600">
+                                        Last status: <span className="font-semibold">{job.last_status || 'n/a'}</span>
+                                        {job.last_error ? ` • ${job.last_error}` : ''}
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
                 </div>
             </div>
         </div>
@@ -681,6 +1101,7 @@ const ConnectionModal = ({ agent, onClose }: { agent: Agent; onClose: () => void
     const [copied, setCopied] = useState(false);
     const origin = window.location.origin;
     const apiUrl = `${origin}/api/agents/${agent.id}/run`;
+    const voiceWsUrl = `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=agent&targetId=${agent.id}`;
     
     const curlCommand = `curl -X POST ${apiUrl} \\
   -H "Content-Type: application/json" \\
@@ -737,6 +1158,27 @@ const ConnectionModal = ({ agent, onClose }: { agent: Agent; onClose: () => void
                             </button>
                             <pre className="text-xs text-slate-300 font-mono overflow-x-auto whitespace-pre-wrap">
                                 {curlCommand}
+                            </pre>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h4 className="text-lg font-semibold text-slate-800 mb-3 flex items-center gap-2">
+                            <Radio size={18} className="text-cyan-600" />
+                            Voice WebSocket
+                        </h4>
+                        <p className="text-sm text-slate-600 mb-3">
+                            Connect a realtime voice client directly to this exposed agent over WebSocket.
+                        </p>
+                        <div className="bg-slate-900 rounded-lg p-4 relative group">
+                            <button 
+                                onClick={() => copyToClipboard(voiceWsUrl)}
+                                className="absolute top-3 right-3 text-slate-400 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                            >
+                                {copied ? <Check size={16} /> : <Copy size={16} />}
+                            </button>
+                            <pre className="text-xs text-slate-300 font-mono overflow-x-auto whitespace-pre-wrap">
+                                {voiceWsUrl}
                             </pre>
                         </div>
                     </div>
@@ -813,12 +1255,13 @@ async function safeJson(res: Response) {
 }
 
 export default function AgentsPage() {
-  type AgentOptionalConfig =
+type AgentOptionalConfig =
     | 'agent_role'
     | 'backstory'
     | 'goal'
     | 'system_prompt'
     | 'advanced'
+    | 'voice'
     | 'project'
     | 'tools'
     | 'mcp'
@@ -826,6 +1269,7 @@ export default function AgentsPage() {
   const AGENTS_UI_KEY = 'agents_ui_state_v1';
   const [agents, setAgents] = useState<Agent[]>([]);
   const [tools, setTools] = useState<Tool[]>([]);
+  const [voiceConfigs, setVoiceConfigs] = useState<VoiceConfigPreset[]>([]);
   const [mcpExposedTools, setMcpExposedTools] = useState<Array<{ tool_id: number; tool_name: string; exposed_name?: string; exposed_description?: string }>>([]);
   const [mcpBundles, setMcpBundles] = useState<Array<{ id: number; name: string; slug: string; description?: string }>>([]);
   const [isCreating, setIsCreating] = useState(false);
@@ -846,6 +1290,24 @@ export default function AgentsPage() {
     retry_policy: 'standard',
     timeout_ms: '',
     is_exposed: false,
+    learning_enabled: true,
+    voice_id: 'JBFqnCBsd6RMkjVDRZzb',
+    tts_model_id: 'eleven_multilingual_v2',
+    stt_model_id: 'scribe_v2_realtime',
+    voice_output_format: 'mp3_44100_128',
+    voice_sample_rate: '16000',
+    voice_language_code: 'en',
+    voice_auto_tts: true,
+    voice_vad_enabled: true,
+    voice_vad_silence_threshold_secs: '0.8',
+    voice_vad_threshold: '0.6',
+    voice_min_speech_duration_ms: '220',
+    voice_min_silence_duration_ms: '420',
+    voice_max_tokens_to_recompute: '5',
+    voice_browser_noise_suppression: true,
+    voice_browser_echo_cancellation: true,
+    voice_browser_auto_gain_control: false,
+    voice_preset_id: '',
     project_id: '' as string | number,
     toolIds: [] as number[],
     mcp_tool_ids: [] as number[],
@@ -875,6 +1337,7 @@ export default function AgentsPage() {
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [activityAgent, setActivityAgent] = useState<Agent | null>(null);
   const [runAgent, setRunAgent] = useState<Agent | null>(null);
+  const [cronAgent, setCronAgent] = useState<Agent | null>(null);
   const [delegateAgent, setDelegateAgent] = useState<Agent | null>(null);
   const [activityExecutionId, setActivityExecutionId] = useState<number | null>(null);
   const formRef = React.useRef<HTMLDivElement | null>(null);
@@ -883,6 +1346,7 @@ export default function AgentsPage() {
   const [agentSearch, setAgentSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'running' | 'idle'>('all');
   const [architectureFilter, setArchitectureFilter] = useState<'all' | 'supervisor' | 'specialist'>('all');
+  const [exposureFilter, setExposureFilter] = useState<'all' | 'exposed' | 'private'>('all');
   const [sortMode, setSortMode] = useState<'name' | 'activity' | 'cost'>('activity');
   const [agentView, setAgentView] = useState<'grid' | 'list'>('grid');
   const [visibleAgentConfigs, setVisibleAgentConfigs] = useState<AgentOptionalConfig[]>([]);
@@ -894,7 +1358,7 @@ export default function AgentsPage() {
   const [autoBuildGoal, setAutoBuildGoal] = useState('');
   const [isBuilding, setIsBuilding] = useState(false);
   const [buildError, setBuildError] = useState('');
-  const [buildEvents, setBuildEvents] = useState<{message: string, type: 'status' | 'error' | 'done', id?: number}[]>([]);
+  const [buildEvents, setBuildEvents] = useState<AutoBuildEvent[]>([]);
   const [autoBuildProvider, setAutoBuildProvider] = useState('google');
   const [autoBuildModel, setAutoBuildModel] = useState('gemini-1.5-flash');
   const [autoBuildArchitecture, setAutoBuildArchitecture] = useState<'auto' | 'specialist' | 'supervisor'>('auto');
@@ -909,8 +1373,9 @@ export default function AgentsPage() {
     { key: 'goal', label: 'Mission Goal' },
     { key: 'system_prompt', label: 'System Prompt' },
     { key: 'advanced', label: 'Advanced LLM Settings' },
-    { key: 'tools', label: 'Tools Access' },
-    { key: 'mcp', label: 'Direct MCP Connections' },
+    { key: 'voice', label: 'Voice Settings' },
+    { key: 'tools', label: 'Tool Access' },
+    { key: 'mcp', label: 'MCP Connections' },
   ];
 
   const showAgentConfig = (key: AgentOptionalConfig) => requiredAgentConfigs.includes(key) || visibleAgentConfigs.includes(key);
@@ -931,6 +1396,7 @@ export default function AgentsPage() {
       if (typeof persisted.agentSearch === 'string') setAgentSearch(persisted.agentSearch);
       if (persisted.statusFilter === 'all' || persisted.statusFilter === 'running' || persisted.statusFilter === 'idle') setStatusFilter(persisted.statusFilter);
       if (persisted.architectureFilter === 'all' || persisted.architectureFilter === 'supervisor' || persisted.architectureFilter === 'specialist') setArchitectureFilter(persisted.architectureFilter);
+      if (persisted.exposureFilter === 'all' || persisted.exposureFilter === 'exposed' || persisted.exposureFilter === 'private') setExposureFilter(persisted.exposureFilter);
       if (persisted.sortMode === 'name' || persisted.sortMode === 'activity' || persisted.sortMode === 'cost') setSortMode(persisted.sortMode);
       if (persisted.agentView === 'grid' || persisted.agentView === 'list') setAgentView(persisted.agentView);
       if (typeof persisted.isCreating === 'boolean') setIsCreating(persisted.isCreating);
@@ -955,6 +1421,7 @@ export default function AgentsPage() {
       agentSearch,
       statusFilter,
       architectureFilter,
+      exposureFilter,
       sortMode,
       agentView,
       isCreating,
@@ -965,23 +1432,31 @@ export default function AgentsPage() {
       autoBuildArchitecture,
       autoBuildProjectId,
     });
-  }, [stateReady, formData, agentsPage, agentsPageSize, agentSearch, statusFilter, architectureFilter, sortMode, agentView, isCreating, editingId, autoBuildGoal, autoBuildProvider, autoBuildModel, autoBuildArchitecture, autoBuildProjectId]);
+  }, [stateReady, formData, agentsPage, agentsPageSize, agentSearch, statusFilter, architectureFilter, exposureFilter, sortMode, agentView, isCreating, editingId, autoBuildGoal, autoBuildProvider, autoBuildModel, autoBuildArchitecture, autoBuildProjectId]);
 
   useEffect(() => {
     fetchAgents();
     fetchTools();
+    fetchVoiceConfigs();
     fetchMcpExposedTools();
     fetchMcpBundles();
     fetchProjects();
     fetchProviders();
 
-    const interval = setInterval(fetchAgents, 3000);
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      fetchAgents();
+    }, 3000);
     return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
     setAgentsPage(1);
   }, [agents.length]);
+
+  useEffect(() => {
+    setAgentsPage(1);
+  }, [agentSearch, statusFilter, architectureFilter, exposureFilter, sortMode]);
 
   const filteredAgents = useMemo(() => {
     const normalizedQuery = agentSearch.trim().toLowerCase();
@@ -997,7 +1472,8 @@ export default function AgentsPage() {
       ].filter(Boolean).some((value) => String(value).toLowerCase().includes(normalizedQuery));
       const matchesStatus = statusFilter === 'all' || (statusFilter === 'running' ? isRunning : !isRunning);
       const matchesArchitecture = architectureFilter === 'all' || architecture === architectureFilter;
-      return matchesQuery && matchesStatus && matchesArchitecture;
+      const matchesExposure = exposureFilter === 'all' || (exposureFilter === 'exposed' ? agent.is_exposed : !agent.is_exposed);
+      return matchesQuery && matchesStatus && matchesArchitecture && matchesExposure;
     });
 
     const sorted = [...filtered].sort((a, b) => {
@@ -1009,7 +1485,7 @@ export default function AgentsPage() {
     });
 
     return sorted;
-  }, [agents, agentSearch, statusFilter, architectureFilter, sortMode]);
+  }, [agents, agentSearch, statusFilter, architectureFilter, exposureFilter, sortMode]);
 
   const pagedAgents = useMemo(() => {
     const start = (agentsPage - 1) * agentsPageSize;
@@ -1090,7 +1566,7 @@ export default function AgentsPage() {
   }, [autoBuildProvider, isAutoBuilding, providers]);
 
   const autoBuildAgent = async () => {
-      if (!autoBuildGoal) return;
+      if (!autoBuildGoal || autoBuildGoal.trim().length > 900) return;
       setIsBuilding(true);
       setBuildError('');
       setBuildEvents([]);
@@ -1127,20 +1603,23 @@ export default function AgentsPage() {
           }
 
           const reader = response.body?.getReader();
+          if (!reader) throw new Error('Streaming is not available in this browser');
           const decoder = new TextDecoder();
+          let buffer = '';
 
           while (true) {
-              const { done, value } = await reader!.read();
+              const { done, value } = await reader.read();
               if (done) break;
 
-              const chunk = decoder.decode(value);
-              const lines = chunk.split('\n');
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split('\n');
+              buffer = lines.pop() || '';
 
               for (const line of lines) {
                   if (line.startsWith('data: ')) {
                       try {
                           const event = JSON.parse(line.slice(6));
-                          setBuildEvents(prev => [...prev, event]);
+                          setBuildEvents((prev) => [...prev, { ...event, received_at: new Date().toISOString() }]);
 
                           if (event.type === 'done') {
                               setTimeout(() => {
@@ -1157,6 +1636,15 @@ export default function AgentsPage() {
                       }
                   }
               }
+          }
+          const finalLine = buffer.trim();
+          if (finalLine.startsWith('data: ')) {
+            try {
+              const event = JSON.parse(finalLine.slice(6));
+              setBuildEvents((prev) => [...prev, { ...event, received_at: new Date().toISOString() }]);
+            } catch (e) {
+              console.error("Failed to parse final stream event", e);
+            }
           }
       } catch (e: any) {
           setBuildError(e.message);
@@ -1216,6 +1704,16 @@ export default function AgentsPage() {
       .then(setTools);
   };
 
+  const fetchVoiceConfigs = async () => {
+    try {
+      const res = await fetch('/api/voice/configs');
+      const data = await safeJson(res);
+      setVoiceConfigs(Array.isArray(data) ? data : []);
+    } catch {
+      setVoiceConfigs([]);
+    }
+  };
+
   const fetchMcpExposedTools = () => {
     fetch('/api/mcp/exposed-tools')
       .then(res => safeJson(res))
@@ -1269,6 +1767,7 @@ export default function AgentsPage() {
       timeout_ms: formData.timeout_ms === '' ? null : Number(formData.timeout_ms),
       mcp_tool_ids: formData.mcp_tool_ids,
       mcp_bundle_ids: formData.mcp_bundle_ids,
+      learning_enabled: Boolean(formData.learning_enabled),
       project_id: normalizedProjectId,
     };
 
@@ -1281,6 +1780,39 @@ export default function AgentsPage() {
       if (!res.ok) {
         const data = await safeJson(res) as any;
         throw new Error(data?.error || 'Failed to save agent');
+      }
+      const savedAgent = await safeJson(res) as any;
+      const savedAgentId = Number(savedAgent?.id || editingId);
+      if (Number.isFinite(savedAgentId) && savedAgentId > 0) {
+        const voiceRes = await fetch(`/api/voice/agents/${savedAgentId}/profile`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            voice_id: formData.voice_id,
+            tts_model_id: formData.tts_model_id,
+            stt_model_id: formData.stt_model_id,
+            output_format: formData.voice_output_format,
+            sample_rate: Number(formData.voice_sample_rate || 16000),
+            language_code: formData.voice_language_code,
+            auto_tts: Boolean(formData.voice_auto_tts),
+            meta: {
+              preset_id: formData.voice_preset_id ? Number(formData.voice_preset_id) : null,
+              vad_enabled: Boolean(formData.voice_vad_enabled),
+              vad_silence_threshold_secs: Number(formData.voice_vad_silence_threshold_secs || DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+              vad_threshold: Number(formData.voice_vad_threshold || DEFAULT_VAD_THRESHOLD),
+              min_speech_duration_ms: Number(formData.voice_min_speech_duration_ms || DEFAULT_MIN_SPEECH_DURATION_MS),
+              min_silence_duration_ms: Number(formData.voice_min_silence_duration_ms || DEFAULT_MIN_SILENCE_DURATION_MS),
+              max_tokens_to_recompute: Number(formData.voice_max_tokens_to_recompute || DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+              browser_noise_suppression: Boolean(formData.voice_browser_noise_suppression),
+              browser_echo_cancellation: Boolean(formData.voice_browser_echo_cancellation),
+              browser_auto_gain_control: Boolean(formData.voice_browser_auto_gain_control),
+            },
+          }),
+        });
+        if (!voiceRes.ok) {
+          const data = await safeJson(voiceRes) as any;
+          throw new Error(data?.error || 'Agent saved, but voice profile failed to save');
+        }
       }
       setAgentSaveNotice({ type: 'success', message: editingId ? 'Agent updated successfully.' : 'Agent created successfully.' });
       fetchAgents();
@@ -1313,6 +1845,24 @@ export default function AgentsPage() {
       retry_policy: 'standard',
       timeout_ms: '',
       is_exposed: false,
+      learning_enabled: true,
+      voice_id: 'JBFqnCBsd6RMkjVDRZzb',
+      tts_model_id: 'eleven_multilingual_v2',
+      stt_model_id: 'scribe_v2_realtime',
+      voice_output_format: 'mp3_44100_128',
+      voice_sample_rate: '16000',
+      voice_language_code: 'en',
+      voice_auto_tts: true,
+      voice_vad_enabled: true,
+      voice_vad_silence_threshold_secs: '0.8',
+      voice_vad_threshold: '0.6',
+      voice_min_speech_duration_ms: '220',
+      voice_min_silence_duration_ms: '420',
+      voice_max_tokens_to_recompute: '5',
+      voice_browser_noise_suppression: true,
+      voice_browser_echo_cancellation: true,
+      voice_browser_auto_gain_control: false,
+      voice_preset_id: '',
       project_id: '',
       toolIds: [],
       mcp_tool_ids: [],
@@ -1329,17 +1879,26 @@ export default function AgentsPage() {
     setIsCreating(true);
   };
 
-  const startEdit = (agent: Agent) => {
+  const startEdit = async (agent: Agent) => {
       const initialConfigs: AgentOptionalConfig[] = [];
       if (agent.agent_role) initialConfigs.push('agent_role');
       if (agent.backstory) initialConfigs.push('backstory');
       if (agent.goal) initialConfigs.push('goal');
       if (agent.system_prompt) initialConfigs.push('system_prompt');
       if (agent.temperature != null || agent.max_tokens != null || agent.memory_window != null || agent.max_iterations != null || agent.timeout_ms != null || agent.retry_policy) initialConfigs.push('advanced');
+      initialConfigs.push('voice');
       if (agent.project_id) initialConfigs.push('project');
       if ((agent.tools || []).length > 0) initialConfigs.push('tools');
       if ((agent.mcp_tool_ids || []).length > 0 || (agent.mcp_bundle_ids || []).length > 0) initialConfigs.push('mcp');
       if (agent.is_exposed) initialConfigs.push('exposure');
+
+      let voiceProfile: any = null;
+      try {
+        const res = await fetch(`/api/voice/agents/${agent.id}/profile`);
+        voiceProfile = res.ok ? await safeJson(res) : null;
+      } catch {
+        voiceProfile = null;
+      }
 
       setFormData({
           name: agent.name,
@@ -1358,6 +1917,24 @@ export default function AgentsPage() {
           retry_policy: agent.retry_policy || 'standard',
           timeout_ms: agent.timeout_ms ?? '',
           is_exposed: agent.is_exposed || false,
+          learning_enabled: agent.learning_enabled !== false,
+          voice_id: String(voiceProfile?.voice_id || 'JBFqnCBsd6RMkjVDRZzb'),
+          tts_model_id: String(voiceProfile?.tts_model_id || 'eleven_multilingual_v2'),
+          stt_model_id: String(voiceProfile?.stt_model_id || 'scribe_v2_realtime'),
+          voice_output_format: String(voiceProfile?.output_format || 'mp3_44100_128'),
+          voice_sample_rate: String(voiceProfile?.sample_rate || 16000),
+          voice_language_code: String(voiceProfile?.language_code || 'en'),
+          voice_auto_tts: Boolean(voiceProfile?.auto_tts ?? true),
+          voice_vad_enabled: Boolean(voiceProfile?.meta?.vad_enabled ?? true),
+          voice_vad_silence_threshold_secs: String(voiceProfile?.meta?.vad_silence_threshold_secs ?? DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+          voice_vad_threshold: String(voiceProfile?.meta?.vad_threshold ?? DEFAULT_VAD_THRESHOLD),
+          voice_min_speech_duration_ms: String(voiceProfile?.meta?.min_speech_duration_ms ?? DEFAULT_MIN_SPEECH_DURATION_MS),
+          voice_min_silence_duration_ms: String(voiceProfile?.meta?.min_silence_duration_ms ?? DEFAULT_MIN_SILENCE_DURATION_MS),
+          voice_max_tokens_to_recompute: String(voiceProfile?.meta?.max_tokens_to_recompute ?? DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+          voice_browser_noise_suppression: Boolean(voiceProfile?.meta?.browser_noise_suppression ?? true),
+          voice_browser_echo_cancellation: Boolean(voiceProfile?.meta?.browser_echo_cancellation ?? true),
+          voice_browser_auto_gain_control: Boolean(voiceProfile?.meta?.browser_auto_gain_control ?? false),
+          voice_preset_id: String(voiceProfile?.meta?.preset_id || ''),
           project_id: agent.project_id || '',
           toolIds: agent.tools ? agent.tools.map(t => t.id) : [],
           mcp_tool_ids: Array.isArray(agent.mcp_tool_ids) ? agent.mcp_tool_ids : [],
@@ -1416,8 +1993,146 @@ export default function AgentsPage() {
     });
   };
 
+  const applyVoicePreset = (presetId: string) => {
+    const preset = voiceConfigs.find((item) => String(item.id) === String(presetId));
+    if (!preset) {
+      setFormData((prev) => ({ ...prev, voice_preset_id: '' }));
+      return;
+    }
+    setFormData((prev) => ({
+      ...prev,
+      voice_preset_id: presetId,
+      voice_id: String(preset.voice_id || 'JBFqnCBsd6RMkjVDRZzb'),
+      tts_model_id: String(preset.tts_model_id || 'eleven_multilingual_v2'),
+      stt_model_id: String(preset.stt_model_id || 'scribe_v2_realtime'),
+      voice_output_format: String(preset.output_format || 'mp3_44100_128'),
+      voice_sample_rate: String(preset.sample_rate || 16000),
+      voice_language_code: String(preset.language_code || 'en'),
+      voice_auto_tts: Boolean(preset.auto_tts ?? true),
+      voice_vad_enabled: Boolean(preset.meta?.vad_enabled ?? true),
+      voice_vad_silence_threshold_secs: String(preset.meta?.vad_silence_threshold_secs ?? DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+      voice_vad_threshold: String(preset.meta?.vad_threshold ?? DEFAULT_VAD_THRESHOLD),
+      voice_min_speech_duration_ms: String(preset.meta?.min_speech_duration_ms ?? DEFAULT_MIN_SPEECH_DURATION_MS),
+      voice_min_silence_duration_ms: String(preset.meta?.min_silence_duration_ms ?? DEFAULT_MIN_SILENCE_DURATION_MS),
+      voice_max_tokens_to_recompute: String(preset.meta?.max_tokens_to_recompute ?? DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+      voice_browser_noise_suppression: Boolean(preset.meta?.browser_noise_suppression ?? true),
+      voice_browser_echo_cancellation: Boolean(preset.meta?.browser_echo_cancellation ?? true),
+      voice_browser_auto_gain_control: Boolean(preset.meta?.browser_auto_gain_control ?? false),
+    }));
+  };
+
+  const saveCurrentVoicePreset = async () => {
+    const name = window.prompt('Voice preset name');
+    if (!name?.trim()) return;
+    const res = await fetch('/api/voice/configs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: name.trim(),
+        voice_id: formData.voice_id,
+        tts_model_id: formData.tts_model_id,
+        stt_model_id: formData.stt_model_id,
+        output_format: formData.voice_output_format,
+        sample_rate: Number(formData.voice_sample_rate || 16000),
+        language_code: formData.voice_language_code,
+        auto_tts: Boolean(formData.voice_auto_tts),
+        meta: {
+          vad_enabled: Boolean(formData.voice_vad_enabled),
+          vad_silence_threshold_secs: Number(formData.voice_vad_silence_threshold_secs || DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+          vad_threshold: Number(formData.voice_vad_threshold || DEFAULT_VAD_THRESHOLD),
+          min_speech_duration_ms: Number(formData.voice_min_speech_duration_ms || DEFAULT_MIN_SPEECH_DURATION_MS),
+          min_silence_duration_ms: Number(formData.voice_min_silence_duration_ms || DEFAULT_MIN_SILENCE_DURATION_MS),
+          max_tokens_to_recompute: Number(formData.voice_max_tokens_to_recompute || DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+          browser_noise_suppression: Boolean(formData.voice_browser_noise_suppression),
+          browser_echo_cancellation: Boolean(formData.voice_browser_echo_cancellation),
+          browser_auto_gain_control: Boolean(formData.voice_browser_auto_gain_control),
+        },
+      }),
+    });
+    const data = await safeJson(res) as any;
+    if (!res.ok) {
+      setAgentSaveNotice({ type: 'error', message: data?.error || 'Failed to save voice preset' });
+      return;
+    }
+    await fetchVoiceConfigs();
+    setFormData((prev) => ({ ...prev, voice_preset_id: String(data?.id || '') }));
+  };
+
+  const updateSelectedVoicePreset = async () => {
+    if (!formData.voice_preset_id) return;
+    const preset = voiceConfigs.find((item) => String(item.id) === String(formData.voice_preset_id));
+    if (!preset) return;
+    const res = await fetch(`/api/voice/configs/${formData.voice_preset_id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: preset.name,
+        voice_id: formData.voice_id,
+        tts_model_id: formData.tts_model_id,
+        stt_model_id: formData.stt_model_id,
+        output_format: formData.voice_output_format,
+        sample_rate: Number(formData.voice_sample_rate || 16000),
+        language_code: formData.voice_language_code,
+        auto_tts: Boolean(formData.voice_auto_tts),
+        meta: {
+          vad_enabled: Boolean(formData.voice_vad_enabled),
+          vad_silence_threshold_secs: Number(formData.voice_vad_silence_threshold_secs || DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+          vad_threshold: Number(formData.voice_vad_threshold || DEFAULT_VAD_THRESHOLD),
+          min_speech_duration_ms: Number(formData.voice_min_speech_duration_ms || DEFAULT_MIN_SPEECH_DURATION_MS),
+          min_silence_duration_ms: Number(formData.voice_min_silence_duration_ms || DEFAULT_MIN_SILENCE_DURATION_MS),
+          max_tokens_to_recompute: Number(formData.voice_max_tokens_to_recompute || DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+          browser_noise_suppression: Boolean(formData.voice_browser_noise_suppression),
+          browser_echo_cancellation: Boolean(formData.voice_browser_echo_cancellation),
+          browser_auto_gain_control: Boolean(formData.voice_browser_auto_gain_control),
+        },
+        notes: preset.notes || '',
+      }),
+    });
+    const data = await safeJson(res) as any;
+    if (!res.ok) {
+      setAgentSaveNotice({ type: 'error', message: data?.error || 'Failed to update voice preset' });
+      return;
+    }
+    await fetchVoiceConfigs();
+  };
+
+  const deleteSelectedVoicePreset = async () => {
+    if (!formData.voice_preset_id || !window.confirm('Delete this voice preset?')) return;
+    await fetch(`/api/voice/configs/${formData.voice_preset_id}`, { method: 'DELETE' });
+    await fetchVoiceConfigs();
+    setFormData((prev) => ({ ...prev, voice_preset_id: '' }));
+  };
+
   const supervisorCount = useMemo(() => agents.filter((agent) => agent.agent_role === 'supervisor').length, [agents]);
   const specialistCount = useMemo(() => agents.filter((agent) => agent.agent_role !== 'supervisor').length, [agents]);
+  const appOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+  const autoBuildGoalTooLong = autoBuildGoal.trim().length > 900;
+  const hasAgentFilters = agentSearch.trim().length > 0 || statusFilter !== 'all' || architectureFilter !== 'all' || exposureFilter !== 'all' || sortMode !== 'activity';
+  const resetAgentFilters = () => {
+    setAgentSearch('');
+    setStatusFilter('all');
+    setArchitectureFilter('all');
+    setExposureFilter('all');
+    setSortMode('activity');
+  };
+
+  const autoBuildTemplates = [
+    {
+      label: 'Growth Supervisor',
+      goal: 'Create a supervisor agent that coordinates SEO, content, and analytics specialists and synthesizes a weekly growth strategy.',
+      architecture: 'supervisor' as const,
+    },
+    {
+      label: 'Support Specialist',
+      goal: 'Create a specialist support agent that triages user issues, drafts precise answers, and flags escalation risks.',
+      architecture: 'specialist' as const,
+    },
+    {
+      label: 'Ops Copilot',
+      goal: 'Create an operations agent that audits workflows daily, detects bottlenecks, and suggests prioritized fixes with clear actions.',
+      architecture: 'auto' as const,
+    },
+  ];
 
   return (
     <div>
@@ -1477,7 +2192,7 @@ export default function AgentsPage() {
       </motion.div>
 
       <div className="mb-6 rounded-3xl border border-slate-200 bg-white/85 p-4 shadow-sm backdrop-blur">
-        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1.5fr)_repeat(3,minmax(0,0.7fr))_auto]">
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1.4fr)_repeat(4,minmax(0,0.62fr))_auto]">
           <div className="relative">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
@@ -1504,6 +2219,15 @@ export default function AgentsPage() {
             <option value="all">All Architectures</option>
             <option value="supervisor">Supervisors</option>
             <option value="specialist">Specialists</option>
+          </select>
+          <select
+            className="rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+            value={exposureFilter}
+            onChange={(e) => setExposureFilter(e.target.value as 'all' | 'exposed' | 'private')}
+          >
+            <option value="all">All Exposure</option>
+            <option value="exposed">Exposed</option>
+            <option value="private">Private</option>
           </select>
           <select
             className="rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
@@ -1537,6 +2261,62 @@ export default function AgentsPage() {
             </button>
           </div>
         </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {[
+            { label: 'All', active: statusFilter === 'all' && architectureFilter === 'all' && exposureFilter === 'all', onClick: () => { setStatusFilter('all'); setArchitectureFilter('all'); setExposureFilter('all'); } },
+            { label: 'Running', active: statusFilter === 'running', onClick: () => setStatusFilter('running') },
+            { label: 'Supervisors', active: architectureFilter === 'supervisor', onClick: () => setArchitectureFilter('supervisor') },
+            { label: 'Specialists', active: architectureFilter === 'specialist', onClick: () => setArchitectureFilter('specialist') },
+            { label: 'Exposed', active: exposureFilter === 'exposed', onClick: () => setExposureFilter('exposed') },
+          ].map((chip) => (
+            <button
+              key={chip.label}
+              type="button"
+              onClick={chip.onClick}
+              className={`px-3 py-1.5 rounded-full border text-xs font-semibold transition-colors ${
+                chip.active
+                  ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={resetAgentFilters}
+            disabled={!hasAgentFilters}
+            className="ml-auto px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-45"
+          >
+            Reset Filters
+          </button>
+        </div>
+      </div>
+
+      <div className="mb-6 rounded-3xl border border-indigo-200 bg-linear-to-r from-indigo-50 via-white to-cyan-50 p-5 shadow-sm">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-3xl">
+            <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-indigo-500">Coordinator Pattern</div>
+            <h3 className="mt-2 text-xl font-black text-slate-900">Set up one coordinator, many specialists.</h3>
+            <p className="mt-2 text-sm leading-6 text-slate-600">
+              Use a supervisor agent to plan, delegate, and synthesize. Keep domain tools and MCP bundles attached to specialist agents so each delegate can execute with its own capabilities.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 lg:w-[640px]">
+            <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Coordinator Agent</div>
+              <div className="mt-2 text-sm text-slate-700">Mark as `supervisor`, attach `delegate_to_agent`, keep it orchestration-focused.</div>
+            </div>
+            <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Specialist Agents</div>
+              <div className="mt-2 text-sm text-slate-700">Attach HTTP tools, local tools, and MCP bundles directly to the specialists that actually use them.</div>
+            </div>
+            <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Execution View</div>
+              <div className="mt-2 text-sm text-slate-700">Delegation chains now show parent, current, and child executions so you can trace handoffs cleanly.</div>
+            </div>
+          </div>
+        </div>
       </div>
 
       {isAutoBuilding && (
@@ -1566,9 +2346,28 @@ export default function AgentsPage() {
                       <p className="text-slate-600 mb-4 text-sm">
                           Describe the agent you need, and the AI Architect will choose or honor a supervisor/specialist architecture, then design the role, goal, and system prompt.
                       </p>
+                      <div className="mb-4 flex flex-wrap items-center gap-2">
+                        {autoBuildTemplates.map((template) => (
+                          <button
+                            key={template.label}
+                            type="button"
+                            onClick={() => {
+                              setAutoBuildGoal(template.goal);
+                              setAutoBuildArchitecture(template.architecture);
+                            }}
+                            disabled={isBuilding}
+                            className="rounded-full border border-purple-200 bg-purple-50 px-3 py-1.5 text-xs font-semibold text-purple-700 hover:bg-purple-100 disabled:opacity-60"
+                          >
+                            {template.label}
+                          </button>
+                        ))}
+                      </div>
                       
                       <div className="mb-4">
-                          <label className="block text-sm font-medium text-slate-700 mb-1">Agent's Purpose</label>
+                          <div className="mb-1 flex items-center justify-between">
+                            <label className="block text-sm font-medium text-slate-700">Agent's Purpose</label>
+                            <span className={`text-[11px] ${autoBuildGoalTooLong ? 'text-red-600 font-semibold' : 'text-slate-500'}`}>{autoBuildGoal.trim().length}/900</span>
+                          </div>
                           <textarea
                               className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none h-32 resize-none"
                               placeholder="e.g. A senior technical writer that specializes in creating clear API documentation for various programming languages."
@@ -1615,23 +2414,32 @@ export default function AgentsPage() {
                       </div>
 
                       <div className="mb-4">
-                        <label className="block text-sm font-medium text-slate-700 mb-1">Architecture</label>
-                        <select
-                            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none bg-white"
-                            value={autoBuildArchitecture}
-                            onChange={(e) => setAutoBuildArchitecture(e.target.value as 'auto' | 'specialist' | 'supervisor')}
-                            disabled={isBuilding}
-                        >
-                            <option value="auto">Auto Decide</option>
-                            <option value="specialist">Specialist</option>
-                            <option value="supervisor">Supervisor</option>
-                        </select>
-                        <p className="text-xs text-slate-500 mt-1">
-                          Supervisor agents coordinate delegates and synthesize outputs. Specialist agents execute focused work directly.
-                        </p>
+                        <label className="block text-sm font-medium text-slate-700 mb-2">Architecture</label>
+                        <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                          {[
+                            { value: 'auto', title: 'Auto Decide', note: 'Pick based on your prompt.' },
+                            { value: 'specialist', title: 'Specialist', note: 'Single focused execution.' },
+                            { value: 'supervisor', title: 'Supervisor', note: 'Delegates and synthesizes.' },
+                          ].map((option) => (
+                            <button
+                              key={option.value}
+                              type="button"
+                              onClick={() => setAutoBuildArchitecture(option.value as 'auto' | 'specialist' | 'supervisor')}
+                              disabled={isBuilding}
+                              className={`rounded-xl border px-3 py-3 text-left transition-colors ${
+                                autoBuildArchitecture === option.value
+                                  ? 'border-purple-300 bg-purple-50 text-purple-900'
+                                  : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                              }`}
+                            >
+                              <div className="text-sm font-semibold">{option.title}</div>
+                              <div className="mt-1 text-xs text-slate-500">{option.note}</div>
+                            </button>
+                          ))}
+                        </div>
                       </div>
 
-                      <div className="mb-4">
+                    <div className="mb-4">
                         <label className="block text-sm font-medium text-slate-700 mb-1">Project (Optional)</label>
                         <select
                             className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none bg-white"
@@ -1644,6 +2452,9 @@ export default function AgentsPage() {
                                 <option key={p.id} value={p.id}>{p.name}</option>
                             ))}
                         </select>
+                    </div>
+                    <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+                      Build plan: <span className="font-semibold text-slate-800">{autoBuildArchitecture}</span> architecture, provider <span className="font-semibold text-slate-800">{autoBuildProvider || 'unset'}</span>, model <span className="font-semibold text-slate-800">{autoBuildModel || 'unset'}</span>{autoBuildProjectId ? `, project #${autoBuildProjectId}` : ', no project'}.
                     </div>
 
                       {buildEvents.length > 0 && (
@@ -1660,7 +2471,7 @@ export default function AgentsPage() {
                                             animate={{ opacity: 1, x: 0 }}
                                             className={`${event.type === 'error' ? 'text-red-400' : event.type === 'done' ? 'text-emerald-400' : 'text-slate-300'} flex items-start gap-2`}
                                         >
-                                            <span className="text-slate-500 shrink-0">[{new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})}]</span>
+                                            <span className="text-slate-500 shrink-0">[{new Date(event.timestamp || event.received_at || Date.now()).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})}]</span>
                                             <span>
                                                 {event.message}
                                                 {event.agent && <span className="ml-2 px-1.5 py-0.5 bg-slate-800 rounded text-purple-300 font-bold border border-slate-700">{event.agent}</span>}
@@ -1678,6 +2489,11 @@ export default function AgentsPage() {
                               {buildError}
                           </div>
                       )}
+                      {autoBuildGoalTooLong && (
+                          <div className="mb-4 p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-200">
+                              Purpose text is too long. Keep it under 900 characters for reliable generation.
+                          </div>
+                      )}
 
                       <div className="flex justify-end gap-3 mt-4">
                           <button
@@ -1692,7 +2508,7 @@ export default function AgentsPage() {
                           </button>
                           <button
                               onClick={autoBuildAgent}
-                              disabled={isBuilding || !autoBuildGoal.trim()}
+                              disabled={isBuilding || !autoBuildGoal.trim() || autoBuildGoalTooLong}
                               className="bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white px-6 py-2 rounded-lg font-bold shadow-md transition-all active:scale-95 flex items-center gap-2"
                           >
                               {isBuilding ? (
@@ -1740,6 +2556,9 @@ export default function AgentsPage() {
                   <p className="mt-2 text-sm leading-6 text-slate-600">
                     Name, role, goal, provider, and project are the core. Use backstory only when it improves judgment or tone. Supervisor agents should stay operational and delegation-focused, not fictional.
                   </p>
+                  <p className="mt-2 text-xs uppercase tracking-[0.18em] text-slate-400">
+                    Keep the primary setup visible. Open voice, MCP, and exposure only when that agent actually needs them.
+                  </p>
                 </div>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 lg:w-[480px]">
                   {[
@@ -1764,6 +2583,30 @@ export default function AgentsPage() {
                       </button>
                     );
                   })}
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-cyan-200 bg-cyan-50/70 p-5">
+              <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-cyan-600">Architecture Guidance</div>
+              <div className="mt-3 grid grid-cols-1 lg:grid-cols-3 gap-3">
+                <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+                  <div className="text-sm font-semibold text-slate-900">Supervisor</div>
+                  <div className="mt-2 text-xs leading-5 text-slate-600">
+                    Best when this agent should route work, call `delegate_to_agent`, and synthesize outcomes instead of owning all MCPs directly.
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+                  <div className="text-sm font-semibold text-slate-900">Specialist</div>
+                  <div className="mt-2 text-xs leading-5 text-slate-600">
+                    Best when this agent should own the actual tools or MCP bundles for one domain and return focused outputs to a coordinator or crew.
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+                  <div className="text-sm font-semibold text-slate-900">Recommended Split</div>
+                  <div className="mt-2 text-xs leading-5 text-slate-600">
+                    Coordinators orchestrate. Specialists execute. Put shared business logic in prompts and keep domain integrations close to the specialist that needs them.
+                  </div>
                 </div>
               </div>
             </div>
@@ -2113,7 +2956,7 @@ export default function AgentsPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Max Iterations (Optional)</label>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Reasoning Step Limit (Optional)</label>
                   <input
                     type="number"
                     min="1"
@@ -2122,8 +2965,11 @@ export default function AgentsPage() {
                     className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
                     value={formData.max_iterations}
                     onChange={e => setFormData({...formData, max_iterations: e.target.value})}
-                    placeholder="e.g. 8"
+                    placeholder="Default 8 · try 15-20 for longer tool chains"
                   />
+                  <p className="mt-1 text-xs text-slate-500">
+                    Controls how many reasoning/tool steps this agent may take before it must return a final answer. Leave blank to use the default limit of 8.
+                  </p>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">Timeout (ms) (Optional)</label>
@@ -2159,8 +3005,149 @@ export default function AgentsPage() {
                   />
                   <label className="text-sm font-medium text-slate-700">Tools Enabled</label>
                 </div>
+                <div className="flex items-center gap-2 mt-7">
+                  <input
+                    type="checkbox"
+                    className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                    checked={formData.learning_enabled}
+                    onChange={e => setFormData({...formData, learning_enabled: e.target.checked})}
+                  />
+                  <label className="text-sm font-medium text-slate-700">Enable Learning From Feedback</label>
+                </div>
               </div>
+              <p className="text-xs text-slate-500 mt-3">
+                When enabled, this agent uses saved user feedback, success paths, and failure-avoidance lessons during future runs.
+              </p>
             </div>
+            )}
+
+            {showAgentConfig('voice') && (
+            <details className="border border-emerald-100 rounded-xl p-4 bg-emerald-50/40 space-y-3 group">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                <div>
+                  <label className="flex items-center gap-2 text-sm font-medium text-emerald-950">
+                    <AudioLines size={16} className="text-emerald-600" />
+                    Voice Runtime
+                  </label>
+                  <p className="text-xs text-emerald-900/75 mt-1">
+                    Save ElevenLabs voice defaults on the agent so browser voice sessions, websocket consumers, and test consoles all inherit the same runtime profile.
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Link to="/voice" className="text-xs text-emerald-700 hover:text-emerald-900 font-medium">
+                    Open Voice Console
+                  </Link>
+                  <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700 group-open:bg-emerald-700 group-open:text-white">
+                    Expand
+                  </span>
+                </div>
+              </summary>
+              <div className="pt-3 space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 items-end">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Voice Config Preset</label>
+                    <select
+                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white"
+                      value={formData.voice_preset_id}
+                      onChange={e => applyVoicePreset(e.target.value)}
+                    >
+                      <option value="">Custom runtime values</option>
+                      {voiceConfigs.map((preset) => (
+                        <option key={preset.id} value={preset.id}>{preset.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <button type="button" onClick={saveCurrentVoicePreset} className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm font-medium text-slate-700 hover:bg-slate-50">
+                    Save As Preset
+                  </button>
+                  <button type="button" onClick={updateSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                    Update Preset
+                  </button>
+                  <button type="button" onClick={deleteSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-2 rounded-lg border border-red-200 bg-red-50 text-sm font-medium text-red-700 hover:bg-red-100 disabled:opacity-40">
+                    Delete Preset
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Voice ID</label>
+                    <input className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_id} onChange={e => setFormData({ ...formData, voice_id: e.target.value })} placeholder="JBFqnCBsd6RMkjVDRZzb" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">TTS Model</label>
+                    <input className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.tts_model_id} onChange={e => setFormData({ ...formData, tts_model_id: e.target.value })} placeholder="eleven_multilingual_v2" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">STT Model</label>
+                    <input className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.stt_model_id} onChange={e => setFormData({ ...formData, stt_model_id: e.target.value })} placeholder="scribe_v2_realtime" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Output Format</label>
+                    <input className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_output_format} onChange={e => setFormData({ ...formData, voice_output_format: e.target.value })} placeholder="mp3_44100_128" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Sample Rate</label>
+                    <input type="number" min="8000" step="1000" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white" value={formData.voice_sample_rate} onChange={e => setFormData({ ...formData, voice_sample_rate: e.target.value })} placeholder="16000" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Language</label>
+                    <input className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_language_code} onChange={e => setFormData({ ...formData, voice_language_code: e.target.value })} placeholder="en" />
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500"
+                    checked={formData.voice_auto_tts}
+                    onChange={e => setFormData({ ...formData, voice_auto_tts: e.target.checked })}
+                  />
+                  <span className="text-sm text-slate-700">Auto-play TTS replies for this agent</span>
+                </label>
+                <div className="rounded-xl border border-emerald-100 bg-white/80 p-4 space-y-3">
+                  <div>
+                    <div className="text-sm font-medium text-slate-900">Turn Detection And Disturbance Control</div>
+                    <div className="text-xs text-slate-500 mt-1">These defaults are reused by the Voice Console and websocket consumers to ignore short disturbances and commit speech turns faster.</div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                    <label className="flex items-center gap-2 text-sm text-slate-700">
+                      <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_vad_enabled} onChange={e => setFormData({ ...formData, voice_vad_enabled: e.target.checked })} />
+                      VAD auto-commit
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-slate-700">
+                      <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_browser_noise_suppression} onChange={e => setFormData({ ...formData, voice_browser_noise_suppression: e.target.checked })} />
+                      Browser noise suppression
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-slate-700">
+                      <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_browser_echo_cancellation} onChange={e => setFormData({ ...formData, voice_browser_echo_cancellation: e.target.checked })} />
+                      Echo cancellation
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-slate-700">
+                      <input type="checkbox" className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" checked={formData.voice_browser_auto_gain_control} onChange={e => setFormData({ ...formData, voice_browser_auto_gain_control: e.target.checked })} />
+                      Auto gain control
+                    </label>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Silence Threshold (sec)</label>
+                      <input type="number" min="0.2" max="3" step="0.1" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_vad_silence_threshold_secs} onChange={e => setFormData({ ...formData, voice_vad_silence_threshold_secs: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">VAD Threshold</label>
+                      <input type="number" min="0.1" max="0.95" step="0.05" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_vad_threshold} onChange={e => setFormData({ ...formData, voice_vad_threshold: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Min Speech (ms)</label>
+                      <input type="number" min="50" max="2000" step="10" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_min_speech_duration_ms} onChange={e => setFormData({ ...formData, voice_min_speech_duration_ms: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Min Silence (ms)</label>
+                      <input type="number" min="50" max="3000" step="10" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_min_silence_duration_ms} onChange={e => setFormData({ ...formData, voice_min_silence_duration_ms: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Recompute Window</label>
+                      <input type="number" min="0" max="50" step="1" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-mono text-sm" value={formData.voice_max_tokens_to_recompute} onChange={e => setFormData({ ...formData, voice_max_tokens_to_recompute: e.target.value })} />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </details>
             )}
 
             {showAgentConfig('project') && (
@@ -2225,90 +3212,124 @@ export default function AgentsPage() {
             )}
 
             {showAgentConfig('mcp') && (
-            <div className="border border-indigo-100 rounded-xl p-4 bg-indigo-50/40 space-y-3">
-              <div className="flex items-center justify-between">
-                <label className="block text-sm font-medium text-indigo-900">Direct MCP Connections</label>
-                <a href="/mcps" className="text-xs text-indigo-700 hover:text-indigo-900 font-medium">Manage MCPs</a>
+            <details className="border border-indigo-100 rounded-xl p-4 bg-indigo-50/40 space-y-3 group">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-indigo-900">MCP Connections</label>
+                  <p className="text-xs text-indigo-800/80 mt-1">
+                    Attach MCP exposed tools and bundles directly to this agent without creating intermediate MCP tool entries.
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <a href="/mcps" className="text-xs text-indigo-700 hover:text-indigo-900 font-medium">Manage MCPs</a>
+                  <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-700 group-open:bg-indigo-700 group-open:text-white">
+                    Expand
+                  </span>
+                </div>
+              </summary>
+              <div className="pt-3 space-y-3">
+                <div>
+                  <div className="text-xs font-semibold text-indigo-900 mb-1.5">Exposed MCP Tools</div>
+                  {mcpExposedTools.length === 0 ? (
+                    <div className="text-xs text-slate-500 bg-white border border-indigo-100 rounded-lg px-3 py-2">
+                      No MCP tools exposed yet.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {mcpExposedTools.map((row) => {
+                        const selected = formData.mcp_tool_ids.includes(Number(row.tool_id));
+                        return (
+                          <button
+                            key={`mcp-tool-${row.tool_id}`}
+                            type="button"
+                            onClick={() => toggleMcpTool(Number(row.tool_id))}
+                            className={`text-left rounded-lg border px-3 py-2 text-sm transition-colors ${
+                              selected
+                                ? 'bg-indigo-100 border-indigo-300 text-indigo-900'
+                                : 'bg-white border-indigo-100 text-slate-700 hover:bg-indigo-50'
+                            }`}
+                          >
+                            <div className="font-medium">{row.tool_name}</div>
+                            <div className="text-[11px] opacity-80">/{row.exposed_name}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <div className="text-xs font-semibold text-indigo-900 mb-1.5">MCP Bundles</div>
+                  {mcpBundles.length === 0 ? (
+                    <div className="text-xs text-slate-500 bg-white border border-indigo-100 rounded-lg px-3 py-2">
+                      No MCP bundles available.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {mcpBundles.map((b) => {
+                        const selected = formData.mcp_bundle_ids.includes(Number(b.id));
+                        return (
+                          <button
+                            key={`mcp-bundle-${b.id}`}
+                            type="button"
+                            onClick={() => toggleMcpBundle(Number(b.id))}
+                            className={`text-left rounded-lg border px-3 py-2 text-sm transition-colors ${
+                              selected
+                                ? 'bg-indigo-100 border-indigo-300 text-indigo-900'
+                                : 'bg-white border-indigo-100 text-slate-700 hover:bg-indigo-50'
+                            }`}
+                          >
+                            <div className="font-medium">{b.name}</div>
+                            <div className="text-[11px] opacity-80">bundle/{b.slug}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               </div>
-              <p className="text-xs text-indigo-800/80">
-                Attach MCP exposed tools/bundles directly to this agent without creating intermediate MCP tool entries.
-              </p>
-              <div>
-                <div className="text-xs font-semibold text-indigo-900 mb-1.5">Exposed MCP Tools</div>
-                {mcpExposedTools.length === 0 ? (
-                  <div className="text-xs text-slate-500 bg-white border border-indigo-100 rounded-lg px-3 py-2">
-                    No MCP tools exposed yet.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {mcpExposedTools.map((row) => {
-                      const selected = formData.mcp_tool_ids.includes(Number(row.tool_id));
-                      return (
-                        <button
-                          key={`mcp-tool-${row.tool_id}`}
-                          type="button"
-                          onClick={() => toggleMcpTool(Number(row.tool_id))}
-                          className={`text-left rounded-lg border px-3 py-2 text-sm transition-colors ${
-                            selected
-                              ? 'bg-indigo-100 border-indigo-300 text-indigo-900'
-                              : 'bg-white border-indigo-100 text-slate-700 hover:bg-indigo-50'
-                          }`}
-                        >
-                          <div className="font-medium">{row.tool_name}</div>
-                          <div className="text-[11px] opacity-80">/{row.exposed_name}</div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-              <div>
-                <div className="text-xs font-semibold text-indigo-900 mb-1.5">MCP Bundles</div>
-                {mcpBundles.length === 0 ? (
-                  <div className="text-xs text-slate-500 bg-white border border-indigo-100 rounded-lg px-3 py-2">
-                    No MCP bundles available.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {mcpBundles.map((b) => {
-                      const selected = formData.mcp_bundle_ids.includes(Number(b.id));
-                      return (
-                        <button
-                          key={`mcp-bundle-${b.id}`}
-                          type="button"
-                          onClick={() => toggleMcpBundle(Number(b.id))}
-                          className={`text-left rounded-lg border px-3 py-2 text-sm transition-colors ${
-                            selected
-                              ? 'bg-indigo-100 border-indigo-300 text-indigo-900'
-                              : 'bg-white border-indigo-100 text-slate-700 hover:bg-indigo-50'
-                          }`}
-                        >
-                          <div className="font-medium">{b.name}</div>
-                          <div className="text-[11px] opacity-80">bundle/{b.slug}</div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
+            </details>
             )}
 
             {showAgentConfig('exposure') && (
-            <div className="space-y-4">
-                <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                        type="checkbox"
-                        className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
-                        checked={formData.is_exposed}
-                        onChange={e => setFormData({...formData, is_exposed: e.target.checked})}
-                    />
-                    <span className="text-sm font-medium text-slate-700">Expose as API / MCP Tool</span>
-                </label>
-                <p className="text-xs text-slate-500 mt-1 ml-6">
-                    If checked, this agent can be called directly via the API or used as a tool in the Model Context Protocol.
-                </p>
-            </div>
+            <details className="space-y-4 group">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div>
+                    <div className="text-sm font-medium text-slate-700">Publishing And Endpoints</div>
+                    <div className="text-xs text-slate-500 mt-1">Publish this agent for API, MCP, and voice WebSocket consumers.</div>
+                  </div>
+                  <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 group-open:bg-slate-900 group-open:text-white">
+                    Expand
+                  </span>
+                </summary>
+                <div className="space-y-4 pt-2">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                          type="checkbox"
+                          className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                          checked={formData.is_exposed}
+                          onChange={e => setFormData({...formData, is_exposed: e.target.checked})}
+                      />
+                      <span className="text-sm font-medium text-slate-700">Publish as API / MCP Tool</span>
+                  </label>
+                  <p className="text-xs text-slate-500 mt-1 ml-6">
+                      If checked, this agent can be called directly via the API or used as a tool in the Model Context Protocol.
+                  </p>
+                  {formData.is_exposed && editingId && (
+                    <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 space-y-3">
+                      <div className="text-sm font-semibold text-cyan-900 flex items-center gap-2">
+                        <Radio size={16} />
+                        Voice WebSocket
+                      </div>
+                      <div className="text-xs text-cyan-900/80">
+                        External realtime voice clients can connect directly to this exposed agent using the websocket endpoint below.
+                      </div>
+                      <div className="rounded-lg border border-cyan-100 bg-white px-3 py-2 font-mono text-xs break-all">
+                        {appOrigin.replace(/^http/, 'ws')}/ws/voice?targetType=agent&targetId={editingId}
+                      </div>
+                    </div>
+                  )}
+                </div>
+            </details>
             )}
             
             <div className="pt-6 border-t border-slate-100 bg-transparent flex justify-end gap-3 rounded-lg">
@@ -2417,6 +3438,13 @@ export default function AgentsPage() {
                     title="Run Agent"
                 >
                     <Play size={18} />
+                </button>
+                <button
+                    onClick={() => setCronAgent(agent)}
+                    className="text-slate-400 hover:text-cyan-600 transition-colors"
+                    title="Schedules"
+                >
+                    <CalendarClock size={18} />
                 </button>
                 <button
                     onClick={() => setDelegateAgent(agent)}
@@ -2607,6 +3635,9 @@ export default function AgentsPage() {
       )}
       {runAgent && (
         <AgentRunModal agent={runAgent} onClose={() => setRunAgent(null)} />
+      )}
+      {cronAgent && (
+        <AgentCronModal agent={cronAgent} onClose={() => setCronAgent(null)} />
       )}
       {delegateAgent && (
         <SupervisorRunModal

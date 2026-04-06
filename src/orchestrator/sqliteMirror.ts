@@ -91,8 +91,8 @@ export async function syncPersistentMirrorFromPostgres() {
       const insertSetting = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
       for (const row of settings) insertSetting.run(row.key, row.value);
 
-      const insertProject = db.prepare('INSERT INTO projects (id, name, description, created_at) VALUES (?, ?, ?, ?)');
-      for (const row of projects) insertProject.run(row.id, row.name, row.description ?? null, ts(row.createdAt));
+      const insertProject = db.prepare('INSERT INTO projects (id, name, description, platform_project_id, created_at) VALUES (?, ?, ?, ?, ?)');
+      for (const row of projects) insertProject.run(row.id, row.name, row.description ?? null, (row as any).platformProjectId ?? null, ts(row.createdAt));
 
       const insertProjectLink = db.prepare('INSERT INTO project_links (project_id, platform_project_id, created_at, updated_at) VALUES (?, ?, ?, ?)');
       for (const row of projectLinks) {

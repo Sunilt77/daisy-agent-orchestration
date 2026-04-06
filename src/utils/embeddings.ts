@@ -2,6 +2,7 @@ import { GoogleGenAI } from '@google/genai';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { getPrisma } from '../platform/prisma';
+import db from '../db';
 
 export interface EmbeddingConfig {
   provider: 'google' | 'openai' | 'anthropic';
@@ -31,13 +32,29 @@ export async function generateEmbedding(text: string, config: EmbeddingConfig): 
 }
 
 async function generateGoogleEmbedding(text: string, model: string): Promise<EmbeddingResult> {
-  // For now, use OpenAI's API as Google Gemini doesn't have direct embedding API
-  // TODO: Implement proper Google embedding API when available
-  return await generateOpenAIEmbedding(text, 'text-embedding-3-small');
+  const apiKey = resolveProviderApiKey('google');
+  if (!apiKey) throw new Error('GOOGLE_API_KEY (or GEMINI_API_KEY) not set');
+
+  const client = new GoogleGenAI({ apiKey });
+  const response = await client.models.embedContent({
+    model,
+    contents: [{ role: 'user', parts: [{ text }] }],
+  });
+
+  const embedding = extractGoogleEmbedding(response);
+  if (!embedding.length) {
+    throw new Error('Google embedding response did not include vector values');
+  }
+
+  return {
+    embedding,
+    provider: 'google',
+    model,
+  };
 }
 
 async function generateOpenAIEmbedding(text: string, model: string): Promise<EmbeddingResult> {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = resolveProviderApiKey('openai');
   if (!apiKey) throw new Error('OPENAI_API_KEY not set');
 
   const openai = new OpenAI({ apiKey });
@@ -54,9 +71,42 @@ async function generateOpenAIEmbedding(text: string, model: string): Promise<Emb
   };
 }
 
+function resolveProviderApiKey(provider: 'google' | 'openai'): string | null {
+  if (provider === 'google') {
+    const envKey = (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || '').trim();
+    if (envKey) return envKey;
+  }
+  if (provider === 'openai') {
+    const envKey = (process.env.OPENAI_API_KEY || '').trim();
+    if (envKey) return envKey;
+  }
+
+  try {
+    const row = db
+      .prepare('SELECT api_key FROM llm_providers WHERE provider = ? AND COALESCE(TRIM(api_key), \'\') <> \'\' ORDER BY is_default DESC, id ASC LIMIT 1')
+      .get(provider) as any;
+    const key = String(row?.api_key || '').trim();
+    return key || null;
+  } catch {
+    return null;
+  }
+}
+
 async function generateAnthropicEmbedding(text: string, model: string): Promise<EmbeddingResult> {
   // Anthropic doesn't have embeddings yet, but when they do, implement here
   throw new Error('Anthropic embeddings not yet supported');
+}
+
+function extractGoogleEmbedding(response: any): number[] {
+  // SDK shape can vary by version; support common layouts defensively.
+  const directValues = response?.embedding?.values;
+  if (Array.isArray(directValues)) return directValues.map((v: any) => Number(v)).filter((v: number) => Number.isFinite(v));
+
+  const firstEmb = Array.isArray(response?.embeddings) ? response.embeddings[0] : null;
+  const listValues = firstEmb?.values;
+  if (Array.isArray(listValues)) return listValues.map((v: any) => Number(v)).filter((v: number) => Number.isFinite(v));
+
+  return [];
 }
 
 export async function searchSimilarChunks(
@@ -71,8 +121,8 @@ export async function searchSimilarChunks(
 }>> {
   const prisma = getPrisma();
 
-  // For now, get all vectors and compute similarity in JS
-  // TODO: Use pgvector extension for proper vector search
+  // Until pgvector is enabled, compute cosine similarity in memory.
+  // Fetch only minimal fields to reduce memory pressure.
   const vectors = await prisma.documentVector.findMany({
     where: {
       chunk: {
@@ -85,10 +135,19 @@ export async function searchSimilarChunks(
         }
       }
     },
-    include: {
+    select: {
+      embedding: true,
       chunk: {
-        include: {
-          document: true
+        select: {
+          id: true,
+          content: true,
+          document: {
+            select: {
+              id: true,
+              name: true,
+              description: true,
+            }
+          }
         }
       }
     }
@@ -96,7 +155,15 @@ export async function searchSimilarChunks(
 
   // Calculate cosine similarity for each vector
   const similarities = vectors.map(v => {
-    const storedEmbedding = JSON.parse(v.embedding as string);
+    let storedEmbedding: number[] = [];
+    try {
+      const raw = JSON.parse(String(v.embedding || '[]'));
+      if (Array.isArray(raw)) {
+        storedEmbedding = raw.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n));
+      }
+    } catch {
+      storedEmbedding = [];
+    }
     const similarity = cosineSimilarity(queryEmbedding, storedEmbedding);
     return {
       chunk: {

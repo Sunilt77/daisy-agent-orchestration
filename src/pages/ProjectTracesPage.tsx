@@ -1,7 +1,30 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, Activity, DollarSign, Clock, MessageSquare, Filter, Search } from 'lucide-react';
+import { ArrowLeft, Activity, DollarSign, Clock, MessageSquare, Filter, Search, RotateCcw } from 'lucide-react';
 import Pagination from '../components/Pagination';
+
+function formatToolTraceName(rawName?: string | null) {
+  const raw = String(rawName || '').trim();
+  if (!raw) return 'Unknown tool';
+  const normalized = raw.replace(/-/g, '_');
+  const bundleSplitIndex = normalized.indexOf('_tool_');
+  if (bundleSplitIndex >= 0) {
+    let bundleName = normalized.slice(0, bundleSplitIndex);
+    let toolName = normalized.slice(bundleSplitIndex + 6);
+    bundleName = bundleName.replace(/^mcp_bundle_/, '').replace(/^bundle_/, '').replace(/_bundle$/, '');
+    toolName = toolName.replace(/^tool_/, '').replace(/^npm_/, '').replace(/_mcp_server_/, '_').replace(/_mcp_/, '_');
+    const bundlePrefix = bundleName.replace(/_mcp$/, '');
+    if (bundlePrefix && toolName.startsWith(bundlePrefix + '_')) {
+      toolName = toolName.slice(bundlePrefix.length + 1);
+    }
+    return `${bundleName} / ${toolName}`;
+  }
+  return normalized
+    .replace(/^mcp_bundle_/, '')
+    .replace(/^bundle_/, '')
+    .replace(/^mcp_/, '')
+    .replace(/^tool_/, '');
+}
 
 interface Trace {
   id: number;
@@ -100,6 +123,7 @@ export default function ProjectTracesPage() {
   const [localPageSize, setLocalPageSize] = useState(10);
   const [localToolPage, setLocalToolPage] = useState(1);
   const [localToolPageSize, setLocalToolPageSize] = useState(10);
+  const hasFilters = Boolean(q || status || kind || from || to);
 
   useEffect(() => {
     fetch(`/api/projects/${id}`)
@@ -193,11 +217,32 @@ export default function ProjectTracesPage() {
 
   useEffect(() => {
     setLocalPage(1);
-  }, [traces.length, id]);
+  }, [traces.length, id, q]);
 
   useEffect(() => {
     setLocalToolPage(1);
-  }, [toolTraces.length, id]);
+  }, [toolTraces.length, id, q, status]);
+
+  const localFilteredTraces = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    if (!query) return traces;
+    return traces.filter((trace) =>
+      [trace.agent_name, trace.agent_role, trace.input, trace.output, trace.created_at]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query))
+    );
+  }, [traces, q]);
+
+  const localFilteredToolTraces = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    return toolTraces.filter((trace) => {
+      const matchesQuery = !query || [trace.tool_name, trace.tool_type, trace.agent_name, trace.args, trace.result, trace.error]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query));
+      const matchesStatus = !status || String(trace.status || '').toLowerCase() === String(status || '').toLowerCase();
+      return matchesQuery && matchesStatus;
+    });
+  }, [toolTraces, q, status]);
 
   const pagedRuns = useMemo(() => {
     const start = (runsPage - 1) * runsPageSize;
@@ -206,13 +251,13 @@ export default function ProjectTracesPage() {
 
   const pagedTraces = useMemo(() => {
     const start = (localPage - 1) * localPageSize;
-    return traces.slice(start, start + localPageSize);
-  }, [traces, localPage, localPageSize]);
+    return localFilteredTraces.slice(start, start + localPageSize);
+  }, [localFilteredTraces, localPage, localPageSize]);
 
   const pagedToolTraces = useMemo(() => {
     const start = (localToolPage - 1) * localToolPageSize;
-    return toolTraces.slice(start, start + localToolPageSize);
-  }, [toolTraces, localToolPage, localToolPageSize]);
+    return localFilteredToolTraces.slice(start, start + localToolPageSize);
+  }, [localFilteredToolTraces, localToolPage, localToolPageSize]);
 
   if (loading) {
     return <div className="p-8 text-center text-slate-500">Loading traces...</div>;
@@ -414,6 +459,21 @@ export default function ProjectTracesPage() {
                   </select>
                 </div>
                 <div className="md:col-span-1 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setQ('');
+                      setStatus('');
+                      setKind('');
+                      setFrom('');
+                      setTo('');
+                    }}
+                    disabled={!hasFilters}
+                    className="inline-flex items-center gap-2 border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-45 text-slate-700 px-4 py-2 rounded-lg text-sm font-medium mr-2"
+                  >
+                    <RotateCcw size={14} />
+                    Reset
+                  </button>
                   <button onClick={() => { loadRuns(); loadInsights(); }} className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-medium">
                     <Filter size={16} /> Apply
                   </button>
@@ -515,7 +575,7 @@ export default function ProjectTracesPage() {
             <Activity size={18} /> Execution History
           </div>
           <div className="overflow-y-auto flex-1 p-2 space-y-2">
-            {traces.length === 0 ? (
+            {localFilteredTraces.length === 0 ? (
               <div className="p-4 text-center text-slate-500 text-sm">No traces found for this project.</div>
             ) : (
               pagedTraces.map(trace => (
@@ -547,7 +607,7 @@ export default function ProjectTracesPage() {
             <Pagination
               page={localPage}
               pageSize={localPageSize}
-              total={traces.length}
+              total={localFilteredTraces.length}
               onPageChange={setLocalPage}
               onPageSizeChange={setLocalPageSize}
             />
@@ -613,7 +673,7 @@ export default function ProjectTracesPage() {
             <Activity size={18} /> Tool Execution History
           </div>
           <div className="overflow-y-auto flex-1 p-2 space-y-2">
-            {toolTraces.length === 0 ? (
+            {localFilteredToolTraces.length === 0 ? (
               <div className="p-4 text-center text-slate-500 text-sm">No tool traces found for this project.</div>
             ) : (
               pagedToolTraces.map(trace => (
@@ -623,7 +683,7 @@ export default function ProjectTracesPage() {
                   className={`p-3 rounded-lg border cursor-pointer transition-colors ${selectedToolTrace?.id === trace.id ? 'bg-indigo-50 border-indigo-200' : 'bg-white border-slate-200 hover:border-indigo-300'}`}
                 >
                   <div className="flex justify-between items-start mb-1">
-                    <span className="font-medium text-slate-900 text-sm truncate">{trace.tool_name}</span>
+                    <span className="font-medium text-slate-900 text-sm truncate">{formatToolTraceName(trace.tool_name)}</span>
                     <span className="text-xs text-slate-500 whitespace-nowrap ml-2">
                       {new Date(trace.created_at).toLocaleTimeString()}
                     </span>
@@ -645,7 +705,7 @@ export default function ProjectTracesPage() {
             <Pagination
               page={localToolPage}
               pageSize={localToolPageSize}
-              total={toolTraces.length}
+              total={localFilteredToolTraces.length}
               onPageChange={setLocalToolPage}
               onPageSizeChange={setLocalToolPageSize}
             />

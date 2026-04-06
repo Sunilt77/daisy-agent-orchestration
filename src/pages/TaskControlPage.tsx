@@ -8,6 +8,19 @@ type CrewRun = { id: number; crew_id: number; initial_input?: string; created_at
 type PendingJob = { id: number; type: string; status: string; created_at: string; payload?: any };
 type FailedAgent = { id: number; agent_id: number; task?: string; created_at: string; agent_name: string };
 type FailedCrew = { id: number; crew_id: number; initial_input?: string; created_at: string; crew_name: string };
+type RuntimeMetrics = {
+  lookback_hours: number;
+  queue_depth_pending: number;
+  jobs_total: number;
+  jobs_terminal: number;
+  jobs_failed: number;
+  throughput_per_minute: number;
+  failure_rate_pct: number;
+  queue_wait_ms: { p50: number; p95: number; p99: number };
+  run_duration_ms: { p50: number; p95: number; p99: number };
+  max_attempts: number;
+  jobs_by_type: Record<string, number>;
+};
 
 export default function TaskControlPage() {
   const [loading, setLoading] = useState(false);
@@ -17,6 +30,7 @@ export default function TaskControlPage() {
   const [pendingJobs, setPendingJobs] = useState<PendingJob[]>([]);
   const [failedAgentExecutions, setFailedAgentExecutions] = useState<FailedAgent[]>([]);
   const [failedCrewExecutions, setFailedCrewExecutions] = useState<FailedCrew[]>([]);
+  const [runtimeMetrics, setRuntimeMetrics] = useState<RuntimeMetrics | null>(null);
   const [runningAgentPage, setRunningAgentPage] = useState(1);
   const [runningCrewPage, setRunningCrewPage] = useState(1);
   const [pendingJobsPage, setPendingJobsPage] = useState(1);
@@ -24,6 +38,7 @@ export default function TaskControlPage() {
   const [failedCrewPage, setFailedCrewPage] = useState(1);
   const [pageSize, setPageSize] = useState(8);
   const [query, setQuery] = useState('');
+  const [sectionFilter, setSectionFilter] = useState<'all' | 'running' | 'pending' | 'failed'>('all');
 
   const load = async () => {
     setLoading(true);
@@ -36,6 +51,7 @@ export default function TaskControlPage() {
       setPendingJobs(Array.isArray(data.pendingJobs) ? data.pendingJobs : []);
       setFailedAgentExecutions(Array.isArray(data.failedAgentExecutions) ? data.failedAgentExecutions : []);
       setFailedCrewExecutions(Array.isArray(data.failedCrewExecutions) ? data.failedCrewExecutions : []);
+      setRuntimeMetrics(data.runtimeMetrics || null);
     } catch (e: any) {
       setMsg(e.message || 'Failed to load task control');
     } finally {
@@ -54,6 +70,13 @@ export default function TaskControlPage() {
   useEffect(() => setPendingJobsPage(1), [pendingJobs.length]);
   useEffect(() => setFailedAgentPage(1), [failedAgentExecutions.length]);
   useEffect(() => setFailedCrewPage(1), [failedCrewExecutions.length]);
+  useEffect(() => {
+    setRunningAgentPage(1);
+    setRunningCrewPage(1);
+    setPendingJobsPage(1);
+    setFailedAgentPage(1);
+    setFailedCrewPage(1);
+  }, [query, sectionFilter, pageSize]);
 
   const postAction = async (url: string, successMessage: string) => {
     const res = await fetch(url, { method: 'POST' });
@@ -80,17 +103,27 @@ export default function TaskControlPage() {
   const pagedPendingJobs = useMemo(() => sliceByPage(filteredPendingJobs, pendingJobsPage), [filteredPendingJobs, pendingJobsPage, pageSize]);
   const pagedFailedAgents = useMemo(() => sliceByPage(filteredFailedAgentExecutions, failedAgentPage), [filteredFailedAgentExecutions, failedAgentPage, pageSize]);
   const pagedFailedCrews = useMemo(() => sliceByPage(filteredFailedCrewExecutions, failedCrewPage), [filteredFailedCrewExecutions, failedCrewPage, pageSize]);
+  const hasTaskFilters = query.trim().length > 0 || sectionFilter !== 'all';
+  const filteredRunningTotal = filteredRunningAgentExecutions.length + filteredRunningCrewExecutions.length;
+  const filteredFailureTotal = filteredFailedAgentExecutions.length + filteredFailedCrewExecutions.length;
+  const filteredTotalRows = filteredRunningTotal + filteredPendingJobs.length + filteredFailureTotal;
+  const rawTotalRows = runningAgentExecutions.length + runningCrewExecutions.length + pendingJobs.length + failedAgentExecutions.length + failedCrewExecutions.length;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900">Task Control Center</h1>
-          <p className="text-slate-500 mt-1">See active agents/crews, queued jobs, and apply stop/retry actions.</p>
+      <div className="swarm-hero p-6">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="text-3xl font-black text-white">Task Control Center</h1>
+            <p className="text-slate-300 mt-1">Monitor active agent and crew workloads, queue health, and failure recovery in one place.</p>
+          </div>
+          <button
+            onClick={load}
+            className="px-3 py-2 rounded-lg border border-white/20 bg-white/10 text-white text-sm inline-flex items-center gap-2 hover:bg-white/15"
+          >
+            <RefreshCw size={14} /> Refresh
+          </button>
         </div>
-        <button onClick={load} className="px-3 py-2 rounded-lg border border-slate-300 text-slate-700 text-sm inline-flex items-center gap-2">
-          <RefreshCw size={14} /> Refresh
-        </button>
       </div>
 
       {msg && <div className="text-sm text-slate-700 bg-slate-100 border border-slate-200 rounded-lg px-3 py-2">{msg}</div>}
@@ -111,6 +144,44 @@ export default function TaskControlPage() {
           </div>
         ))}
       </div>
+
+      {runtimeMetrics && (
+        <section className="rounded-2xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold text-slate-900">Runtime Health (Last {runtimeMetrics.lookback_hours}h)</h2>
+            <span className="text-xs text-slate-500">Ops telemetry</span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-3">
+            <div className="rounded-lg border border-slate-200 p-3">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500">Queue Wait P95</div>
+              <div className="mt-1 text-lg font-bold text-slate-900">{runtimeMetrics.queue_wait_ms.p95}ms</div>
+            </div>
+            <div className="rounded-lg border border-slate-200 p-3">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500">Run Duration P95</div>
+              <div className="mt-1 text-lg font-bold text-slate-900">{runtimeMetrics.run_duration_ms.p95}ms</div>
+            </div>
+            <div className="rounded-lg border border-slate-200 p-3">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500">Failure Rate</div>
+              <div className="mt-1 text-lg font-bold text-slate-900">{runtimeMetrics.failure_rate_pct}%</div>
+            </div>
+            <div className="rounded-lg border border-slate-200 p-3">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500">Throughput / Min</div>
+              <div className="mt-1 text-lg font-bold text-slate-900">{runtimeMetrics.throughput_per_minute}</div>
+            </div>
+            <div className="rounded-lg border border-slate-200 p-3">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500">Terminal Jobs</div>
+              <div className="mt-1 text-lg font-bold text-slate-900">{runtimeMetrics.jobs_terminal}</div>
+            </div>
+            <div className="rounded-lg border border-slate-200 p-3">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500">Max Attempts</div>
+              <div className="mt-1 text-lg font-bold text-slate-900">{runtimeMetrics.max_attempts}</div>
+            </div>
+          </div>
+          <div className="mt-3 text-xs text-slate-500">
+            Job mix: {Object.entries(runtimeMetrics.jobs_by_type || {}).map(([k, v]) => `${k}:${v}`).join(' | ') || 'n/a'}
+          </div>
+        </section>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
         <button className="px-3 py-2 rounded-lg bg-red-600 text-white text-sm" onClick={() => postAction('/api/task-control/stop-running-agents', 'Stopped all running agent executions')}>
@@ -144,8 +215,46 @@ export default function TaskControlPage() {
             </select>
           </div>
         </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {[
+            { key: 'all', label: `All (${rawTotalRows})` },
+            { key: 'running', label: `Running (${runningAgentExecutions.length + runningCrewExecutions.length})` },
+            { key: 'pending', label: `Pending (${pendingJobs.length})` },
+            { key: 'failed', label: `Failed (${failedAgentExecutions.length + failedCrewExecutions.length})` },
+          ].map((chip) => (
+            <button
+              key={chip.key}
+              type="button"
+              onClick={() => setSectionFilter(chip.key as 'all' | 'running' | 'pending' | 'failed')}
+              className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${
+                sectionFilter === chip.key
+                  ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                  : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+          <div className="text-xs text-slate-500 ml-1">
+            <span className="font-semibold text-slate-700">{filteredTotalRows}</span> visible of <span className="font-semibold text-slate-700">{rawTotalRows}</span>
+          </div>
+          <button
+            type="button"
+            disabled={!hasTaskFilters}
+            onClick={() => { setQuery(''); setSectionFilter('all'); }}
+            className="ml-auto rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-50 disabled:opacity-45"
+          >
+            Reset Filters
+          </button>
+        </div>
+        {hasTaskFilters && filteredTotalRows === 0 && (
+          <div className="mt-3 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            No task-control rows match your current search/filter combination.
+          </div>
+        )}
       </div>
 
+      {(sectionFilter === 'all' || sectionFilter === 'running') && (
       <section className="bg-white rounded-xl border border-slate-200 p-4">
         <h2 className="font-semibold text-slate-900 mb-3">Running Agent Executions ({runningAgentExecutions.length})</h2>
         <div className="space-y-2">
@@ -169,7 +278,9 @@ export default function TaskControlPage() {
           <Pagination page={runningAgentPage} pageSize={pageSize} total={filteredRunningAgentExecutions.length} onPageChange={setRunningAgentPage} />
         </div>
       </section>
+      )}
 
+      {(sectionFilter === 'all' || sectionFilter === 'running') && (
       <section className="bg-white rounded-xl border border-slate-200 p-4">
         <h2 className="font-semibold text-slate-900 mb-3">Running Crew Executions ({runningCrewExecutions.length})</h2>
         <div className="space-y-2">
@@ -190,7 +301,9 @@ export default function TaskControlPage() {
           <Pagination page={runningCrewPage} pageSize={pageSize} total={filteredRunningCrewExecutions.length} onPageChange={setRunningCrewPage} />
         </div>
       </section>
+      )}
 
+      {(sectionFilter === 'all' || sectionFilter === 'pending') && (
       <section className="bg-white rounded-xl border border-slate-200 p-4">
         <h2 className="font-semibold text-slate-900 mb-3">Pending Jobs ({pendingJobs.length})</h2>
         <div className="space-y-2">
@@ -211,7 +324,9 @@ export default function TaskControlPage() {
           <Pagination page={pendingJobsPage} pageSize={pageSize} total={filteredPendingJobs.length} onPageChange={setPendingJobsPage} />
         </div>
       </section>
+      )}
 
+      {(sectionFilter === 'all' || sectionFilter === 'failed') && (
       <section className="bg-white rounded-xl border border-slate-200 p-4">
         <h2 className="font-semibold text-slate-900 mb-3">Failed Executions</h2>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
@@ -252,6 +367,7 @@ export default function TaskControlPage() {
           </div>
         </div>
       </section>
+      )}
 
       {loading && <div className="text-xs text-slate-500">Refreshing...</div>}
     </div>

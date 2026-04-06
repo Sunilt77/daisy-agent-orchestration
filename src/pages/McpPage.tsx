@@ -17,6 +17,7 @@ interface McpBundle {
   name: string;
   slug: string;
   description?: string | null;
+  is_exposed: boolean;
   tool_count: number;
   tools: Array<{
     tool_id: number;
@@ -57,13 +58,151 @@ interface CredentialOption {
   category?: string;
 }
 
+interface McpTestTool {
+  tool_id: number;
+  tool_name: string;
+  exposed_name?: string | null;
+  description?: string;
+  tool_type?: string;
+  inputSchema?: {
+    type?: string;
+    properties?: Record<string, { type?: string; description?: string }>;
+    required?: string[];
+    additionalProperties?: boolean;
+  };
+}
+
+interface BundleTestPayload {
+  bundle: {
+    id: number;
+    name: string;
+    slug: string;
+    description?: string;
+  };
+  tools: McpTestTool[];
+}
+
+interface LocalMcpRuntime {
+  runtime_key: string;
+  package_name: string;
+  runtime_label: string;
+  transport: string;
+  runtime_mode: string;
+  raw_command: string;
+  raw_args: string[];
+  env_keys: string[];
+  timeout_ms: number;
+  tool_count: number;
+  exposed_tool_count: number;
+  bundle_count: number;
+  attached_agent_count: number;
+  recommended_endpoint?: string | null;
+  updated_at?: string | null;
+  tools: Array<{
+    id: number;
+    name: string;
+    description?: string;
+    mcp_tool_name?: string;
+    exposed_name?: string | null;
+    is_exposed: boolean;
+  }>;
+  bundles: Array<{
+    id: number;
+    name: string;
+    slug: string;
+    description?: string | null;
+    is_exposed: boolean;
+  }>;
+  agent_links: Array<{
+    id: number;
+    name: string;
+  }>;
+}
+
+interface ResourceAccessPayload {
+  owner?: {
+    owner_user_id?: string;
+    owner_org_id?: string | null;
+    visibility?: 'private' | 'org';
+  } | null;
+  shares?: Array<{
+    id: number;
+    shared_with_user_id?: string | null;
+    shared_with_org_id?: string | null;
+    created_at?: string;
+  }>;
+}
+
+async function safeJson(res: Response) {
+  try {
+    const text = await res.text();
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+
 function slugify(input: string) {
   return input.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_').replace(/_+/g, '_');
+}
+
+function compactToolAlias(input: string, fallback = 'tool') {
+  const normalized = slugify(input)
+    .replace(/^tool_+/, '')
+    .replace(/^mcp_+/, '')
+    .replace(/_mcp_server$/i, '')
+    .replace(/_mcp$/i, '')
+    .replace(/_server$/i, '');
+  return normalized || slugify(fallback) || 'tool';
+}
+
+function compactBundleSlug(input: string, fallback = 'mcp bundle') {
+  const normalized = slugify(input)
+    .replace(/^bundle_+/, '')
+    .replace(/^mcp_bundle_+/, '')
+    .replace(/_bundle$/i, '');
+  const base = normalized || slugify(fallback).replace(/^bundle_+/, '').replace(/^mcp_bundle_+/, '').replace(/_bundle$/i, '') || 'mcp';
+  return `${base}_bundle`;
+}
+
+function humanizeCompactName(input: string) {
+  const compact = compactToolAlias(input, input);
+  return compact
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function stringifyTestValue(type: string | undefined, raw: string) {
+  const value = raw.trim();
+  if (value === '') return undefined;
+  if (type === 'number' || type === 'integer') {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) throw new Error(`Expected a number, received "${raw}"`);
+    return parsed;
+  }
+  if (type === 'boolean') {
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    throw new Error(`Expected true or false, received "${raw}"`);
+  }
+  if (type === 'object' || type === 'array') {
+    return JSON.parse(value);
+  }
+  return raw;
+}
+
+function formatDisplayedMcpToolName(name?: string | null) {
+  const value = String(name || '').trim();
+  if (!value) return '';
+  return `tool_${compactToolAlias(value, value)}`;
 }
 
 export default function McpPage() {
   const [rows, setRows] = useState<ExposedToolRow[]>([]);
   const [bundles, setBundles] = useState<McpBundle[]>([]);
+  const [localRuntimes, setLocalRuntimes] = useState<LocalMcpRuntime[]>([]);
   const [authToken, setAuthToken] = useState<string>('');
   const [tokenSaved, setTokenSaved] = useState<boolean>(false);
   const [credentials, setCredentials] = useState<CredentialOption[]>([]);
@@ -71,7 +210,7 @@ export default function McpPage() {
   const [selectedCredentialId, setSelectedCredentialId] = useState<string>('');
   const [copied, setCopied] = useState<string>('');
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
-  const [bulkPrefix, setBulkPrefix] = useState<string>('tool_');
+  const [bulkPrefix, setBulkPrefix] = useState<string>('');
   const [bundleName, setBundleName] = useState<string>('Selected Tools Bundle');
   const [bundleSlug, setBundleSlug] = useState<string>('selected_tools_bundle');
   const [bundleDescription, setBundleDescription] = useState<string>('A grouped MCP exposure of selected tools.');
@@ -89,6 +228,7 @@ export default function McpPage() {
   const [toolsPageSize, setToolsPageSize] = useState(12);
   const [bundleSearch, setBundleSearch] = useState('');
   const [toolSearch, setToolSearch] = useState('');
+  const [bundleExposureFilter, setBundleExposureFilter] = useState<'all' | 'published' | 'private'>('all');
   const [toolCategoryFilter, setToolCategoryFilter] = useState('all');
   const [toolTypeFilter, setToolTypeFilter] = useState('all');
   const [toolExposureFilter, setToolExposureFilter] = useState<'all' | 'exposed' | 'available'>('all');
@@ -99,6 +239,24 @@ export default function McpPage() {
   const [restoringVersionId, setRestoringVersionId] = useState<number | null>(null);
   const [bundleDeleteState, setBundleDeleteState] = useState<null | { bundle: McpBundle; message?: string }>(null);
   const [expandedBundleIds, setExpandedBundleIds] = useState<number[]>([]);
+  const [bundleTestState, setBundleTestState] = useState<BundleTestPayload | null>(null);
+  const [bundleTestLoading, setBundleTestLoading] = useState(false);
+  const [bundleTestLoadingId, setBundleTestLoadingId] = useState<number | null>(null);
+  const [bundleTestSelectedToolId, setBundleTestSelectedToolId] = useState<string>('');
+  const [bundleTestValues, setBundleTestValues] = useState<Record<string, string>>({});
+  const [bundleTestError, setBundleTestError] = useState<string>('');
+  const [bundleTestResult, setBundleTestResult] = useState<string>('');
+  const [bundleTestRunning, setBundleTestRunning] = useState(false);
+  const [bundleAccessState, setBundleAccessState] = useState<null | {
+    bundle: McpBundle;
+    data: ResourceAccessPayload | null;
+    loading: boolean;
+    saving: boolean;
+    error: string;
+    visibility: 'private' | 'org';
+    sharedUserIdsText: string;
+    sharedOrgIdsText: string;
+  }>(null);
 
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
   const streamableUrl = `${origin}/mcp`;
@@ -107,17 +265,20 @@ export default function McpPage() {
   const load = async () => {
     setLoadError('');
     try {
-      const [toolsRes, cfgRes, bundlesRes] = await Promise.all([
+      const [toolsRes, cfgRes, bundlesRes, runtimesRes] = await Promise.all([
         fetch('/api/mcp/exposed-tools'),
         fetch('/api/mcp/config'),
         fetch('/api/mcp/bundles'),
+        fetch('/api/mcp/local-packages'),
       ]);
       const credRes = await fetch(`/api/credentials?category=${encodeURIComponent(credentialCategory)}`).catch(() => null);
       const tools = await toolsRes.json().catch(() => []);
       const cfg = await cfgRes.json().catch(() => ({}));
       const bundleRows = await bundlesRes.json().catch(() => []);
+      const runtimeRows = await runtimesRes.json().catch(() => []);
       setRows(Array.isArray(tools) ? tools : []);
       setBundles(Array.isArray(bundleRows) ? bundleRows : []);
+      setLocalRuntimes(Array.isArray(runtimeRows) ? runtimeRows : []);
       if (credRes) {
         const creds = await credRes.json().catch(() => []);
         setCredentials(Array.isArray(creds) ? creds : []);
@@ -131,19 +292,86 @@ export default function McpPage() {
     }
   };
 
+  const openBundleAccess = async (bundle: McpBundle) => {
+    setBundleAccessState({
+      bundle,
+      data: null,
+      loading: true,
+      saving: false,
+      error: '',
+      visibility: 'private',
+      sharedUserIdsText: '',
+      sharedOrgIdsText: '',
+    });
+    try {
+      const res = await fetch(`/api/resource-access/mcp_bundle/${bundle.id}`);
+      const data = await safeJson(res) as ResourceAccessPayload | { error?: string } | null;
+      if (!res.ok) throw new Error((data as any)?.error || 'Failed to load access');
+      const payload = (data || {}) as ResourceAccessPayload;
+      setBundleAccessState({
+        bundle,
+        data: payload,
+        loading: false,
+        saving: false,
+        error: '',
+        visibility: payload.owner?.visibility === 'org' ? 'org' : 'private',
+        sharedUserIdsText: (payload.shares || []).map((row) => String(row.shared_with_user_id || '').trim()).filter(Boolean).join(', '),
+        sharedOrgIdsText: (payload.shares || []).map((row) => String(row.shared_with_org_id || '').trim()).filter(Boolean).join(', '),
+      });
+    } catch (e: any) {
+      setBundleAccessState({
+        bundle,
+        data: null,
+        loading: false,
+        saving: false,
+        error: e.message || 'Failed to load access',
+        visibility: 'private',
+        sharedUserIdsText: '',
+        sharedOrgIdsText: '',
+      });
+    }
+  };
+
+  const saveBundleAccess = async () => {
+    if (!bundleAccessState) return;
+    setBundleAccessState((prev) => prev ? { ...prev, saving: true, error: '' } : prev);
+    try {
+      const res = await fetch(`/api/resource-access/mcp_bundle/${bundleAccessState.bundle.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          visibility: bundleAccessState.visibility,
+          shared_user_ids: bundleAccessState.sharedUserIdsText.split(',').map((value) => value.trim()).filter(Boolean),
+          shared_org_ids: bundleAccessState.sharedOrgIdsText.split(',').map((value) => value.trim()).filter(Boolean),
+        }),
+      });
+      const data = await safeJson(res) as ResourceAccessPayload | { error?: string } | null;
+      if (!res.ok) throw new Error((data as any)?.error || 'Failed to save access');
+      const payload = (data || {}) as ResourceAccessPayload;
+      setBundleAccessState((prev) => prev ? {
+        ...prev,
+        data: payload,
+        saving: false,
+        error: '',
+      } : prev);
+    } catch (e: any) {
+      setBundleAccessState((prev) => prev ? { ...prev, saving: false, error: e.message || 'Failed to save access' } : prev);
+    }
+  };
+
   useEffect(() => {
     load();
   }, [credentialCategory]);
 
   useEffect(() => setBundlesPage(1), [bundles.length]);
   useEffect(() => setToolsPage(1), [rows.length]);
-  useEffect(() => setBundlesPage(1), [bundleSearch]);
+  useEffect(() => setBundlesPage(1), [bundleSearch, bundleExposureFilter]);
   useEffect(() => setToolsPage(1), [toolSearch]);
   useEffect(() => setToolsPage(1), [toolCategoryFilter, toolTypeFilter, toolExposureFilter, toolSelectionFilter]);
 
   useEffect(() => {
     if (bundleName.trim() && !isSlugManual) {
-      setBundleSlug(slugify(bundleName));
+      setBundleSlug(compactBundleSlug(bundleName, bundleName));
     }
   }, [bundleName, isSlugManual]);
 
@@ -153,8 +381,9 @@ export default function McpPage() {
     if (selectedTools.length === 0) return;
 
     if (!isNameManual) {
+      const primaryLabel = selectedTools[0].exposed_name || selectedTools[0].tool_name;
       const suggestedName = selectedTools.length === 1 
-        ? `${selectedTools[0].tool_name} Bundle`
+        ? `${humanizeCompactName(primaryLabel)} Bundle`
         : `${selectedTools.length} Tools Bundle`;
       setBundleName(suggestedName);
     }
@@ -208,6 +437,7 @@ export default function McpPage() {
     setIsDescriptionManual(false);
     setBundleName('Selected Tools Bundle');
     setBundleDescription('A grouped MCP exposure of selected tools.');
+    setBundleSlug('selected_tools_bundle');
   };
 
   const toggleSelect = (toolId: number) => {
@@ -226,7 +456,9 @@ export default function McpPage() {
   const bulkExpose = async () => {
     const targets = rows.filter(r => selectedIds.includes(r.tool_id));
     for (const row of targets) {
-      const exposedName = (bulkPrefix || 'tool_') + row.tool_name.toLowerCase().replace(/\s+/g, '_');
+      const prefix = compactToolAlias(bulkPrefix || '', '');
+      const toolBase = compactToolAlias(row.exposed_name || row.tool_name, row.tool_name);
+      const exposedName = prefix ? `${prefix}_${toolBase}` : toolBase;
       await fetch(`/api/mcp/exposed-tools/${row.tool_id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -249,7 +481,7 @@ export default function McpPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: bundleName.trim() || 'MCP Bundle',
-          slug: slugify(bundleSlug || bundleName || 'mcp_bundle'),
+          slug: compactBundleSlug(bundleSlug || bundleName || 'mcp bundle', bundleName || 'mcp bundle'),
           description: bundleDescription.trim() || null,
           tool_ids: selectedIds,
         })
@@ -347,12 +579,21 @@ export default function McpPage() {
     });
   }, [selectedIds, sortedTools, toolCategoryFilter, toolExposureFilter, toolSearch, toolSelectionFilter, toolTypeFilter]);
 
+  const filteredBundles = useMemo(() => {
+    const query = bundleSearch.trim().toLowerCase();
+    return bundles.filter((bundle) => {
+      const matchesSearch = !query || `${bundle.name} ${bundle.slug} ${bundle.description || ''}`.toLowerCase().includes(query);
+      const matchesExposure = bundleExposureFilter === 'all'
+        || (bundleExposureFilter === 'published' && bundle.is_exposed)
+        || (bundleExposureFilter === 'private' && !bundle.is_exposed);
+      return matchesSearch && matchesExposure;
+    });
+  }, [bundleExposureFilter, bundleSearch, bundles]);
+
   const pagedBundles = useMemo(() => {
     const start = (bundlesPage - 1) * bundlesPageSize;
-    return bundles
-      .filter((bundle) => !bundleSearch.trim() || `${bundle.name} ${bundle.slug} ${bundle.description || ''}`.toLowerCase().includes(bundleSearch.trim().toLowerCase()))
-      .slice(start, start + bundlesPageSize);
-  }, [bundles, bundlesPage, bundlesPageSize, bundleSearch]);
+    return filteredBundles.slice(start, start + bundlesPageSize);
+  }, [bundlesPage, bundlesPageSize, filteredBundles]);
 
   const pagedTools = useMemo(() => {
     const start = (toolsPage - 1) * toolsPageSize;
@@ -391,6 +632,23 @@ export default function McpPage() {
       const res = await fetch(`/api/mcp/exposed-tools/${id}/versions`);
       const data = await res.json().catch(() => ({}));
       setExposedToolVersions(Array.isArray(data?.versions) ? data.versions : []);
+    }
+  };
+
+  const toggleBundleExposure = async (bundleId: number, exposed: boolean) => {
+    try {
+      const res = await fetch(`/api/mcp/bundles/${bundleId}/exposure`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_exposed: exposed })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.error || 'Failed to update exposure status');
+      }
+      await load();
+    } catch (e: any) {
+      setLoadError(e.message || 'Failed to update bundle exposure');
     }
   };
 
@@ -433,6 +691,71 @@ export default function McpPage() {
     ));
   };
 
+  const openBundleTester = async (bundle: McpBundle) => {
+    setBundleTestLoading(true);
+    setBundleTestLoadingId(bundle.id);
+    setBundleTestError('');
+    setBundleTestResult('');
+    setBundleTestValues({});
+    setBundleTestSelectedToolId('');
+    try {
+      const res = await fetch(`/api/mcp/bundles/${bundle.id}/test-tools`);
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error || 'Failed to load bundle tools');
+      setBundleTestState(data);
+      if (Array.isArray(data?.tools) && data.tools.length > 0) {
+        setBundleTestSelectedToolId(String(data.tools[0].tool_id));
+      }
+    } catch (e: any) {
+      setLoadError(e.message || 'Failed to open bundle tester');
+    } finally {
+      setBundleTestLoading(false);
+      setBundleTestLoadingId(null);
+    }
+  };
+
+  const selectedBundleTestTool = useMemo(() => {
+    if (!bundleTestState) return null;
+    return bundleTestState.tools.find((tool) => String(tool.tool_id) === bundleTestSelectedToolId) || null;
+  }, [bundleTestState, bundleTestSelectedToolId]);
+
+  const runBundleToolTest = async () => {
+    if (!bundleTestState || !selectedBundleTestTool) return;
+    setBundleTestError('');
+    setBundleTestResult('');
+    setBundleTestRunning(true);
+    try {
+      const schema = selectedBundleTestTool.inputSchema || { properties: {}, required: [] };
+      const properties = schema.properties || {};
+      const required = new Set((schema.required || []).map((key) => String(key)));
+      const args: Record<string, any> = {};
+      for (const [key, property] of Object.entries(properties) as Array<[string, { type?: string; description?: string }]>) {
+        const rawValue = bundleTestValues[key] ?? '';
+        if (!rawValue.trim()) {
+          if (required.has(key)) throw new Error(`"${key}" is required`);
+          continue;
+        }
+        args[key] = stringifyTestValue(property?.type, rawValue);
+      }
+
+      const res = await fetch(`/api/mcp/bundles/${bundleTestState.bundle.id}/test-run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tool_id: selectedBundleTestTool.tool_id,
+          args,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error || 'Failed to execute bundle tool');
+      setBundleTestResult(String(data?.result || ''));
+    } catch (e: any) {
+      setBundleTestError(e.message || 'Failed to execute bundle tool');
+    } finally {
+      setBundleTestRunning(false);
+    }
+  };
+
   const getBundleVersionToolIds = (toolIds?: string) => {
     if (!toolIds) return [];
     try {
@@ -463,18 +786,14 @@ export default function McpPage() {
       <div className="swarm-hero p-6 mb-8">
       <div className="flex items-center justify-between">
         <div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-            <Sparkles size={12} />
-            MCP Surface
-          </div>
           <h1 className="text-3xl font-black text-white">MCPs</h1>
-          <p className="text-slate-300 mt-1">Expose tools as stable MCP contracts, group them into bundles, and manage the endpoint lifecycle safely.</p>
+          <p className="text-slate-300 mt-1">Publish tools as stable MCP contracts, group them into bundles, and manage endpoints safely.</p>
         </div>
       </div>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-4 mt-6">
         {[
           { label: 'Bundles', value: mcpInsights.bundles, icon: Boxes },
-          { label: 'Exposed Tools', value: mcpInsights.exposedTools, icon: Activity },
+          { label: 'Published Tools', value: mcpInsights.exposedTools, icon: Activity },
           { label: 'Available Tools', value: mcpInsights.availableTools, icon: Plug },
           { label: 'Selected', value: mcpInsights.selected, icon: Check },
         ].map((item) => (
@@ -498,9 +817,118 @@ export default function McpPage() {
           <div className="bg-white rounded-xl border border-slate-200 p-6">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2 text-slate-800 font-semibold">
+                <Activity size={18} /> Local MCP Runtimes ({localRuntimes.length})
+              </div>
+              <div className="text-xs text-slate-500">Registry first. Open details only when you need diagnostics, env keys, or bundle wiring.</div>
+            </div>
+
+            {localRuntimes.length === 0 && (
+              <div className="text-sm text-slate-500 border border-dashed border-slate-200 rounded-lg p-4">
+                No local npm MCP runtimes discovered yet. Import one from the Tools page to run it on this platform.
+              </div>
+            )}
+
+            <div className="space-y-3">
+              {localRuntimes.map((runtime) => {
+                const primaryBundle = runtime.bundles[0] || null;
+                const endpoint = runtime.recommended_endpoint ? `${origin}${runtime.recommended_endpoint}` : '';
+                return (
+                  <div key={runtime.runtime_key} className="border border-emerald-200 rounded-xl p-4 bg-emerald-50/40 shadow-sm">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold text-slate-900">{runtime.runtime_label}</div>
+                        <div className="text-xs text-slate-600 mt-1">{runtime.runtime_mode}</div>
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                          <span className="rounded-full bg-white/90 px-2 py-1 border border-emerald-100">{runtime.tool_count} tools</span>
+                          <span className="rounded-full bg-white/90 px-2 py-1 border border-emerald-100">{runtime.exposed_tool_count} exposed tools</span>
+                          <span className="rounded-full bg-white/90 px-2 py-1 border border-emerald-100">{runtime.bundle_count} bundles</span>
+                          <span className="rounded-full bg-white/90 px-2 py-1 border border-emerald-100">{runtime.attached_agent_count} agents</span>
+                        </div>
+                        <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                          <div className="rounded-lg border border-white/80 bg-white/80 p-3">
+                            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Runtime Command</div>
+                            <code className="mt-2 block whitespace-pre-wrap break-all text-slate-700">
+                              {[runtime.raw_command, ...runtime.raw_args].filter(Boolean).join(' ')}
+                            </code>
+                          </div>
+                          <div className="rounded-lg border border-white/80 bg-white/80 p-3">
+                            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Published Endpoint</div>
+                            <div className="mt-2 text-slate-700">
+                              {primaryBundle ? `Primary bundle: ${primaryBundle.name}` : 'No bundle published yet'}
+                            </div>
+                            {endpoint && (
+                              <code className="mt-2 block whitespace-pre-wrap break-all text-slate-700">{endpoint}</code>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <details className="mt-4 group rounded-xl border border-white/80 bg-white/70 open:bg-white/80">
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-3">
+                        <div>
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">Runtime Details</div>
+                          <div className="mt-1 text-xs text-slate-500">Env keys, bundles, attached agents, and the full runtime tool list.</div>
+                        </div>
+                        <span className="text-xs font-semibold text-emerald-700 group-open:hidden">Show details</span>
+                        <span className="text-xs font-semibold text-emerald-700 hidden group-open:inline">Hide details</span>
+                      </summary>
+                      <div className="grid grid-cols-1 gap-3 border-t border-white/90 p-3 xl:grid-cols-3">
+                        <div className="rounded-xl border border-white/80 bg-white/80 p-3">
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Env Keys</div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {runtime.env_keys.length > 0 ? runtime.env_keys.map((key) => (
+                              <span key={key} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">{key}</span>
+                            )) : (
+                              <span className="text-xs text-slate-500">No env vars configured</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="rounded-xl border border-white/80 bg-white/80 p-3">
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Bundles</div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {runtime.bundles.length > 0 ? runtime.bundles.map((bundle) => (
+                              <span key={bundle.id} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                                {bundle.name}{bundle.is_exposed ? ' · exposed' : ' · hidden'}
+                              </span>
+                            )) : (
+                              <span className="text-xs text-slate-500">Not bundled yet</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="rounded-xl border border-white/80 bg-white/80 p-3">
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Attached Agents</div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {runtime.agent_links.length > 0 ? runtime.agent_links.map((agent) => (
+                              <span key={agent.id} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">{agent.name}</span>
+                            )) : (
+                              <span className="text-xs text-slate-500">Not attached yet</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="xl:col-span-3 rounded-xl border border-white/80 bg-white/80 p-3">
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Runtime Tools</div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {runtime.tools.map((tool) => (
+                              <span key={tool.id} className="text-[11px] px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                                {formatDisplayedMcpToolName(tool.exposed_name || tool.mcp_tool_name || tool.name)}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </details>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2 text-slate-800 font-semibold">
                 <Plug size={18} /> MCP Bundles ({bundles.length})
               </div>
-              <div className="text-xs text-slate-500">Each bundle is one MCP endpoint with many tools.</div>
+              <div className="text-xs text-slate-500">Treat this like a published registry: inspect, connect, test, then open deeper details only when needed.</div>
             </div>
             <div className="relative mb-4">
               <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -511,10 +939,42 @@ export default function McpPage() {
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 pl-9 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
               />
             </div>
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+              {[
+                { key: 'all', label: 'All Bundles' },
+                { key: 'published', label: 'Published' },
+                { key: 'private', label: 'Private' },
+              ].map((chip) => (
+                <button
+                  key={chip.key}
+                  onClick={() => setBundleExposureFilter(chip.key as 'all' | 'published' | 'private')}
+                  className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] transition-colors ${
+                    bundleExposureFilter === chip.key
+                      ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                      : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                  }`}
+                >
+                  {chip.label}
+                </button>
+              ))}
+              <button
+                onClick={() => {
+                  setBundleSearch('');
+                  setBundleExposureFilter('all');
+                }}
+                disabled={!bundleSearch.trim() && bundleExposureFilter === 'all'}
+                className="ml-auto rounded-lg border border-slate-200 px-3 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-50 disabled:opacity-40"
+              >
+                Reset
+              </button>
+              <div className="w-full text-[11px] text-slate-500">
+                {filteredBundles.length} visible of {bundles.length}
+              </div>
+            </div>
 
-            {bundles.length === 0 && (
+            {filteredBundles.length === 0 && (
               <div className="text-sm text-slate-500 border border-dashed border-slate-200 rounded-lg p-4">
-                No bundles yet. Select tools below and create your first bundle.
+                {bundles.length === 0 ? 'No bundles yet. Select tools below and create your first bundle.' : 'No bundles match the current filters.'}
               </div>
             )}
 
@@ -533,6 +993,10 @@ export default function McpPage() {
                         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-600">
                           <span className="rounded-full bg-white/80 px-2 py-1 border border-indigo-100">{bundle.tool_count} tools</span>
                           <span>•</span>
+                          <span className={`rounded-full px-2 py-1 border ${bundle.is_exposed ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                            {bundle.is_exposed ? 'Published' : 'Private'}
+                          </span>
+                          <span>•</span>
                           <code className="max-w-full truncate bg-white border border-indigo-200 px-2 py-0.5 rounded font-mono">{streamable}</code>
                         </div>
                       </div>
@@ -547,7 +1011,26 @@ export default function McpPage() {
                           onClick={() => setConnectBundle(bundle)}
                           className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200"
                         >
-                          Connect
+                          Endpoints
+                        </button>
+                        <button
+                          onClick={() => void openBundleTester(bundle)}
+                          disabled={bundleTestLoading && bundleTestLoadingId === bundle.id}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-50 text-cyan-700 border border-cyan-200"
+                        >
+                          {bundleTestLoading && bundleTestLoadingId === bundle.id ? 'Loading...' : 'Test Tools'}
+                        </button>
+                        <button
+                          onClick={() => void openBundleAccess(bundle)}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white text-slate-700 border border-slate-200"
+                        >
+                          Sharing
+                        </button>
+                        <button
+                          onClick={() => toggleBundleExposure(bundle.id, !bundle.is_exposed)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${bundle.is_exposed ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}
+                        >
+                          {bundle.is_exposed ? 'Unpublish' : 'Publish'}
                         </button>
                         <button
                           onClick={() => void deleteBundle(bundle.id)}
@@ -557,39 +1040,50 @@ export default function McpPage() {
                         </button>
                       </div>
                     </div>
-                    <div className="mt-4 rounded-xl border border-white/70 bg-white/70 p-3">
-                      <div className="flex items-center justify-between gap-3">
+                    <details className="mt-4 group rounded-xl border border-white/70 bg-white/70 open:bg-white/85">
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-3">
                         <div>
                           <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">Included Tools</div>
                           <div className="text-xs text-slate-500 mt-1">
-                            {isExpanded ? 'All tool mappings in this MCP bundle.' : 'Showing a compact preview to keep the bundle list readable.'}
+                            {bundle.tools.length} exposed mappings inside this endpoint.
                           </div>
                         </div>
-                        {bundle.tools.length > 6 && (
-                          <button
-                            onClick={() => toggleBundleExpanded(bundle.id)}
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                          >
-                            {isExpanded ? 'Collapse tools' : `Show all ${bundle.tools.length}`}
-                          </button>
-                        )}
-                      </div>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {visibleTools.map((t) => (
-                        <span key={t.tool_id} className="text-[11px] px-2 py-1 rounded bg-white border border-slate-200 text-slate-700">
-                          {t.exposed_name ? `tool_${t.exposed_name}` : t.tool_name}
+                        <span className="text-xs font-semibold text-indigo-700 group-open:hidden">
+                          {bundle.tools.length > 6 ? `Preview ${visibleTools.length} of ${bundle.tools.length}` : 'Show tools'}
                         </span>
-                        ))}
-                        {!isExpanded && hiddenCount > 0 && (
-                          <button
-                            onClick={() => toggleBundleExpanded(bundle.id)}
-                            className="text-[11px] px-2 py-1 rounded border border-dashed border-slate-300 text-slate-500 hover:border-slate-400 hover:text-slate-700"
-                          >
-                            +{hiddenCount} more
-                          </button>
+                        <span className="text-xs font-semibold text-indigo-700 hidden group-open:inline">Hide tools</span>
+                      </summary>
+                      <div className="border-t border-white/90 px-3 pb-3 pt-1">
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {(isExpanded ? bundle.tools : visibleTools).map((t) => (
+                            <span key={t.tool_id} className="text-[11px] px-2 py-1 rounded bg-white border border-slate-200 text-slate-700">
+                              {formatDisplayedMcpToolName(t.exposed_name || t.tool_name)}
+                            </span>
+                          ))}
+                          {!isExpanded && hiddenCount > 0 && (
+                            <button
+                              onClick={(e) => {
+                                e.preventDefault();
+                                toggleBundleExpanded(bundle.id);
+                              }}
+                              className="text-[11px] px-2 py-1 rounded border border-dashed border-slate-300 text-slate-500 hover:border-slate-400 hover:text-slate-700"
+                            >
+                              +{hiddenCount} more
+                            </button>
+                          )}
+                        </div>
+                        {bundle.tools.length > 6 && (
+                          <div className="mt-3">
+                            <button
+                              onClick={() => toggleBundleExpanded(bundle.id)}
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                            >
+                              {isExpanded ? 'Show compact preview' : `Expand full tool list (${bundle.tools.length})`}
+                            </button>
+                          </div>
                         )}
                       </div>
-                    </div>
+                    </details>
                   </div>
                 );
               })}
@@ -598,7 +1092,7 @@ export default function McpPage() {
               <Pagination
                 page={bundlesPage}
                 pageSize={bundlesPageSize}
-                total={bundles.length}
+                total={filteredBundles.length}
                 onPageChange={setBundlesPage}
                 onPageSizeChange={setBundlesPageSize}
                 pageSizeOptions={[5, 10, 20]}
@@ -606,11 +1100,14 @@ export default function McpPage() {
             </div>
           </div>
 
-          <div className="bg-white rounded-xl border border-slate-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div className="text-slate-800 font-semibold">Create Bundle From Selection</div>
-              <div className="text-xs text-slate-500">{selectedIds.length} selected</div>
-            </div>
+          <details className="bg-white rounded-xl border border-slate-200 p-6 group" open={selectedIds.length > 0}>
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 mb-4">
+              <div>
+                <div className="text-slate-800 font-semibold">Create Bundle From Selection</div>
+                <div className="text-xs text-slate-500 mt-1">Select tools first, then open this builder to package and expose them together.</div>
+              </div>
+              <div className="text-xs font-semibold text-indigo-700">{selectedIds.length} selected</div>
+            </summary>
 
             <div className="flex flex-wrap items-end gap-3 mb-6">
               <div className="flex gap-2">
@@ -618,16 +1115,16 @@ export default function McpPage() {
                 <button onClick={clearSelection} className="px-3 py-2 rounded-lg text-xs font-bold border border-slate-200 text-slate-600 hover:bg-slate-50 transition-colors shadow-sm">Clear Selection</button>
               </div>
               <div className="flex-1 min-w-[120px]">
-                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 ml-1">Expose Prefix</label>
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 ml-1">Publish Prefix</label>
                 <input
                   className="w-full px-3 py-2 rounded-lg text-xs font-mono border border-slate-300 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all"
                   value={bulkPrefix}
                   onChange={(e) => setBulkPrefix(e.target.value)}
-                  placeholder="tool_"
+                  placeholder="meta_ads"
                 />
               </div>
               <button onClick={bulkExpose} disabled={selectedIds.length === 0} className="px-4 py-2 rounded-lg text-xs font-bold bg-emerald-600 text-white disabled:opacity-50 shadow-lg shadow-emerald-100 hover:bg-emerald-700 transition-all whitespace-nowrap">
-                Expose names for selection
+                Publish names for selection
               </button>
             </div>
 
@@ -680,7 +1177,7 @@ export default function McpPage() {
               </button>
               {bundleStatus && <span className="text-xs text-slate-600">{bundleStatus}</span>}
             </div>
-          </div>
+          </details>
 
           <div className="bg-white rounded-xl border border-slate-200 p-6">
             <div className="flex items-center justify-between gap-3 mb-3">
@@ -724,9 +1221,9 @@ export default function McpPage() {
                 onChange={(e) => setToolExposureFilter(e.target.value as 'all' | 'exposed' | 'available')}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
               >
-                <option value="all">All exposure states</option>
-                <option value="exposed">Exposed only</option>
-                <option value="available">Not exposed yet</option>
+                <option value="all">All publish states</option>
+                <option value="exposed">Published only</option>
+                <option value="available">Not published yet</option>
               </select>
               <select
                 value={toolSelectionFilter}
@@ -736,6 +1233,51 @@ export default function McpPage() {
                 <option value="all">All tools</option>
                 <option value="selected">Selected only</option>
               </select>
+            </div>
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => {
+                  setToolExposureFilter('all');
+                  setToolSelectionFilter('all');
+                }}
+                className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${
+                  toolExposureFilter === 'all' && toolSelectionFilter === 'all'
+                    ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                    : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                }`}
+              >
+                All Tools
+              </button>
+              <button
+                onClick={() => setToolExposureFilter('exposed')}
+                className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${
+                  toolExposureFilter === 'exposed'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                    : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                }`}
+              >
+                Published
+              </button>
+              <button
+                onClick={() => setToolExposureFilter('available')}
+                className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${
+                  toolExposureFilter === 'available'
+                    ? 'border-amber-200 bg-amber-50 text-amber-700'
+                    : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                }`}
+              >
+                Unpublished
+              </button>
+              <button
+                onClick={() => setToolSelectionFilter('selected')}
+                className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${
+                  toolSelectionFilter === 'selected'
+                    ? 'border-cyan-200 bg-cyan-50 text-cyan-700'
+                    : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                }`}
+              >
+                Selected
+              </button>
             </div>
             <div className="mb-5 flex flex-wrap items-center gap-2">
               <button
@@ -810,12 +1352,12 @@ export default function McpPage() {
                           </label>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-                          <input
-                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all outline-none"
-                            value={row.exposed_name || ''}
-                            onChange={(e) => updateRow(row.tool_id, { exposed_name: e.target.value })}
-                            placeholder={`tool_${row.tool_name.toLowerCase().replace(/\s+/g, '_')}`}
-                          />
+                            <input
+                              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all outline-none"
+                              value={row.exposed_name || ''}
+                              onChange={(e) => updateRow(row.tool_id, { exposed_name: e.target.value })}
+                              placeholder={compactToolAlias(row.tool_name, row.tool_name)}
+                            />
                           <div className="flex items-center gap-2">
                             <input
                               className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all outline-none"
@@ -857,6 +1399,7 @@ export default function McpPage() {
         </div>
 
         <div className="bg-white rounded-xl border border-slate-200 p-6 space-y-6">
+          <div className="text-slate-800 font-semibold">MCP Settings</div>
           <div>
             <div className="flex items-center gap-2 text-slate-800 font-semibold mb-2"><Key size={18} /> Auth (Optional)</div>
             <p className="text-xs text-slate-500 mb-3">If set, clients must send this token as Bearer or X-API-Key.</p>
@@ -905,34 +1448,46 @@ export default function McpPage() {
             {tokenSaved && <div className="mt-2 text-xs text-emerald-700">Saved</div>}
           </div>
 
-          <div>
-            <div className="text-slate-800 font-semibold mb-2">Base Endpoints</div>
-            <div className="text-xs text-slate-500 mb-2">Global Streamable</div>
-            <div className="flex items-center gap-2">
-              <code className="text-xs bg-slate-100 px-2 py-1 rounded w-full truncate">{streamableUrl}</code>
-              <button onClick={() => copy(streamableUrl)} className="text-slate-500 hover:text-slate-700">{copied === streamableUrl ? <Check size={14} /> : <Copy size={14} />}</button>
-            </div>
-            <div className="text-xs text-slate-500 mt-3 mb-2">Global SSE</div>
-            <div className="flex items-center gap-2">
-              <code className="text-xs bg-slate-100 px-2 py-1 rounded w-full truncate">{sseUrl}</code>
-              <button onClick={() => copy(sseUrl)} className="text-slate-500 hover:text-slate-700">{copied === sseUrl ? <Check size={14} /> : <Copy size={14} />}</button>
-            </div>
-          </div>
-
-          <div>
-            <button
-              onClick={runServerTest}
-              disabled={serverTestStatus === 'testing'}
-              className="inline-flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-lg bg-indigo-600 text-white disabled:opacity-60"
-            >
-              {serverTestStatus === 'testing' ? 'Testing...' : 'Test MCP Server'}
-            </button>
-            {serverTestMessage && (
-              <div className={`mt-2 text-xs ${serverTestStatus === 'ok' ? 'text-emerald-600' : 'text-red-600'}`}>
-                {serverTestMessage}
+          <details className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 group">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+              <div>
+                <div className="text-slate-800 font-semibold">Endpoints & Validation</div>
+                <div className="text-xs text-slate-500 mt-1">Base endpoints and a quick MCP server validation path.</div>
               </div>
-            )}
-          </div>
+              <span className="text-xs font-semibold text-slate-600 group-open:hidden">Show</span>
+              <span className="text-xs font-semibold text-slate-600 hidden group-open:inline">Hide</span>
+            </summary>
+            <div className="pt-4 space-y-5">
+              <div>
+                <div className="text-slate-800 font-semibold mb-2">Base Endpoints</div>
+                <div className="text-xs text-slate-500 mb-2">Global Streamable</div>
+                <div className="flex items-center gap-2">
+                  <code className="text-xs bg-slate-100 px-2 py-1 rounded w-full truncate">{streamableUrl}</code>
+                  <button onClick={() => copy(streamableUrl)} className="text-slate-500 hover:text-slate-700">{copied === streamableUrl ? <Check size={14} /> : <Copy size={14} />}</button>
+                </div>
+                <div className="text-xs text-slate-500 mt-3 mb-2">Global SSE</div>
+                <div className="flex items-center gap-2">
+                  <code className="text-xs bg-slate-100 px-2 py-1 rounded w-full truncate">{sseUrl}</code>
+                  <button onClick={() => copy(sseUrl)} className="text-slate-500 hover:text-slate-700">{copied === sseUrl ? <Check size={14} /> : <Copy size={14} />}</button>
+                </div>
+              </div>
+
+              <div>
+                <button
+                  onClick={runServerTest}
+                  disabled={serverTestStatus === 'testing'}
+                  className="inline-flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-lg bg-indigo-600 text-white disabled:opacity-60"
+                >
+                  {serverTestStatus === 'testing' ? 'Testing...' : 'Test MCP Server'}
+                </button>
+                {serverTestMessage && (
+                  <div className={`mt-2 text-xs ${serverTestStatus === 'ok' ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {serverTestMessage}
+                  </div>
+                )}
+              </div>
+            </div>
+          </details>
         </div>
       </div>
 
@@ -941,8 +1496,8 @@ export default function McpPage() {
           <div className="bg-white w-full max-w-2xl rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
             <div className="p-5 border-b border-slate-100 flex items-center justify-between">
               <div>
-                <div className="text-lg font-semibold text-slate-900">Connect to {connectBundle.name}</div>
-                <div className="text-xs text-slate-500">{connectBundle.tool_count} tools exposed in one MCP endpoint</div>
+                <div className="text-lg font-semibold text-slate-900">{connectBundle.name} Endpoints</div>
+                <div className="text-xs text-slate-500">{connectBundle.tool_count} tools published in one MCP endpoint</div>
               </div>
               <button onClick={() => setConnectBundle(null)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
             </div>
@@ -976,7 +1531,7 @@ export default function McpPage() {
                       <div className="flex flex-wrap gap-2">
                         {connectBundle.tools.map((tool) => (
                           <span key={tool.tool_id} className="text-[11px] px-2 py-1 rounded bg-slate-100 border border-slate-200 text-slate-700">
-                            {tool.exposed_name ? `tool_${tool.exposed_name}` : tool.tool_name}
+                            {formatDisplayedMcpToolName(tool.exposed_name || tool.tool_name)}
                           </span>
                         ))}
                       </div>
@@ -984,6 +1539,75 @@ export default function McpPage() {
                   </>
                 );
               })()}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {bundleAccessState && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-white w-full max-w-2xl rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
+            <div className="p-5 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <div className="text-lg font-semibold text-slate-900">Bundle Sharing</div>
+                <div className="text-xs text-slate-500">{bundleAccessState.bundle.name}</div>
+              </div>
+              <button onClick={() => setBundleAccessState(null)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="text-[11px] text-slate-500">Owner User</div>
+                  <div className="text-sm font-semibold text-slate-900 mt-1">{bundleAccessState.data?.owner?.owner_user_id || 'Unknown'}</div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="text-[11px] text-slate-500">Owner Org</div>
+                  <div className="text-sm font-semibold text-slate-900 mt-1">{bundleAccessState.data?.owner?.owner_org_id || 'None'}</div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="text-[11px] text-slate-500">Visibility</div>
+                  <select
+                    value={bundleAccessState.visibility}
+                    onChange={(e) => setBundleAccessState((prev) => prev ? { ...prev, visibility: e.target.value === 'org' ? 'org' : 'private' } : prev)}
+                    className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="private">Private</option>
+                    <option value="org">Organization</option>
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Shared User IDs</label>
+                  <textarea
+                    value={bundleAccessState.sharedUserIdsText}
+                    onChange={(e) => setBundleAccessState((prev) => prev ? { ...prev, sharedUserIdsText: e.target.value } : prev)}
+                    placeholder="user_123, user_456"
+                    className="w-full min-h-[84px] rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Shared Org IDs</label>
+                  <textarea
+                    value={bundleAccessState.sharedOrgIdsText}
+                    onChange={(e) => setBundleAccessState((prev) => prev ? { ...prev, sharedOrgIdsText: e.target.value } : prev)}
+                    placeholder="org_123, org_456"
+                    className="w-full min-h-[84px] rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
+              {bundleAccessState.loading && <div className="text-sm text-slate-500">Loading access…</div>}
+              {bundleAccessState.error && <div className="text-sm text-red-600">{bundleAccessState.error}</div>}
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setBundleAccessState(null)} className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50">Close</button>
+                <button
+                  onClick={() => void saveBundleAccess()}
+                  disabled={bundleAccessState.loading || bundleAccessState.saving}
+                  className="px-4 py-2 rounded-lg bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-60"
+                >
+                  {bundleAccessState.saving ? 'Saving…' : 'Save Access'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1085,6 +1709,103 @@ export default function McpPage() {
             <div className="p-5 border-t border-slate-100 bg-slate-50 flex justify-end gap-2">
               <button onClick={() => setBundleDeleteState(null)} className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100">Cancel</button>
               <button onClick={() => void deleteBundle(bundleDeleteState.bundle.id, true)} className="px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700">Force Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {bundleTestState && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-white w-full max-w-4xl rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
+            <div className="p-5 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <div className="text-lg font-semibold text-slate-900">Test Bundle Tools</div>
+                <div className="text-xs text-slate-500">{bundleTestState.bundle.name} · {bundleTestState.bundle.slug}</div>
+              </div>
+              <button onClick={() => setBundleTestState(null)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
+            </div>
+            <div className="p-5 grid grid-cols-1 lg:grid-cols-[260px,1fr] gap-5 max-h-[75vh] overflow-y-auto">
+              <div className="space-y-2">
+                <div className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Tools</div>
+                {bundleTestState.tools.map((tool) => (
+                  <button
+                    key={tool.tool_id}
+                    onClick={() => {
+                      setBundleTestSelectedToolId(String(tool.tool_id));
+                      setBundleTestValues({});
+                      setBundleTestError('');
+                      setBundleTestResult('');
+                    }}
+                    className={`w-full text-left rounded-xl border px-3 py-3 ${bundleTestSelectedToolId === String(tool.tool_id) ? 'border-cyan-300 bg-cyan-50' : 'border-slate-200 bg-white'}`}
+                  >
+                    <div className="text-sm font-semibold text-slate-900">{tool.exposed_name || tool.tool_name}</div>
+                    <div className="text-xs text-slate-500 mt-1">{tool.description || 'No description'}</div>
+                  </button>
+                ))}
+              </div>
+              <div className="space-y-4">
+                {selectedBundleTestTool ? (
+                  <>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="text-sm font-semibold text-slate-900">{selectedBundleTestTool.exposed_name || selectedBundleTestTool.tool_name}</div>
+                      <div className="text-xs text-slate-500 mt-1">{selectedBundleTestTool.description || 'No description'}</div>
+                    </div>
+
+                    {Object.entries(selectedBundleTestTool.inputSchema?.properties || {}).length > 0 ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {(Object.entries(selectedBundleTestTool.inputSchema?.properties || {}) as Array<[string, { type?: string; description?: string }]>).map(([key, property]) => {
+                          const isRequired = (selectedBundleTestTool.inputSchema?.required || []).includes(key);
+                          return (
+                            <div key={key}>
+                              <label className="block text-sm font-medium text-slate-700 mb-1">
+                                {key} {isRequired && <span className="text-red-500">*</span>}
+                              </label>
+                              <input
+                                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-cyan-500"
+                                value={bundleTestValues[key] || ''}
+                                onChange={(e) => setBundleTestValues((prev) => ({ ...prev, [key]: e.target.value }))}
+                                placeholder={
+                                  property?.type === 'object' ? '{"key":"value"}'
+                                  : property?.type === 'array' ? '["item"]'
+                                  : property?.type === 'boolean' ? 'true'
+                                  : property?.type === 'number' || property?.type === 'integer' ? '123'
+                                  : `Enter ${key}`
+                                }
+                              />
+                              <div className="mt-1 text-xs text-slate-500">
+                                {(property?.type || 'string')}{property?.description ? ` · ${property.description}` : ''}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="text-sm text-slate-500 border border-dashed border-slate-200 rounded-lg p-4">
+                        This tool does not declare structured inputs. Run it directly if it accepts empty args.
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => void runBundleToolTest()}
+                        disabled={bundleTestRunning}
+                        className="px-4 py-2 rounded-lg bg-cyan-600 text-white hover:bg-cyan-700 disabled:opacity-60 text-sm font-semibold"
+                      >
+                        {bundleTestRunning ? 'Running...' : 'Run Tool Test'}
+                      </button>
+                      {bundleTestError && <div className="text-sm text-red-600">{bundleTestError}</div>}
+                    </div>
+
+                    {bundleTestResult && (
+                      <pre className="rounded-xl bg-slate-950 text-slate-100 p-4 text-xs overflow-auto whitespace-pre-wrap">
+                        {bundleTestResult}
+                      </pre>
+                    )}
+                  </>
+                ) : (
+                  <div className="text-sm text-slate-500">Select a tool to start testing.</div>
+                )}
+              </div>
             </div>
           </div>
         </div>

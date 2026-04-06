@@ -22,7 +22,24 @@ declare module 'express-serve-static-core' {
   }
 }
 
+export function validatePasswordStrength(password: string): void {
+  if (!password || password.length < 8) {
+    throw new Error('Password must be at least 8 characters long');
+  }
+  
+  const hasUppercase = /[A-Z]/.test(password);
+  const hasLowercase = /[a-z]/.test(password);
+  const hasDigit = /\d/.test(password);
+  const hasSpecial = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password);
+  
+  const charTypeCount = [hasUppercase, hasLowercase, hasDigit, hasSpecial].filter(Boolean).length;
+  if (charTypeCount < 3) {
+    throw new Error('Password must contain at least 3 of: uppercase letters, lowercase letters, digits, special characters');
+  }
+}
+
 export async function hashPassword(password: string): Promise<string> {
+  validatePasswordStrength(password);
   return bcrypt.hash(password, 12);
 }
 

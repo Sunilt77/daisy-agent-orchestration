@@ -1,8 +1,12 @@
-import fs from 'fs';
-import path from 'path';
+import os from 'os';
+import { promises as fsp } from 'fs';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { Prisma } from '@prisma/client';
 import { generateEmbedding, EmbeddingConfig } from './embeddings.js';
 import { getPrisma } from '../platform/prisma.js';
-import db from '../db.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface DocumentMetadata {
   name: string;
@@ -67,7 +71,8 @@ export async function processDocument(
     await prisma.documentVector.create({
       data: {
         chunkId: chunkRecord.id,
-        embedding: JSON.stringify(embedding), // Store as JSON since we can't use vector type yet
+        // Persist embeddings as JSON text until pgvector is enabled end-to-end.
+        embedding: JSON.stringify(embedding),
         provider,
         model
       }
@@ -78,15 +83,14 @@ export async function processDocument(
 }
 
 async function extractTextFromFile(filePath: string, mimeType: string): Promise<string> {
-  const buffer = fs.readFileSync(filePath);
+  const buffer = await fsp.readFile(filePath);
 
   if (mimeType === 'text/plain' || mimeType.startsWith('text/')) {
     return buffer.toString('utf-8');
   }
 
   if (mimeType === 'application/pdf') {
-    // For now, return a placeholder. In a real implementation, you'd use pdf-parse or similar
-    return `[PDF Content Placeholder] This would extract text from PDF: ${path.basename(filePath)}`;
+    return await extractPdfText(filePath, buffer);
   }
 
   // For other types, try to read as text
@@ -95,6 +99,50 @@ async function extractTextFromFile(filePath: string, mimeType: string): Promise<
   } catch {
     throw new Error(`Unsupported file type: ${mimeType}`);
   }
+}
+
+async function extractPdfText(filePath: string, buffer: Buffer): Promise<string> {
+  // Preferred extractor when available (Poppler).
+  try {
+    const tmpOut = `${os.tmpdir()}/agentops-pdf-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`;
+    await execFileAsync('pdftotext', ['-layout', '-enc', 'UTF-8', filePath, tmpOut]);
+    const extracted = (await fsp.readFile(tmpOut, 'utf-8')).trim();
+    await fsp.unlink(tmpOut).catch(() => undefined);
+    if (extracted.length > 0) return normalizeExtractedText(extracted);
+  } catch {
+    // Fall through to lightweight parser.
+  }
+
+  // Fallback: extract printable text tokens from PDF streams.
+  const raw = buffer.toString('latin1');
+  const textRuns = raw.match(/\((?:\\.|[^\\)]){2,}\)/g) || [];
+  const decoded = textRuns
+    .map((token) => token.slice(1, -1))
+    .map((token) =>
+      token
+        .replace(/\\n/g, '\n')
+        .replace(/\\r/g, '\r')
+        .replace(/\\t/g, '\t')
+        .replace(/\\\(/g, '(')
+        .replace(/\\\)/g, ')')
+        .replace(/\\\\/g, '\\')
+    )
+    .join(' ')
+    .trim();
+
+  const normalized = normalizeExtractedText(decoded);
+  if (normalized.length < 16) {
+    throw new Error('Could not extract readable text from PDF. Install pdftotext for robust extraction.');
+  }
+  return normalized;
+}
+
+function normalizeExtractedText(text: string): string {
+  return text
+    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function chunkText(text: string, config: ChunkConfig): string[] {
@@ -145,7 +193,7 @@ export async function createKnowledgebaseIndex(
       name,
       slug: generateSlug(name),
       description,
-      embeddingConfig: JSON.stringify(embeddingConfig)
+      embeddingConfig: embeddingConfig as unknown as Prisma.InputJsonValue
     }
   });
 

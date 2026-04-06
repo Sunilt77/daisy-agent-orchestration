@@ -209,7 +209,7 @@ model DocumentChunk {
 model DocumentVector {
   id         String    @id @default(uuid())
   chunkId    String    @unique @map("chunk_id")
-  embedding  Json
+  embedding  String
   provider   String
   model      String
   createdAt  DateTime  @default(now()) @map("created_at")
@@ -253,10 +253,12 @@ model KnowledgebaseSearch {
 }
 
 model OrchestratorProject {
-  id          Int      @id @default(autoincrement())
-  name        String
-  description String?
-  createdAt   DateTime @default(now()) @map("created_at")
+  id                Int      @id @default(autoincrement())
+  name              String
+  description       String?
+  platformProjectId String?  @map("platform_project_id")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
 
   agents    OrchestratorAgent[]
   crews     OrchestratorCrew[]
@@ -454,6 +456,7 @@ model OrchestratorAgentTool {
   agentId    Int      @map("agent_id")
   toolId     Int      @map("tool_id")
   createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
 
   agent OrchestratorAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
   tool  OrchestratorTool  @relation(fields: [toolId], references: [id], onDelete: Cascade)
@@ -466,6 +469,7 @@ model OrchestratorCrewAgent {
   crewId     Int      @map("crew_id")
   agentId    Int      @map("agent_id")
   createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
 
   crew  OrchestratorCrew  @relation(fields: [crewId], references: [id], onDelete: Cascade)
   agent OrchestratorAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
@@ -483,7 +487,7 @@ model OrchestratorTask {
   status         String   @default("pending")
   result         String?
   createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @default(now()) @map("updated_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
   agent OrchestratorAgent? @relation(fields: [agentId], references: [id], onDelete: SetNull)
   crew  OrchestratorCrew?  @relation(fields: [crewId], references: [id], onDelete: Cascade)
@@ -498,7 +502,7 @@ model OrchestratorMcpExposedTool {
   exposedName  String   @unique @map("exposed_name")
   description  String?
   createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @default(now()) @map("updated_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
   tool OrchestratorTool @relation(fields: [toolId], references: [id], onDelete: Cascade)
   versions OrchestratorMcpExposedToolVersion[]
@@ -511,6 +515,7 @@ model OrchestratorMcpBundle {
   name        String
   slug        String   @unique
   description String?
+  isExposed   Boolean  @default(true) @map("is_exposed")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @default(now()) @map("updated_at")
 
@@ -558,7 +563,7 @@ model OrchestratorMcpBundleTool {
   bundleId    Int      @map("bundle_id")
   toolId      Int      @map("tool_id")
   createdAt   DateTime @default(now()) @map("created_at")
-
+  updatedAt   DateTime @updatedAt @map("updated_at")
   bundle OrchestratorMcpBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
   tool   OrchestratorTool      @relation(fields: [toolId], references: [id], onDelete: Cascade)
 
@@ -570,7 +575,7 @@ model OrchestratorAgentMcpTool {
   agentId     Int      @map("agent_id")
   toolId      Int      @map("tool_id")
   createdAt   DateTime @default(now()) @map("created_at")
-
+  updatedAt   DateTime @updatedAt @map("updated_at")
   agent OrchestratorAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
   tool  OrchestratorTool  @relation(fields: [toolId], references: [id], onDelete: Cascade)
 
@@ -582,7 +587,7 @@ model OrchestratorAgentMcpBundle {
   agentId     Int      @map("agent_id")
   bundleId    Int      @map("bundle_id")
   createdAt   DateTime @default(now()) @map("created_at")
-
+  updatedAt   DateTime @updatedAt @map("updated_at")
   agent  OrchestratorAgent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
   bundle OrchestratorMcpBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
 
@@ -738,6 +743,13 @@ model OrchestratorJobQueue {
   status     String   @default("pending")
   result     String?
   error      String?
+  priority   Int      @default(100)
+  readyAt    DateTime @default(now()) @map("ready_at")
+  tenantKey  String   @default("global") @map("tenant_key")
+  workerId   String?  @map("worker_id")
+  heartbeatAt DateTime? @map("heartbeat_at")
+  leaseExpiresAt DateTime? @map("lease_expires_at")
+  attempts   Int      @default(0)
   createdAt  DateTime @default(now()) @map("created_at")
   startedAt  DateTime? @map("started_at")
   finishedAt DateTime? @map("finished_at")
@@ -745,6 +757,8 @@ model OrchestratorJobQueue {
   delegations OrchestratorAgentDelegation[]
 
   @@index([status])
+  @@index([status, readyAt, priority])
+  @@index([status, readyAt, tenantKey, priority])
   @@map("orchestrator_job_queue")
 }
 

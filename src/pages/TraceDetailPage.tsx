@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, ArrowLeft, Clock, DollarSign, MessageSquare, Radio, Square } from 'lucide-react';
+import { Activity, ArrowLeft, Clock, DollarSign, MessageSquare, Radio, Square, Search, RotateCcw } from 'lucide-react';
 import { getSelectedPlatformProjectId } from '../utils/platformSelection';
 
 type Run = {
@@ -41,6 +41,8 @@ export default function TraceDetailPage() {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [leftMode, setLeftMode] = useState<'timeline' | 'tree'>('timeline');
+  const [eventSearch, setEventSearch] = useState('');
+  const [eventTypeFilter, setEventTypeFilter] = useState<'all' | string>('all');
   const [expandedSpans, setExpandedSpans] = useState<Record<string, boolean>>({});
   const [live, setLive] = useState(false);
   const esRef = useRef<EventSource | null>(null);
@@ -98,11 +100,25 @@ export default function TraceDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live, runId]);
 
-  const selected = useMemo(() => events.find(e => e.id === selectedEventId) || null, [events, selectedEventId]);
+  const eventTypes = useMemo(
+    () => Array.from(new Set(events.map((event) => String(event.type || '').trim()).filter(Boolean))).sort(),
+    [events]
+  );
+  const filteredEvents = useMemo(() => {
+    const query = eventSearch.trim().toLowerCase();
+    return events.filter((event) => {
+      const matchesType = eventTypeFilter === 'all' || event.type === eventTypeFilter;
+      if (!matchesType) return false;
+      if (!query) return true;
+      return `${event.name || ''} ${event.type || ''} ${event.inputText || ''} ${event.outputText || ''} ${JSON.stringify(event.attributes || {})}`.toLowerCase().includes(query);
+    });
+  }, [eventSearch, eventTypeFilter, events]);
+  const hasEventFilters = eventSearch.trim().length > 0 || eventTypeFilter !== 'all';
+  const selected = useMemo(() => filteredEvents.find(e => e.id === selectedEventId) || null, [filteredEvents, selectedEventId]);
 
   const spanTree = useMemo(() => {
     const bySpan = new Map<string, RunEvent[]>();
-    for (const e of events) {
+    for (const e of filteredEvents) {
       if (!e.spanId) continue;
       const list = bySpan.get(e.spanId) || [];
       list.push(e);
@@ -126,9 +142,18 @@ export default function TraceDetailPage() {
     roots.sort();
 
     return { nodes, roots, hasSpans: nodes.size > 0 };
-  }, [events]);
+  }, [filteredEvents]);
 
   const tokens = (run?.promptTokens || 0) + (run?.completionTokens || 0);
+  useEffect(() => {
+    if (!selectedEventId && filteredEvents.length) {
+      setSelectedEventId(filteredEvents[0].id);
+      return;
+    }
+    if (selectedEventId && !filteredEvents.some((event) => event.id === selectedEventId)) {
+      setSelectedEventId(filteredEvents[0]?.id || null);
+    }
+  }, [filteredEvents, selectedEventId]);
   const backTo = useMemo(() => {
     const explicitBack = searchParams.get('back');
     if (explicitBack) return explicitBack;
@@ -186,11 +211,41 @@ export default function TraceDetailPage() {
               Hierarchy
             </button>
           </div>
+          <div className="p-3 border-b border-slate-100 space-y-2">
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                value={eventSearch}
+                onChange={(e) => setEventSearch(e.target.value)}
+                placeholder="Search events..."
+                className="w-full rounded-lg border border-slate-300 bg-white pl-8 pr-3 py-1.5 text-xs"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <select
+                value={eventTypeFilter}
+                onChange={(e) => setEventTypeFilter(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"
+              >
+                <option value="all">All Types</option>
+                {eventTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+              </select>
+              <button
+                type="button"
+                disabled={!hasEventFilters}
+                onClick={() => { setEventSearch(''); setEventTypeFilter('all'); }}
+                className="rounded-lg border border-slate-200 px-2 py-1.5 text-xs font-semibold text-slate-600 disabled:opacity-45 inline-flex items-center gap-1"
+              >
+                <RotateCcw size={11} />
+                Reset
+              </button>
+            </div>
+          </div>
           <div className="overflow-y-auto flex-1 p-2 space-y-2">
-            {events.length === 0 ? (
+            {filteredEvents.length === 0 ? (
               <div className="p-4 text-center text-slate-500 text-sm">No events yet.</div>
             ) : leftMode === 'timeline' ? (
-              events.map(e => (
+              filteredEvents.map(e => (
                 <div
                   key={e.id}
                   onClick={() => setSelectedEventId(e.id)}

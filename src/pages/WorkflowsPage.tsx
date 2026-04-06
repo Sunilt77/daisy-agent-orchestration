@@ -13,15 +13,17 @@ import {
   Edge,
   Node,
   Connection,
+  MarkerType,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Bot, Boxes, CheckCircle2, GitBranch, Play, Plus, Save, Wrench, Zap, Clock3, RotateCcw, Users, Radio, Repeat, Webhook } from 'lucide-react';
+import { Bot, Boxes, CheckCircle2, Clock3, GitBranch, Play, Plus, Radio, Repeat, RotateCcw, Save, Search, Sparkles, ThumbsDown, ThumbsUp, Users, Webhook, Wrench, Zap } from 'lucide-react';
 
 type WorkflowRecord = {
   id: number;
   name: string;
   description?: string | null;
   status: string;
+  learning_enabled?: boolean;
   trigger_type?: string;
   graph: string;
   version?: number;
@@ -40,8 +42,14 @@ type WorkflowRun = {
   input?: any;
   output?: any;
   logs?: Array<{ ts: string; type: string; payload: any }>;
+  graph_snapshot?: { nodes?: Array<any>; edges?: Array<any> };
   created_at: string;
   updated_at?: string;
+};
+type FeedbackState = {
+  status: 'saving' | 'saved' | 'error';
+  rating?: 'up' | 'down';
+  error?: string;
 };
 
 type Project = { id: number; name: string };
@@ -65,6 +73,10 @@ type WorkflowNodeData = {
   right?: string;
   operator?: string;
   template?: string;
+  runtimeStatus?: 'idle' | 'active' | 'completed' | 'error';
+  runtimeDurationMs?: number | null;
+  runtimeOutputPreview?: string;
+  runtimeActiveBadge?: string;
 };
 
 const DEFAULT_GRAPH = {
@@ -111,24 +123,82 @@ function kindIcon(kind: WorkflowNodeData['kind']) {
   return Zap;
 }
 
+function previewText(value: any, max = 96) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  if (!text) return '';
+  return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
 const WorkflowNodeCard = ({ data, selected }: NodeProps<Node<WorkflowNodeData>>) => {
   const Icon = kindIcon(data.kind);
+  const runtimeStatus = data.runtimeStatus || 'idle';
+  const isActive = runtimeStatus === 'active';
+  const isCompleted = runtimeStatus === 'completed';
+  const isError = runtimeStatus === 'error';
   return (
-    <div className={`min-w-[220px] max-w-[260px] rounded-2xl border bg-white shadow-sm ${selected ? 'border-indigo-400 shadow-indigo-100' : 'border-slate-200'}`}>
-      <Handle type="target" position={Position.Left} className="!w-3 !h-3 !bg-indigo-500" />
-      <div className="border-b border-slate-100 px-4 py-3 bg-slate-50/80 rounded-t-2xl">
+    <div className={`min-w-[240px] max-w-[280px] rounded-2xl border bg-white shadow-sm transition-all ${
+      isActive
+        ? 'border-cyan-400 shadow-cyan-100 shadow-xl'
+        : isCompleted
+          ? 'border-emerald-300 shadow-emerald-100'
+          : isError
+            ? 'border-red-300 shadow-red-100'
+            : selected
+              ? 'border-indigo-400 shadow-indigo-100'
+              : 'border-slate-200'
+    }`}>
+      <Handle type="target" position={Position.Left} className={`!w-3 !h-3 ${isCompleted ? '!bg-emerald-500' : isActive ? '!bg-cyan-500' : '!bg-indigo-500'}`} />
+      <div className={`border-b px-4 py-3 rounded-t-2xl ${
+        isActive
+          ? 'border-cyan-100 bg-gradient-to-r from-cyan-50 via-sky-50 to-white'
+          : isCompleted
+            ? 'border-emerald-100 bg-gradient-to-r from-emerald-50 to-white'
+            : isError
+              ? 'border-red-100 bg-gradient-to-r from-red-50 to-white'
+              : 'border-slate-100 bg-slate-50/80'
+      }`}>
         <div className="flex items-center gap-2">
-          <div className="rounded-xl bg-indigo-100 p-2 text-indigo-700">
+          <div className={`rounded-xl p-2 ${
+            isActive
+              ? 'bg-cyan-500 text-white'
+              : isCompleted
+                ? 'bg-emerald-500 text-white'
+                : isError
+                  ? 'bg-red-500 text-white'
+                  : 'bg-indigo-100 text-indigo-700'
+          }`}>
             <Icon size={16} />
           </div>
           <div className="min-w-0">
             <div className="text-sm font-semibold text-slate-900 truncate">{data.label}</div>
             <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">{data.kind}</div>
           </div>
+          <div className={`ml-auto rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+            isActive
+              ? 'bg-cyan-100 text-cyan-700'
+              : isCompleted
+                ? 'bg-emerald-100 text-emerald-700'
+                : isError
+                  ? 'bg-red-100 text-red-700'
+                  : 'bg-slate-100 text-slate-500'
+          }`}>
+            {runtimeStatus}
+          </div>
         </div>
       </div>
       <div className="px-4 py-3 space-y-2">
         <div className="text-xs text-slate-500">{data.subtitle || 'No details configured yet.'}</div>
+        {data.runtimeDurationMs != null && (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-700">
+            Duration: <span className="font-semibold">{data.runtimeDurationMs}ms</span>
+          </div>
+        )}
+        {data.runtimeActiveBadge && (
+          <div className="inline-flex items-center gap-2 rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-[11px] text-cyan-800">
+            <Sparkles size={12} />
+            {data.runtimeActiveBadge}
+          </div>
+        )}
         {data.kind === 'agent' && data.prompt && (
           <div className="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2 text-[11px] text-slate-600 line-clamp-3">
             {data.prompt}
@@ -154,8 +224,13 @@ const WorkflowNodeCard = ({ data, selected }: NodeProps<Node<WorkflowNodeData>>)
             {data.left || '{{last.text}}'} {data.operator || 'contains'} {data.right || 'value'}
           </div>
         )}
+        {data.runtimeOutputPreview && (
+          <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] text-slate-700 line-clamp-4">
+            {data.runtimeOutputPreview}
+          </div>
+        )}
       </div>
-      <Handle type="source" position={Position.Right} className="!w-3 !h-3 !bg-indigo-500" />
+      <Handle type="source" position={Position.Right} className={`!w-3 !h-3 ${isCompleted ? '!bg-emerald-500' : isActive ? '!bg-cyan-500' : '!bg-indigo-500'}`} />
     </div>
   );
 };
@@ -174,6 +249,7 @@ export default function WorkflowsPage() {
   const [workflowDescription, setWorkflowDescription] = useState('');
   const [workflowStatus, setWorkflowStatus] = useState('draft');
   const [workflowTriggerType, setWorkflowTriggerType] = useState('manual');
+  const [workflowLearningEnabled, setWorkflowLearningEnabled] = useState(true);
   const [workflowProjectId, setWorkflowProjectId] = useState<string>('');
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<WorkflowNodeData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -184,6 +260,16 @@ export default function WorkflowsPage() {
   const [versions, setVersions] = useState<any[]>([]);
   const [showVersions, setShowVersions] = useState(false);
   const [runningWorkflowRunId, setRunningWorkflowRunId] = useState<number | null>(null);
+  const [feedbackByRun, setFeedbackByRun] = useState<Record<number, FeedbackState>>({});
+  const [workflowSearch, setWorkflowSearch] = useState('');
+  const [workflowLibraryStatus, setWorkflowLibraryStatus] = useState<'all' | 'draft' | 'active'>('all');
+
+  const activeRun = useMemo(() => {
+    if (runningWorkflowRunId) {
+      return runs.find((run) => Number(run.id) === Number(runningWorkflowRunId)) || selectedRun || null;
+    }
+    return selectedRun || null;
+  }, [runningWorkflowRunId, runs, selectedRun]);
 
   const loadAll = async () => {
     const [projectRes, agentRes, crewRes, toolRes, workflowRes] = await Promise.all([
@@ -217,6 +303,7 @@ export default function WorkflowsPage() {
     setWorkflowDescription(String(data.description || ''));
     setWorkflowStatus(String(data.status || 'draft'));
     setWorkflowTriggerType(String(data.trigger_type || 'manual'));
+    setWorkflowLearningEnabled(data.learning_enabled !== false);
     setWorkflowProjectId(data.project_id != null ? String(data.project_id) : '');
     const graph = safeJson(data.graph || '{}', DEFAULT_GRAPH);
     setNodes(Array.isArray(graph.nodes) && graph.nodes.length ? graph.nodes : DEFAULT_GRAPH.nodes as any);
@@ -226,6 +313,7 @@ export default function WorkflowsPage() {
       input: safeJson(run.input || '{}', {}),
       output: safeJson(run.output || 'null', null),
       logs: safeJson(run.logs || '[]', []),
+      graph_snapshot: safeJson(run.graph_snapshot || run.graphSnapshot || '{"nodes":[],"edges":[]}', { nodes: [], edges: [] }),
     })) : []);
   }, [setEdges, setNodes]);
 
@@ -235,6 +323,7 @@ export default function WorkflowsPage() {
       setWorkflowDescription('');
       setWorkflowStatus('draft');
       setWorkflowTriggerType('manual');
+      setWorkflowLearningEnabled(true);
       setWorkflowProjectId('');
       setNodes(DEFAULT_GRAPH.nodes as any);
       setEdges(DEFAULT_GRAPH.edges as any);
@@ -273,7 +362,127 @@ export default function WorkflowsPage() {
     });
   }, [edges, nodes]);
 
+  const workflowRuntime = useMemo(() => {
+    const nodeStatus = new Map<string, 'idle' | 'active' | 'completed' | 'error'>();
+    const nodeDuration = new Map<string, number>();
+    const nodePreview = new Map<string, string>();
+    const nodeBadge = new Map<string, string>();
+    const completedEdgeIds = new Set<string>();
+    const activeEdgeIds = new Set<string>();
+    let currentNodeId: string | null = null;
+    let currentActivity = activeRun?.status === 'running' ? 'Workflow run is starting up.' : 'Select or run a workflow to see live execution.';
+
+    nodes.forEach((node) => nodeStatus.set(node.id, 'idle'));
+
+    const findOutgoingEdge = (nodeId: string) => edges.find((edge) => edge.source === nodeId);
+    const logs = Array.isArray(activeRun?.logs) ? activeRun.logs : [];
+    const starts = new Map<string, string>();
+
+    for (const log of logs) {
+      const payload = log?.payload || {};
+      const nodeId = payload.node_id ? String(payload.node_id) : '';
+      if (log.type === 'node_start' && nodeId) {
+        nodeStatus.set(nodeId, 'active');
+        starts.set(nodeId, String(log.ts || ''));
+        currentNodeId = nodeId;
+        nodeBadge.set(nodeId, payload.type === 'tool' ? 'Executing tool node' : payload.type === 'crew' ? 'Running crew' : payload.type === 'agent' ? 'Running agent' : 'Node in progress');
+        currentActivity = `${payload.label || nodeId} is running.`;
+      }
+      if (log.type === 'node_complete' && nodeId) {
+        nodeStatus.set(nodeId, 'completed');
+        const startedAt = starts.get(nodeId);
+        if (startedAt && log.ts) {
+          nodeDuration.set(nodeId, Math.max(0, new Date(String(log.ts)).getTime() - new Date(startedAt).getTime()));
+        }
+        nodePreview.set(nodeId, previewText(payload.output_preview || 'Completed'));
+        const outgoingEdge = findOutgoingEdge(nodeId);
+        if (outgoingEdge?.id) completedEdgeIds.add(outgoingEdge.id);
+        if (currentNodeId === nodeId) currentNodeId = null;
+        currentActivity = `${payload.label || nodeId} completed.`;
+      }
+      if (log.type === 'warning') {
+        currentActivity = String(payload.message || currentActivity);
+      }
+      if (log.type === 'error') {
+        currentActivity = String(payload.message || 'Workflow failed.');
+        if (currentNodeId) nodeStatus.set(currentNodeId, 'error');
+      }
+    }
+
+    if (currentNodeId) {
+      const outgoingEdge = findOutgoingEdge(currentNodeId);
+      if (outgoingEdge?.id) activeEdgeIds.add(outgoingEdge.id);
+    }
+
+    return {
+      nodeStatus,
+      nodeDuration,
+      nodePreview,
+      nodeBadge,
+      completedEdgeIds,
+      activeEdgeIds,
+      currentNodeId,
+      currentActivity,
+    };
+  }, [activeRun, edges, nodes]);
+
+  const displayNodes = useMemo(() => (
+    nodes.map((node) => ({
+      ...node,
+      data: {
+        ...node.data,
+        runtimeStatus: workflowRuntime.nodeStatus.get(node.id) || 'idle',
+        runtimeDurationMs: workflowRuntime.nodeDuration.get(node.id) ?? null,
+        runtimeOutputPreview: workflowRuntime.nodePreview.get(node.id) || '',
+        runtimeActiveBadge: workflowRuntime.currentNodeId === node.id ? (workflowRuntime.nodeBadge.get(node.id) || 'Active now') : '',
+      },
+    }))
+  ), [nodes, workflowRuntime]);
+
+  const displayFlowEdges = useMemo(() => (
+    displayEdges.map((edge) => {
+      const isActive = workflowRuntime.activeEdgeIds.has(edge.id);
+      const isCompleted = workflowRuntime.completedEdgeIds.has(edge.id);
+      return {
+        ...edge,
+        animated: isActive || edge.animated,
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          color: isCompleted ? '#10b981' : isActive ? '#06b6d4' : '#6366f1',
+        },
+        style: {
+          ...(edge.style || {}),
+          stroke: isCompleted ? '#10b981' : isActive ? '#06b6d4' : '#6366f1',
+          strokeWidth: isActive ? 3 : isCompleted ? 2.5 : 2,
+        },
+      } as Edge;
+    })
+  ), [displayEdges, workflowRuntime]);
+
   const selectedNode = useMemo(() => nodes.find((node) => node.id === selectedNodeId) || null, [nodes, selectedNodeId]);
+  const filteredWorkflows = useMemo(() => {
+    const query = workflowSearch.trim().toLowerCase();
+    return workflows.filter((workflow) => {
+      const status = String(workflow.status || '').toLowerCase();
+      const matchesStatus = workflowLibraryStatus === 'all' || status === workflowLibraryStatus;
+      if (!matchesStatus) return false;
+      if (!query) return true;
+      const haystack = [
+        workflow.name,
+        workflow.description,
+        workflow.status,
+        workflow.trigger_type,
+        workflow.project_name,
+      ].filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [workflowLibraryStatus, workflowSearch, workflows]);
+  const workflowInsights = useMemo(() => {
+    const active = workflows.filter((workflow) => String(workflow.status || '').toLowerCase() === 'active').length;
+    const totalRuns = workflows.reduce((sum, workflow) => sum + Number(workflow.runs_count || 0), 0);
+    const withWebhook = workflows.filter((workflow) => String(workflow.trigger_type || '').toLowerCase() === 'webhook').length;
+    return { active, totalRuns, withWebhook };
+  }, [workflows]);
 
   const updateSelectedNode = (patch: Partial<WorkflowNodeData>) => {
     if (!selectedNodeId) return;
@@ -310,6 +519,7 @@ export default function WorkflowsPage() {
       name: workflowName,
       description: workflowDescription,
       status: workflowStatus,
+      learning_enabled: workflowLearningEnabled,
       trigger_type: workflowTriggerType,
       project_id: workflowProjectId ? Number(workflowProjectId) : null,
       graph: { nodes, edges },
@@ -381,6 +591,7 @@ export default function WorkflowsPage() {
           input: run.input ?? {},
           output: run.output ?? null,
           logs: Array.isArray(run.logs) ? run.logs : [],
+          graph_snapshot: run.graph_snapshot ?? { nodes: [], edges: [] },
         };
         setRuns((prev) => {
           const rest = prev.filter((item) => item.id !== normalized.id);
@@ -424,16 +635,36 @@ export default function WorkflowsPage() {
   const webhookEndpoint = selectedWorkflowId === 'new'
     ? ''
     : `${window.location.origin}/api/workflows/${selectedWorkflowId}/webhook`;
+  const hasWorkflowLibraryFilters = workflowSearch.trim().length > 0 || workflowLibraryStatus !== 'all';
+  const resetWorkflowLibraryFilters = () => {
+    setWorkflowSearch('');
+    setWorkflowLibraryStatus('all');
+  };
+
+  const submitWorkflowFeedback = async (runId: number, rating: 'up' | 'down') => {
+    setFeedbackByRun((prev) => ({ ...prev, [runId]: { status: 'saving', rating } }));
+    try {
+      const feedback = rating === 'down'
+        ? window.prompt('What should this workflow do differently next time?', '')?.trim() || ''
+        : '';
+      const res = await fetch(`/api/workflow-runs/${runId}/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rating, solved: rating === 'up', feedback: feedback || undefined }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || 'Failed to save workflow feedback');
+      setFeedbackByRun((prev) => ({ ...prev, [runId]: { status: 'saved', rating } }));
+    } catch (e: any) {
+      setFeedbackByRun((prev) => ({ ...prev, [runId]: { status: 'error', rating, error: e?.message || 'Failed to save workflow feedback' } }));
+    }
+  };
 
   return (
     <div className="space-y-6">
       <div className="swarm-hero p-6">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-              <Boxes size={12} />
-              Workflow Runtime
-            </div>
             <h1 className="text-3xl font-black text-white">Workflows</h1>
             <p className="text-slate-300 mt-1">Build drag-and-connect orchestration graphs for agents, crews, loops, tools, webhook triggers, and live workflow runs.</p>
           </div>
@@ -454,6 +685,20 @@ export default function WorkflowsPage() {
         </div>
       </div>
 
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {[
+          { label: 'Workflows', value: workflows.length },
+          { label: 'Active', value: workflowInsights.active },
+          { label: 'Total Runs', value: workflowInsights.totalRuns },
+          { label: 'Webhook Triggers', value: workflowInsights.withWebhook },
+        ].map((item) => (
+          <div key={item.label} className="telemetry-tile p-4">
+            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">{item.label}</div>
+            <div className="mt-2 text-2xl font-black text-white">{item.value}</div>
+          </div>
+        ))}
+      </div>
+
       <div className="grid grid-cols-12 gap-6">
         <aside className="col-span-12 xl:col-span-3 space-y-4">
           <div className="rounded-2xl border border-slate-200 bg-white p-4">
@@ -463,8 +708,46 @@ export default function WorkflowsPage() {
                 <Plus size={12} /> New
               </button>
             </div>
+            <div className="relative mb-3">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                value={workflowSearch}
+                onChange={(e) => setWorkflowSearch(e.target.value)}
+                placeholder="Search workflows..."
+                className="w-full rounded-xl border border-slate-300 bg-white pl-9 pr-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              {[
+                { key: 'all', label: 'All' },
+                { key: 'draft', label: 'Draft' },
+                { key: 'active', label: 'Active' },
+              ].map((chip) => (
+                <button
+                  key={chip.key}
+                  onClick={() => setWorkflowLibraryStatus(chip.key as 'all' | 'draft' | 'active')}
+                  className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] transition-colors ${
+                    workflowLibraryStatus === chip.key
+                      ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                      : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                  }`}
+                >
+                  {chip.label}
+                </button>
+              ))}
+              <button
+                onClick={resetWorkflowLibraryFilters}
+                disabled={!hasWorkflowLibraryFilters}
+                className="ml-auto rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-50 disabled:opacity-40"
+              >
+                Reset
+              </button>
+            </div>
+            <div className="mb-2 text-[11px] text-slate-500">
+              {filteredWorkflows.length} visible of {workflows.length}
+            </div>
             <div className="space-y-2 max-h-[340px] overflow-auto pr-1">
-              {workflows.map((workflow) => (
+              {filteredWorkflows.map((workflow) => (
                 <button
                   key={workflow.id}
                   onClick={() => setSelectedWorkflowId(workflow.id)}
@@ -480,6 +763,11 @@ export default function WorkflowsPage() {
                   <div className="mt-2 text-[11px] text-slate-400">v{workflow.version || 1} • {workflow.runs_count || 0} runs</div>
                 </button>
               ))}
+              {filteredWorkflows.length === 0 && (
+                <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-xs text-slate-500">
+                  {workflows.length === 0 ? 'No workflows yet. Create your first workflow.' : 'No workflows match these filters.'}
+                </div>
+              )}
             </div>
           </div>
 
@@ -506,6 +794,15 @@ export default function WorkflowsPage() {
               <option value="draft">Draft</option>
               <option value="active">Active</option>
             </select>
+            <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                checked={workflowLearningEnabled}
+                onChange={(e) => setWorkflowLearningEnabled(e.target.checked)}
+              />
+              Enable Learning From Feedback
+            </label>
             <select value={workflowTriggerType} onChange={(e) => setWorkflowTriggerType(e.target.value)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
               <option value="manual">Manual trigger</option>
               <option value="webhook">Webhook trigger</option>
@@ -537,17 +834,35 @@ export default function WorkflowsPage() {
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <div className="text-sm font-semibold text-slate-900">Workflow Canvas</div>
-                <div className="text-xs text-slate-500 mt-1">Drag nodes, connect edges, and shape orchestration paths.</div>
+                <div className="text-xs text-slate-500 mt-1">Drag nodes, connect edges, and watch the active path, live node, and completed steps update during execution.</div>
               </div>
               <div className="text-right">
                 <div className="text-xs text-slate-400">{nodes.length} nodes • {edges.length} edges{runningWorkflowRunId ? ` • live run #${runningWorkflowRunId}` : ''}</div>
                 <div className="mt-1 text-[11px] text-slate-500">Condition routing uses edge order: first path = true, second path = false.</div>
               </div>
             </div>
+            <div className="mb-4 rounded-2xl border border-slate-200 bg-[radial-gradient(circle_at_top_left,_rgba(34,211,238,0.14),_transparent_28%),linear-gradient(180deg,#0f172a_0%,#111827_100%)] px-4 py-3 text-white">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-200">Live Workflow Runtime</div>
+                  <div className="mt-1 text-sm text-slate-100">{workflowRuntime.currentActivity}</div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                    runningWorkflowRunId ? 'bg-cyan-400/15 text-cyan-100 ring-1 ring-cyan-300/30' : 'bg-slate-400/15 text-slate-100 ring-1 ring-white/10'
+                  }`}>
+                    {runningWorkflowRunId ? 'Streaming Live' : 'Idle'}
+                  </div>
+                  <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-100">
+                    {Array.from(workflowRuntime.nodeStatus.values()).filter((status) => status === 'completed').length}/{nodes.length || 0} completed
+                  </div>
+                </div>
+              </div>
+            </div>
             <div className="h-[720px] rounded-2xl border border-slate-200 overflow-hidden">
               <ReactFlow
-                nodes={nodes}
-                edges={displayEdges}
+                nodes={displayNodes}
+                edges={displayFlowEdges}
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
                 onConnect={onConnect}
@@ -555,7 +870,16 @@ export default function WorkflowsPage() {
                 nodeTypes={nodeTypes}
                 fitView
               >
-                <MiniMap maskColor="rgba(248,250,252,0.82)" />
+                <MiniMap
+                  maskColor="rgba(248,250,252,0.82)"
+                  nodeColor={(node) => {
+                    const status = (node.data as WorkflowNodeData)?.runtimeStatus;
+                    if (status === 'completed') return '#10b981';
+                    if (status === 'active') return '#06b6d4';
+                    if (status === 'error') return '#ef4444';
+                    return '#6366f1';
+                  }}
+                />
                 <Controls />
                 <Background color="#dbe4f0" gap={16} />
               </ReactFlow>
@@ -658,10 +982,43 @@ export default function WorkflowsPage() {
             </div>
             {selectedRun && (
               <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+              {(() => {
+                const feedbackState = feedbackByRun[selectedRun.id];
+                return (
+                  <>
               <div className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 mb-2">Run Detail</div>
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-sm font-semibold text-slate-900">Run #{selectedRun.id}</div>
                   <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${statusTone(selectedRun.status)}`}>{selectedRun.status}</span>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => submitWorkflowFeedback(selectedRun.id, 'up')}
+                    disabled={feedbackState?.status === 'saving'}
+                    className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-[11px] font-semibold ${
+                      feedbackState?.rating === 'up' && feedbackState?.status === 'saved'
+                        ? 'border-emerald-200 bg-emerald-100 text-emerald-700'
+                        : 'border-slate-200 bg-white text-slate-600 hover:border-emerald-200 hover:text-emerald-700'
+                    }`}
+                  >
+                    <ThumbsUp size={11} /> Helpful
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => submitWorkflowFeedback(selectedRun.id, 'down')}
+                    disabled={feedbackState?.status === 'saving'}
+                    className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-[11px] font-semibold ${
+                      feedbackState?.rating === 'down' && feedbackState?.status === 'saved'
+                        ? 'border-amber-200 bg-amber-100 text-amber-700'
+                        : 'border-slate-200 bg-white text-slate-600 hover:border-amber-200 hover:text-amber-700'
+                    }`}
+                  >
+                    <ThumbsDown size={11} /> Improve
+                  </button>
+                  {feedbackState?.status === 'saving' && <span className="text-[11px] font-semibold text-slate-400">Saving feedback…</span>}
+                  {feedbackState?.status === 'saved' && <span className="text-[11px] font-semibold text-emerald-600">Feedback saved</span>}
+                  {feedbackState?.status === 'error' && <span className="text-[11px] font-semibold text-red-600">{feedbackState.error || 'Failed to save feedback'}</span>}
                 </div>
                 <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-slate-500">
                   <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
@@ -686,6 +1043,9 @@ export default function WorkflowsPage() {
                     </div>
                   ))}
                 </div>
+                  </>
+                );
+              })()}
               </div>
             )}
           </div>

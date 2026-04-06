@@ -3,7 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { 
   Plus, Trash2, Users, Brain, Target, Edit, Sparkles, 
   Check, X, Folder, Activity, Key, Play, Loader2, 
-  ExternalLink, Shield, Zap, Globe, Save, ArrowRight, Search, List, LayoutGrid, ArrowUpDown
+  ExternalLink, Shield, Zap, Globe, Save, ArrowRight, Search, List, LayoutGrid, ArrowUpDown, AudioLines, Radio
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Pagination from '../components/Pagination';
@@ -15,26 +15,68 @@ interface Agent {
   agent_role?: string;
 }
 
+interface VoiceConfigPreset {
+  id: number;
+  name: string;
+  voice_id: string;
+  tts_model_id: string;
+  stt_model_id: string;
+  output_format: string;
+  sample_rate: number;
+  language_code: string;
+  auto_tts: boolean;
+  notes?: string;
+  meta?: {
+    vad_enabled?: boolean;
+    vad_silence_threshold_secs?: number;
+    vad_threshold?: number;
+    min_speech_duration_ms?: number;
+    min_silence_duration_ms?: number;
+    max_tokens_to_recompute?: number;
+    browser_noise_suppression?: boolean;
+    browser_echo_cancellation?: boolean;
+    browser_auto_gain_control?: boolean;
+  };
+}
+
+const DEFAULT_VAD_SILENCE_THRESHOLD_SECS = 0.8;
+const DEFAULT_VAD_THRESHOLD = 0.6;
+const DEFAULT_MIN_SPEECH_DURATION_MS = 220;
+const DEFAULT_MIN_SILENCE_DURATION_MS = 420;
+const DEFAULT_MAX_TOKENS_TO_RECOMPUTE = 5;
+
 interface Crew {
   id: number;
   name: string;
   description: string;
-  process: 'sequential' | 'hierarchical';
+  process: 'sequential' | 'hierarchical' | 'parallel';
   is_exposed: boolean;
+  learning_enabled?: boolean;
   coordinator_agent_id?: number | null;
   coordinator_agent?: Agent | null;
   project_id?: number;
   max_runtime_ms?: number;
   max_cost_usd?: number;
   max_tool_calls?: number;
+  voice_profile?: {
+    voice_id?: string;
+    tts_model_id?: string;
+    stt_model_id?: string;
+    output_format?: string;
+    sample_rate?: number;
+    language_code?: string;
+    auto_tts?: boolean;
+    meta?: VoiceConfigPreset['meta'];
+  } | null;
   agents: Agent[];
 }
 
 export default function CrewsPage() {
-  type CrewOptionalConfig = 'description' | 'limits' | 'exposure';
+  type CrewOptionalConfig = 'description' | 'limits' | 'voice' | 'exposure';
   const navigate = useNavigate();
   const [crews, setCrews] = useState<Crew[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [voiceConfigs, setVoiceConfigs] = useState<VoiceConfigPreset[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
   const [saveError, setSaveError] = useState('');
@@ -43,7 +85,7 @@ export default function CrewsPage() {
   const [crewsPage, setCrewsPage] = useState(1);
   const [crewsPageSize, setCrewsPageSize] = useState(8);
   const [crewSearch, setCrewSearch] = useState('');
-  const [processFilter, setProcessFilter] = useState<'all' | 'sequential' | 'hierarchical'>('all');
+  const [processFilter, setProcessFilter] = useState<'all' | 'sequential' | 'hierarchical' | 'parallel'>('all');
   const [exposureFilter, setExposureFilter] = useState<'all' | 'exposed' | 'local'>('all');
   const [crewSortMode, setCrewSortMode] = useState<'name' | 'size' | 'process'>('size');
   const [crewView, setCrewView] = useState<'grid' | 'list'>('grid');
@@ -54,13 +96,31 @@ export default function CrewsPage() {
   const [formData, setFormData] = useState({
     name: '',
     description: '',
-    process: 'sequential' as 'sequential' | 'hierarchical',
+    process: 'sequential' as 'sequential' | 'hierarchical' | 'parallel',
     agentIds: [] as number[],
     coordinator_agent_id: null as number | null,
     is_exposed: false,
+    learning_enabled: true,
     max_runtime_ms: 120000,
     max_cost_usd: 5.0,
-    max_tool_calls: 20
+    max_tool_calls: 20,
+    voice_id: 'JBFqnCBsd6RMkjVDRZzb',
+    tts_model_id: 'eleven_multilingual_v2',
+    stt_model_id: 'scribe_v2_realtime',
+    voice_output_format: 'mp3_44100_128',
+    voice_sample_rate: 16000,
+    voice_language_code: 'en',
+    voice_auto_tts: true,
+    voice_vad_enabled: true,
+    voice_vad_silence_threshold_secs: 0.8,
+    voice_vad_threshold: 0.6,
+    voice_min_speech_duration_ms: 220,
+    voice_min_silence_duration_ms: 420,
+    voice_max_tokens_to_recompute: 5,
+    voice_browser_noise_suppression: true,
+    voice_browser_echo_cancellation: true,
+    voice_browser_auto_gain_control: false,
+    voice_preset_id: '',
   });
 
   const [projects, setProjects] = useState<{id: number, name: string}[]>([]);
@@ -76,12 +136,13 @@ export default function CrewsPage() {
   const [buildEvents, setBuildEvents] = useState<{message: string, type: 'status' | 'error' | 'done', id?: number}[]>([]);
   const [autoBuildProvider, setAutoBuildProvider] = useState('google');
   const [autoBuildModel, setAutoBuildModel] = useState('');
-  const [autoBuildProcessPreference, setAutoBuildProcessPreference] = useState<'auto' | 'sequential' | 'hierarchical'>('auto');
+  const [autoBuildProcessPreference, setAutoBuildProcessPreference] = useState<'auto' | 'sequential' | 'hierarchical' | 'parallel'>('auto');
   const [autoBuildProjectId, setAutoBuildProjectId] = useState('');
 
   const crewConfigOptions: Array<{ key: CrewOptionalConfig; label: string }> = [
     { key: 'description', label: 'Functional Brief' },
     { key: 'limits', label: 'Runtime/Cost Limits' },
+    { key: 'voice', label: 'Voice Runtime' },
     { key: 'exposure', label: 'MCP Exposure' },
   ];
   const showCrewConfig = (key: CrewOptionalConfig) => visibleCrewConfigs.includes(key);
@@ -99,7 +160,7 @@ export default function CrewsPage() {
         fetch('/api/crews'),
         fetch('/api/agents'),
         fetch('/api/projects'),
-        fetch('/api/providers')
+        fetch('/api/providers'),
       ]);
       const crewsData = await crewsRes.json();
       const agentsData = await agentsRes.json();
@@ -117,6 +178,9 @@ export default function CrewsPage() {
               setAutoBuildProvider(dbProviders[0].id);
           }
       }
+      const voiceConfigsRes = await fetch('/api/voice/configs');
+      const voiceConfigData = await voiceConfigsRes.json().catch(() => []);
+      setVoiceConfigs(Array.isArray(voiceConfigData) ? voiceConfigData : []);
     } catch (e: any) {
       setError(e.message || 'Failed to load data');
     } finally {
@@ -160,7 +224,7 @@ export default function CrewsPage() {
   }, [autoBuildProvider, isAutoBuilding]);
 
   const autoBuildCrew = async () => {
-      if (!autoBuildGoal) return;
+      if (!autoBuildGoal || autoBuildGoal.trim().length > 1200) return;
       setIsBuilding(true);
       setBuildError('');
       setBuildEvents([]);
@@ -239,6 +303,9 @@ export default function CrewsPage() {
   useEffect(() => {
     setCrewsPage(1);
   }, [crews.length]);
+  useEffect(() => {
+    setCrewsPage(1);
+  }, [crewSearch, processFilter, exposureFilter, crewSortMode, crewsPageSize]);
 
   const handleOpenModal = (crew: Crew | null = null) => {
     setSaveError('');
@@ -248,6 +315,7 @@ export default function CrewsPage() {
       const initialConfigs: CrewOptionalConfig[] = [];
       if (crew.description) initialConfigs.push('description');
       if (crew.max_runtime_ms || crew.max_cost_usd || crew.max_tool_calls) initialConfigs.push('limits');
+      if (crew.voice_profile) initialConfigs.push('voice');
       if (crew.is_exposed) initialConfigs.push('exposure');
       setVisibleCrewConfigs(initialConfigs);
       setFormData({
@@ -257,9 +325,27 @@ export default function CrewsPage() {
         agentIds: crew.agents.map(a => a.id),
         coordinator_agent_id: crew.coordinator_agent_id ?? null,
         is_exposed: !!crew.is_exposed,
+        learning_enabled: crew.learning_enabled !== false,
         max_runtime_ms: crew.max_runtime_ms || 120000,
         max_cost_usd: crew.max_cost_usd || 5.0,
-        max_tool_calls: crew.max_tool_calls || 20
+        max_tool_calls: crew.max_tool_calls || 20,
+        voice_id: String(crew.voice_profile?.voice_id || 'JBFqnCBsd6RMkjVDRZzb'),
+        tts_model_id: String(crew.voice_profile?.tts_model_id || 'eleven_multilingual_v2'),
+        stt_model_id: String(crew.voice_profile?.stt_model_id || 'scribe_v2_realtime'),
+        voice_output_format: String(crew.voice_profile?.output_format || 'mp3_44100_128'),
+        voice_sample_rate: Number(crew.voice_profile?.sample_rate || 16000),
+        voice_language_code: String(crew.voice_profile?.language_code || 'en'),
+        voice_auto_tts: Boolean(crew.voice_profile?.auto_tts ?? true),
+        voice_vad_enabled: Boolean(crew.voice_profile?.meta?.vad_enabled ?? true),
+        voice_vad_silence_threshold_secs: Number(crew.voice_profile?.meta?.vad_silence_threshold_secs ?? DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+        voice_vad_threshold: Number(crew.voice_profile?.meta?.vad_threshold ?? DEFAULT_VAD_THRESHOLD),
+        voice_min_speech_duration_ms: Number(crew.voice_profile?.meta?.min_speech_duration_ms ?? DEFAULT_MIN_SPEECH_DURATION_MS),
+        voice_min_silence_duration_ms: Number(crew.voice_profile?.meta?.min_silence_duration_ms ?? DEFAULT_MIN_SILENCE_DURATION_MS),
+        voice_max_tokens_to_recompute: Number(crew.voice_profile?.meta?.max_tokens_to_recompute ?? DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+        voice_browser_noise_suppression: Boolean(crew.voice_profile?.meta?.browser_noise_suppression ?? true),
+        voice_browser_echo_cancellation: Boolean(crew.voice_profile?.meta?.browser_echo_cancellation ?? true),
+        voice_browser_auto_gain_control: Boolean(crew.voice_profile?.meta?.browser_auto_gain_control ?? false),
+        voice_preset_id: String((crew.voice_profile as any)?.meta?.preset_id || ''),
       });
     } else {
       setEditingCrew(null);
@@ -271,9 +357,27 @@ export default function CrewsPage() {
         agentIds: [],
         coordinator_agent_id: null,
         is_exposed: false,
+        learning_enabled: true,
         max_runtime_ms: 120000,
         max_cost_usd: 5.0,
-        max_tool_calls: 20
+        max_tool_calls: 20,
+        voice_id: 'JBFqnCBsd6RMkjVDRZzb',
+        tts_model_id: 'eleven_multilingual_v2',
+        stt_model_id: 'scribe_v2_realtime',
+        voice_output_format: 'mp3_44100_128',
+        voice_sample_rate: 16000,
+        voice_language_code: 'en',
+        voice_auto_tts: true,
+        voice_vad_enabled: true,
+        voice_vad_silence_threshold_secs: 0.8,
+        voice_vad_threshold: 0.6,
+        voice_min_speech_duration_ms: 220,
+        voice_min_silence_duration_ms: 420,
+        voice_max_tokens_to_recompute: 5,
+        voice_browser_noise_suppression: true,
+        voice_browser_echo_cancellation: true,
+        voice_browser_auto_gain_control: false,
+        voice_preset_id: '',
       });
     }
     setIsModalOpen(true);
@@ -305,6 +409,36 @@ export default function CrewsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || 'Failed to save crew');
+      const savedCrewId = Number(data?.id || editingCrew?.id);
+      if (Number.isFinite(savedCrewId) && savedCrewId > 0) {
+        const voiceRes = await fetch(`/api/voice/crews/${savedCrewId}/profile`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            voice_id: formData.voice_id,
+            tts_model_id: formData.tts_model_id,
+            stt_model_id: formData.stt_model_id,
+            output_format: formData.voice_output_format,
+            sample_rate: Number(formData.voice_sample_rate || 16000),
+            language_code: formData.voice_language_code,
+            auto_tts: Boolean(formData.voice_auto_tts),
+            meta: {
+              preset_id: formData.voice_preset_id ? Number(formData.voice_preset_id) : null,
+              vad_enabled: Boolean(formData.voice_vad_enabled),
+              vad_silence_threshold_secs: Number(formData.voice_vad_silence_threshold_secs || DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+              vad_threshold: Number(formData.voice_vad_threshold || DEFAULT_VAD_THRESHOLD),
+              min_speech_duration_ms: Number(formData.voice_min_speech_duration_ms || DEFAULT_MIN_SPEECH_DURATION_MS),
+              min_silence_duration_ms: Number(formData.voice_min_silence_duration_ms || DEFAULT_MIN_SILENCE_DURATION_MS),
+              max_tokens_to_recompute: Number(formData.voice_max_tokens_to_recompute || DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+              browser_noise_suppression: Boolean(formData.voice_browser_noise_suppression),
+              browser_echo_cancellation: Boolean(formData.voice_browser_echo_cancellation),
+              browser_auto_gain_control: Boolean(formData.voice_browser_auto_gain_control),
+            },
+          }),
+        });
+        const voiceData = await voiceRes.json().catch(() => ({}));
+        if (!voiceRes.ok) throw new Error(voiceData?.error || 'Crew saved, but voice profile failed to save');
+      }
       setIsModalOpen(false);
       loadData();
     } catch (e: any) {
@@ -343,10 +477,12 @@ export default function CrewsPage() {
 
   const crewInsights = useMemo(() => {
     const hierarchical = crews.filter((crew) => crew.process === 'hierarchical').length;
+    const parallel = crews.filter((crew) => crew.process === 'parallel').length;
     const exposed = crews.filter((crew) => crew.is_exposed).length;
     const totalAgentsAssigned = crews.reduce((sum, crew) => sum + crew.agents.length, 0);
     return {
       hierarchical,
+      parallel,
       exposed,
       totalAgentsAssigned,
       avgTeamSize: crews.length ? (totalAgentsAssigned / crews.length).toFixed(1) : '0.0',
@@ -391,6 +527,151 @@ export default function CrewsPage() {
     }
     return selectedCrewAgents.find((agent) => agent.agent_role === 'supervisor') || selectedCrewAgents[0] || null;
   }, [selectedCrewAgents, formData.coordinator_agent_id]);
+  const resetCrewFilters = () => {
+    setCrewSearch('');
+    setProcessFilter('all');
+    setExposureFilter('all');
+    setCrewSortMode('size');
+  };
+  const hasCrewFilters = crewSearch.trim().length > 0 || processFilter !== 'all' || exposureFilter !== 'all' || crewSortMode !== 'size';
+  const autoBuildGoalTooLong = autoBuildGoal.trim().length > 1200;
+  const autoBuildTemplates = [
+    {
+      label: 'Research Syndicate',
+      goal: 'Build a hierarchical crew that coordinates market research, data validation, and final executive synthesis for a weekly strategy brief.',
+      process: 'hierarchical' as const,
+    },
+    {
+      label: 'Growth Squad',
+      goal: 'Build a parallel crew for SEO, paid campaigns, and social content analysis with one combined recommendation output.',
+      process: 'parallel' as const,
+    },
+    {
+      label: 'Delivery Pipeline',
+      goal: 'Build a sequential crew that takes requirements, drafts implementation notes, validates quality checks, and prepares final delivery docs.',
+      process: 'sequential' as const,
+    },
+  ];
+  const selectedSupervisorCount = useMemo(
+    () => selectedCrewAgents.filter((agent) => agent.agent_role === 'supervisor').length,
+    [selectedCrewAgents]
+  );
+  const selectedSpecialistCount = useMemo(
+    () => selectedCrewAgents.filter((agent) => agent.agent_role !== 'supervisor').length,
+    [selectedCrewAgents]
+  );
+
+  const applyVoicePreset = (presetId: string) => {
+    const preset = voiceConfigs.find((item) => String(item.id) === String(presetId));
+    if (!preset) {
+      setFormData((prev) => ({ ...prev, voice_preset_id: '' }));
+      return;
+    }
+    setFormData((prev) => ({
+      ...prev,
+      voice_preset_id: presetId,
+      voice_id: String(preset.voice_id || 'JBFqnCBsd6RMkjVDRZzb'),
+      tts_model_id: String(preset.tts_model_id || 'eleven_multilingual_v2'),
+      stt_model_id: String(preset.stt_model_id || 'scribe_v2_realtime'),
+      voice_output_format: String(preset.output_format || 'mp3_44100_128'),
+      voice_sample_rate: Number(preset.sample_rate || 16000),
+      voice_language_code: String(preset.language_code || 'en'),
+      voice_auto_tts: Boolean(preset.auto_tts ?? true),
+      voice_vad_enabled: Boolean(preset.meta?.vad_enabled ?? true),
+      voice_vad_silence_threshold_secs: Number(preset.meta?.vad_silence_threshold_secs ?? DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+      voice_vad_threshold: Number(preset.meta?.vad_threshold ?? DEFAULT_VAD_THRESHOLD),
+      voice_min_speech_duration_ms: Number(preset.meta?.min_speech_duration_ms ?? DEFAULT_MIN_SPEECH_DURATION_MS),
+      voice_min_silence_duration_ms: Number(preset.meta?.min_silence_duration_ms ?? DEFAULT_MIN_SILENCE_DURATION_MS),
+      voice_max_tokens_to_recompute: Number(preset.meta?.max_tokens_to_recompute ?? DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+      voice_browser_noise_suppression: Boolean(preset.meta?.browser_noise_suppression ?? true),
+      voice_browser_echo_cancellation: Boolean(preset.meta?.browser_echo_cancellation ?? true),
+      voice_browser_auto_gain_control: Boolean(preset.meta?.browser_auto_gain_control ?? false),
+    }));
+  };
+
+  const saveCurrentVoicePreset = async () => {
+    const name = window.prompt('Voice preset name');
+    if (!name?.trim()) return;
+    const res = await fetch('/api/voice/configs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: name.trim(),
+        voice_id: formData.voice_id,
+        tts_model_id: formData.tts_model_id,
+        stt_model_id: formData.stt_model_id,
+        output_format: formData.voice_output_format,
+        sample_rate: Number(formData.voice_sample_rate || 16000),
+        language_code: formData.voice_language_code,
+        auto_tts: Boolean(formData.voice_auto_tts),
+        meta: {
+          vad_enabled: Boolean(formData.voice_vad_enabled),
+          vad_silence_threshold_secs: Number(formData.voice_vad_silence_threshold_secs || DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+          vad_threshold: Number(formData.voice_vad_threshold || DEFAULT_VAD_THRESHOLD),
+          min_speech_duration_ms: Number(formData.voice_min_speech_duration_ms || DEFAULT_MIN_SPEECH_DURATION_MS),
+          min_silence_duration_ms: Number(formData.voice_min_silence_duration_ms || DEFAULT_MIN_SILENCE_DURATION_MS),
+          max_tokens_to_recompute: Number(formData.voice_max_tokens_to_recompute || DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+          browser_noise_suppression: Boolean(formData.voice_browser_noise_suppression),
+          browser_echo_cancellation: Boolean(formData.voice_browser_echo_cancellation),
+          browser_auto_gain_control: Boolean(formData.voice_browser_auto_gain_control),
+        },
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setSaveError(String((data as any)?.error || 'Failed to save voice preset'));
+      return;
+    }
+    await loadData();
+    setFormData((prev) => ({ ...prev, voice_preset_id: String((data as any)?.id || '') }));
+  };
+
+  const updateSelectedVoicePreset = async () => {
+    if (!formData.voice_preset_id) return;
+    const preset = voiceConfigs.find((item) => String(item.id) === String(formData.voice_preset_id));
+    if (!preset) return;
+    const res = await fetch(`/api/voice/configs/${formData.voice_preset_id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: preset.name,
+        voice_id: formData.voice_id,
+        tts_model_id: formData.tts_model_id,
+        stt_model_id: formData.stt_model_id,
+        output_format: formData.voice_output_format,
+        sample_rate: Number(formData.voice_sample_rate || 16000),
+        language_code: formData.voice_language_code,
+        auto_tts: Boolean(formData.voice_auto_tts),
+        meta: {
+          vad_enabled: Boolean(formData.voice_vad_enabled),
+          vad_silence_threshold_secs: Number(formData.voice_vad_silence_threshold_secs || DEFAULT_VAD_SILENCE_THRESHOLD_SECS),
+          vad_threshold: Number(formData.voice_vad_threshold || DEFAULT_VAD_THRESHOLD),
+          min_speech_duration_ms: Number(formData.voice_min_speech_duration_ms || DEFAULT_MIN_SPEECH_DURATION_MS),
+          min_silence_duration_ms: Number(formData.voice_min_silence_duration_ms || DEFAULT_MIN_SILENCE_DURATION_MS),
+          max_tokens_to_recompute: Number(formData.voice_max_tokens_to_recompute || DEFAULT_MAX_TOKENS_TO_RECOMPUTE),
+          browser_noise_suppression: Boolean(formData.voice_browser_noise_suppression),
+          browser_echo_cancellation: Boolean(formData.voice_browser_echo_cancellation),
+          browser_auto_gain_control: Boolean(formData.voice_browser_auto_gain_control),
+        },
+        notes: preset.notes || '',
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setSaveError(String((data as any)?.error || 'Failed to update voice preset'));
+      return;
+    }
+    await loadData();
+  };
+
+  const deleteSelectedVoicePreset = async () => {
+    if (!formData.voice_preset_id || !window.confirm('Delete this voice preset?')) return;
+    await fetch(`/api/voice/configs/${formData.voice_preset_id}`, { method: 'DELETE' });
+    await loadData();
+    setFormData((prev) => ({ ...prev, voice_preset_id: '' }));
+  };
+
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
 
   return (
     <div className="space-y-8 pb-20">
@@ -421,10 +702,41 @@ export default function CrewsPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+      <div className="rounded-3xl border border-amber-200 bg-linear-to-r from-amber-50 via-white to-indigo-50 p-5 shadow-sm">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-3xl">
+            <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-600">Crew Strategy</div>
+            <h3 className="mt-2 text-xl font-black text-slate-900">Use hierarchical crews for coordinator plus specialist teams.</h3>
+            <p className="mt-2 text-sm leading-6 text-slate-600">
+              Sequential crews are great for fixed handoff chains. Parallel crews are best for independent workstreams. Hierarchical crews are best when one coordinator should route specialist delegations and synthesize the final answer.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 lg:w-[640px]">
+            <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Sequential</div>
+              <div className="mt-2 text-sm text-slate-700">Best for deterministic step-by-step pipelines where each agent hands its output to the next one.</div>
+            </div>
+            <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Hierarchical</div>
+              <div className="mt-2 text-sm text-slate-700">Best for supervisor routing, parallel specialist work, and final synthesis from delegated child runs.</div>
+            </div>
+            <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Parallel</div>
+              <div className="mt-2 text-sm text-slate-700">Best for independent specialist tasks that run concurrently and merge into one synthesized output.</div>
+            </div>
+            <div className="rounded-2xl border border-white/80 bg-white/85 p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Setup Tip</div>
+              <div className="mt-2 text-sm text-slate-700">Mark one agent as `supervisor`, attach domain integrations to specialists, and let the crew coordinator orchestrate.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
         {[
           { label: 'Total Crews', value: crews.length.toString() },
           { label: 'Hierarchical', value: crewInsights.hierarchical.toString() },
+          { label: 'Parallel', value: crewInsights.parallel.toString() },
           { label: 'Exposed', value: crewInsights.exposed.toString() },
           { label: 'Avg Team Size', value: crewInsights.avgTeamSize },
         ].map((item) => (
@@ -449,10 +761,11 @@ export default function CrewsPage() {
           <select
             className="rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
             value={processFilter}
-            onChange={(e) => setProcessFilter(e.target.value as 'all' | 'sequential' | 'hierarchical')}
+            onChange={(e) => setProcessFilter(e.target.value as 'all' | 'sequential' | 'hierarchical' | 'parallel')}
           >
             <option value="all">All Processes</option>
             <option value="hierarchical">Hierarchical</option>
+            <option value="parallel">Parallel</option>
             <option value="sequential">Sequential</option>
           </select>
           <select
@@ -494,6 +807,35 @@ export default function CrewsPage() {
             </button>
           </div>
         </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {[
+            { label: 'All', active: processFilter === 'all' && exposureFilter === 'all', onClick: () => { setProcessFilter('all'); setExposureFilter('all'); } },
+            { label: 'Hierarchical', active: processFilter === 'hierarchical', onClick: () => setProcessFilter('hierarchical') },
+            { label: 'Parallel', active: processFilter === 'parallel', onClick: () => setProcessFilter('parallel') },
+            { label: 'Exposed', active: exposureFilter === 'exposed', onClick: () => setExposureFilter('exposed') },
+          ].map((chip) => (
+            <button
+              key={chip.label}
+              type="button"
+              onClick={chip.onClick}
+              className={`px-3 py-1.5 rounded-full border text-xs font-semibold transition-colors ${
+                chip.active
+                  ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={resetCrewFilters}
+            disabled={!hasCrewFilters}
+            className="ml-auto px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-45"
+          >
+            Reset Filters
+          </button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -534,7 +876,11 @@ export default function CrewsPage() {
                   <div className="flex items-center gap-3 mb-1">
                     <h3 className="text-xl font-bold text-slate-900 truncate">{crew.name}</h3>
                     <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
-                      crew.process === 'hierarchical' ? 'bg-amber-100 text-amber-700' : 'bg-indigo-100 text-indigo-700'
+                      crew.process === 'hierarchical'
+                        ? 'bg-amber-100 text-amber-700'
+                        : crew.process === 'parallel'
+                          ? 'bg-cyan-100 text-cyan-700'
+                          : 'bg-indigo-100 text-indigo-700'
                     }`}>
                       {crew.process}
                     </span>
@@ -673,10 +1019,29 @@ export default function CrewsPage() {
                       <p className="text-slate-600 mb-6 text-sm font-medium">
                           Describe your goal, and our AI Architect will select the best agents from your library (or design new specialists) and wire them into a cohesive syndicate.
                       </p>
+                      <div className="mb-4 flex flex-wrap items-center gap-2">
+                        {autoBuildTemplates.map((template) => (
+                          <button
+                            key={template.label}
+                            type="button"
+                            onClick={() => {
+                              setAutoBuildGoal(template.goal);
+                              setAutoBuildProcessPreference(template.process);
+                            }}
+                            disabled={isBuilding}
+                            className="rounded-full border border-purple-200 bg-purple-50 px-3 py-1.5 text-xs font-semibold text-purple-700 hover:bg-purple-100 disabled:opacity-60"
+                          >
+                            {template.label}
+                          </button>
+                        ))}
+                      </div>
                       
                       <div className="space-y-4">
                           <div className="space-y-1">
-                              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Mission Objective</label>
+                              <div className="flex items-center justify-between">
+                                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Mission Objective</label>
+                                <span className={`text-[10px] font-semibold ${autoBuildGoalTooLong ? 'text-red-600' : 'text-slate-400'}`}>{autoBuildGoal.trim().length}/1200</span>
+                              </div>
                               <textarea
                                   className="w-full px-4 py-3 border border-slate-200 rounded-2xl focus:ring-4 focus:ring-purple-500/10 focus:border-purple-500 outline-none h-32 resize-none bg-slate-50/50 font-medium text-slate-700 transition-all"
                                   placeholder="e.g. Conduct a deep analysis of the current EV market and generate a series of engaging tweets about the findings."
@@ -724,15 +1089,16 @@ export default function CrewsPage() {
                             <select
                                 className="w-full px-4 py-3 border border-slate-200 rounded-2xl focus:ring-4 focus:ring-purple-500/10 outline-none bg-slate-50/50 font-bold text-slate-700 transition-all appearance-none"
                                 value={autoBuildProcessPreference}
-                                onChange={(e) => setAutoBuildProcessPreference(e.target.value as 'auto' | 'sequential' | 'hierarchical')}
+                                onChange={(e) => setAutoBuildProcessPreference(e.target.value as 'auto' | 'sequential' | 'hierarchical' | 'parallel')}
                                 disabled={isBuilding}
                             >
                                 <option value="auto">Auto Decide</option>
                                 <option value="sequential">Sequential</option>
+                                <option value="parallel">Parallel</option>
                                 <option value="hierarchical">Hierarchical</option>
                             </select>
                             <p className="text-[11px] text-slate-500">
-                              Hierarchical crews create a coordinator/supervisor. Sequential crews pass work step by step.
+                              Parallel crews run independent specialists together. Hierarchical crews create a coordinator/supervisor. Sequential crews pass work step by step.
                             </p>
                           </div>
 
@@ -784,6 +1150,11 @@ export default function CrewsPage() {
                                {buildError}
                           </div>
                       )}
+                      {autoBuildGoalTooLong && (
+                          <div className="mt-4 p-3 bg-red-50 text-red-700 text-xs font-semibold rounded-2xl border border-red-100">
+                              Mission objective is too long. Keep it under 1200 characters for reliable crew generation.
+                          </div>
+                      )}
 
                       <div className="flex justify-end gap-3 mt-8">
                           <button 
@@ -799,7 +1170,7 @@ export default function CrewsPage() {
                           <button 
                               onClick={autoBuildCrew}
                               className="premium-gradient text-white px-8 py-3 rounded-2xl flex items-center gap-2 transition-all hover:scale-105 active:scale-95 shadow-xl shadow-purple-200 font-bold text-sm disabled:opacity-50"
-                              disabled={isBuilding || !autoBuildGoal}
+                              disabled={isBuilding || !autoBuildGoal || autoBuildGoalTooLong}
                           >
                               {isBuilding ? (
                                   <>
@@ -844,6 +1215,9 @@ export default function CrewsPage() {
                       {editingCrew ? 'Synthesize Modification' : 'Initialize Syndicate'}
                     </h2>
                     <p className="text-xs text-slate-500 font-bold uppercase tracking-widest mt-1">Crew Configuration Interface</p>
+                    <p className="mt-2 text-xs text-slate-400 uppercase tracking-[0.18em]">
+                      Keep the collaboration design visible first. Open voice serving and exposure only when this crew actually needs them.
+                    </p>
                   </div>
                   <button
                     type="button"
@@ -872,17 +1246,18 @@ export default function CrewsPage() {
                         className="w-full ui-select !rounded-2xl !bg-slate-50 !border-slate-200 focus:!bg-white !font-bold text-slate-900 appearance-none"
                         value={formData.process}
                         onChange={e => {
-                          const nextProcess = e.target.value as 'sequential' | 'hierarchical';
+                          const nextProcess = e.target.value as 'sequential' | 'hierarchical' | 'parallel';
                           setFormData((prev) => ({
                             ...prev,
                             process: nextProcess,
-                            coordinator_agent_id: nextProcess === 'hierarchical'
+                            coordinator_agent_id: (nextProcess === 'hierarchical' || nextProcess === 'parallel')
                               ? (prev.coordinator_agent_id ?? prev.agentIds[0] ?? null)
                               : prev.coordinator_agent_id,
                           }));
                         }}
                       >
                         <option value="sequential">Sequential Loop</option>
+                        <option value="parallel">Parallel Fan-Out</option>
                         <option value="hierarchical">Hierarchical Stack</option>
                       </select>
                     </div>
@@ -939,11 +1314,11 @@ export default function CrewsPage() {
                         ))}
                     </select>
                     <p className="text-[11px] text-slate-500">
-                      For hierarchical crews, this agent drives planning and final synthesis.
+                      For hierarchical and parallel crews, this agent can drive final synthesis.
                     </p>
                   </div>
 
-                  {formData.process === 'hierarchical' && coordinatorPreview && (
+                  {(formData.process === 'hierarchical' || formData.process === 'parallel') && coordinatorPreview && (
                     <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3">
                       <div className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-1">Coordinator Preview</div>
                       <div className="text-sm font-semibold text-violet-900">
@@ -962,15 +1337,45 @@ export default function CrewsPage() {
                   <div className={`rounded-2xl border px-4 py-3 ${
                     formData.process === 'hierarchical'
                       ? 'bg-amber-50 border-amber-200 text-amber-800'
-                      : 'bg-indigo-50 border-indigo-200 text-indigo-800'
+                      : formData.process === 'parallel'
+                        ? 'bg-cyan-50 border-cyan-200 text-cyan-800'
+                        : 'bg-indigo-50 border-indigo-200 text-indigo-800'
                   }`}>
                     <div className="text-xs font-bold uppercase tracking-wider mb-1">
-                      {formData.process === 'hierarchical' ? 'Hierarchical Handshake' : 'Sequential Handshake'}
+                      {formData.process === 'hierarchical'
+                        ? 'Hierarchical Handshake'
+                        : formData.process === 'parallel'
+                          ? 'Parallel Handshake'
+                          : 'Sequential Handshake'}
                     </div>
                     <div className="text-sm">
                       {formData.process === 'hierarchical'
                         ? 'Coordinator plans/delegates, then synthesizes a cumulative final answer from all agent outputs.'
-                        : 'Agents run in selected order. Each step receives the previous step output and contributes to one final cumulative answer.'}
+                        : formData.process === 'parallel'
+                          ? 'Agents run concurrently as independent specialists, then one synthesis step merges all outputs into a final answer.'
+                          : 'Agents run in selected order. Each step receives the previous step output and contributes to one final cumulative answer.'}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Coordinator + Specialists Guidance</div>
+                    <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                        <div className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Selected Supervisors</div>
+                        <div className="mt-2 text-lg font-black text-slate-900">{selectedSupervisorCount}</div>
+                        <div className="mt-1 text-[11px] text-slate-600">Ideally one coordinator for hierarchical and parallel crews.</div>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                        <div className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Selected Specialists</div>
+                        <div className="mt-2 text-lg font-black text-slate-900">{selectedSpecialistCount}</div>
+                        <div className="mt-1 text-[11px] text-slate-600">Attach MCP bundles and domain tools to these agents.</div>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                        <div className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Recommended Pattern</div>
+                        <div className="mt-2 text-[11px] leading-5 text-slate-700">
+                          Keep the coordinator orchestration-focused. Let specialists own actual HTTP tools, local tools, and MCP bundles for their domain.
+                        </div>
+                      </div>
                     </div>
                   </div>
 
@@ -1041,57 +1446,219 @@ export default function CrewsPage() {
                   </div>
 
                   {showCrewConfig('limits') && (
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-slate-100">
-                    <div className="space-y-1">
-                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Runtime Limit (ms)</label>
-                      <input
-                        type="number"
-                        className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 focus:bg-white font-bold text-slate-900"
-                        value={formData.max_runtime_ms}
-                        onChange={e => setFormData({ ...formData, max_runtime_ms: Number(e.target.value) })}
-                      />
+                  <div className="pt-4 border-t border-slate-100">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                      <div className="space-y-1">
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Runtime Limit (ms)</label>
+                        <input
+                          type="number"
+                          className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 focus:bg-white font-bold text-slate-900"
+                          value={formData.max_runtime_ms}
+                          onChange={e => setFormData({ ...formData, max_runtime_ms: Number(e.target.value) })}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Cost Cap ($ USD)</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 focus:bg-white font-bold text-slate-900"
+                          value={formData.max_cost_usd}
+                          onChange={e => setFormData({ ...formData, max_cost_usd: Number(e.target.value) })}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Step Limit</label>
+                        <input
+                          type="number"
+                          className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 focus:bg-white font-bold text-slate-900"
+                          value={formData.max_tool_calls}
+                          onChange={e => setFormData({ ...formData, max_tool_calls: Number(e.target.value) })}
+                        />
+                      </div>
                     </div>
-                    <div className="space-y-1">
-                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Cost Cap ($ USD)</label>
+                    <label className="mt-4 flex items-center gap-2 cursor-pointer">
                       <input
-                        type="number"
-                        step="0.01"
-                        className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 focus:bg-white font-bold text-slate-900"
-                        value={formData.max_cost_usd}
-                        onChange={e => setFormData({ ...formData, max_cost_usd: Number(e.target.value) })}
+                        type="checkbox"
+                        className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                        checked={formData.learning_enabled}
+                        onChange={e => setFormData({ ...formData, learning_enabled: e.target.checked })}
                       />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Step Limit</label>
-                      <input
-                        type="number"
-                        className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 focus:bg-white font-bold text-slate-900"
-                        value={formData.max_tool_calls}
-                        onChange={e => setFormData({ ...formData, max_tool_calls: Number(e.target.value) })}
-                      />
-                    </div>
+                      <span className="text-sm text-slate-700">Enable Learning From Feedback</span>
+                    </label>
+                    <p className="text-xs text-slate-500 mt-2">
+                      When enabled, this crew uses saved run feedback to influence planning, delegation, and synthesis on future runs.
+                    </p>
                   </div>
                   )}
 
-                  {showCrewConfig('exposure') && (
-                  <div className="flex items-center justify-between p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
-                    <div className="flex items-center gap-3">
-                       <Globe size={20} className="text-indigo-600" />
-                       <div>
-                         <p className="text-sm font-bold text-slate-900">Expose to Neural Command (MCP)</p>
-                         <p className="text-[10px] text-indigo-600 font-bold uppercase tracking-wider">Make this crew invokable as an MCP tool</p>
-                       </div>
+                  {showCrewConfig('voice') && (
+                  <details className="border border-emerald-100 rounded-2xl p-4 bg-emerald-50/40 space-y-3 group">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                      <div>
+                        <label className="flex items-center gap-2 text-sm font-medium text-emerald-950">
+                          <AudioLines size={16} className="text-emerald-600" />
+                          Voice Settings
+                        </label>
+                        <p className="text-xs text-emerald-900/75 mt-1">
+                          Save voice defaults on this crew so live voice sessions can invoke the whole crew with its own STT/TTS profile.
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <Link to="/voice" className="text-xs text-emerald-700 hover:text-emerald-900 font-medium">
+                          Open Voice Console
+                        </Link>
+                        <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700 group-open:bg-emerald-700 group-open:text-white">
+                          Expand
+                        </span>
+                      </div>
+                    </summary>
+                    <div className="pt-3 space-y-3">
+                      <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 items-end">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Voice Preset</label>
+                          <select
+                            className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 text-sm"
+                            value={formData.voice_preset_id}
+                            onChange={e => applyVoicePreset(e.target.value)}
+                          >
+                            <option value="">Custom runtime values</option>
+                            {voiceConfigs.map((preset) => (
+                              <option key={preset.id} value={preset.id}>{preset.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <button type="button" onClick={saveCurrentVoicePreset} className="px-3 py-3 rounded-2xl border border-slate-200 bg-white text-sm font-bold text-slate-700">
+                          Save As Preset
+                        </button>
+                        <button type="button" onClick={updateSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-3 rounded-2xl border border-slate-200 bg-white text-sm font-bold text-slate-700 disabled:opacity-40">
+                          Update Preset
+                        </button>
+                        <button type="button" onClick={deleteSelectedVoicePreset} disabled={!formData.voice_preset_id} className="px-3 py-3 rounded-2xl border border-red-200 bg-red-50 text-sm font-bold text-red-700 disabled:opacity-40">
+                          Delete Preset
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Voice ID</label>
+                          <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_id} onChange={e => setFormData({ ...formData, voice_id: e.target.value })} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">TTS Model</label>
+                          <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.tts_model_id} onChange={e => setFormData({ ...formData, tts_model_id: e.target.value })} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">STT Model</label>
+                          <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.stt_model_id} onChange={e => setFormData({ ...formData, stt_model_id: e.target.value })} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Output Format</label>
+                          <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_output_format} onChange={e => setFormData({ ...formData, voice_output_format: e.target.value })} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Sample Rate</label>
+                          <input type="number" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-bold text-slate-900" value={formData.voice_sample_rate} onChange={e => setFormData({ ...formData, voice_sample_rate: Number(e.target.value) || 16000 })} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Language</label>
+                          <input className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_language_code} onChange={e => setFormData({ ...formData, voice_language_code: e.target.value })} />
+                        </div>
+                      </div>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" checked={formData.voice_auto_tts} onChange={e => setFormData({ ...formData, voice_auto_tts: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                        <span className="text-sm text-slate-700">Auto-play TTS replies for this crew</span>
+                      </label>
+                      <div className="rounded-2xl border border-emerald-100 bg-white/80 p-4 space-y-3">
+                        <div>
+                          <div className="text-sm font-medium text-slate-900">Turn Detection And Disturbance Control</div>
+                          <div className="text-xs text-slate-500 mt-1">These defaults are reused by crew voice sessions so short disturbances can be ignored without making real pauses feel slow.</div>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                          <label className="flex items-center gap-2 text-sm text-slate-700">
+                            <input type="checkbox" checked={formData.voice_vad_enabled} onChange={e => setFormData({ ...formData, voice_vad_enabled: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                            VAD auto-commit
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-slate-700">
+                            <input type="checkbox" checked={formData.voice_browser_noise_suppression} onChange={e => setFormData({ ...formData, voice_browser_noise_suppression: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                            Browser noise suppression
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-slate-700">
+                            <input type="checkbox" checked={formData.voice_browser_echo_cancellation} onChange={e => setFormData({ ...formData, voice_browser_echo_cancellation: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                            Echo cancellation
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-slate-700">
+                            <input type="checkbox" checked={formData.voice_browser_auto_gain_control} onChange={e => setFormData({ ...formData, voice_browser_auto_gain_control: e.target.checked })} className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" />
+                            Auto gain control
+                          </label>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Silence Threshold (sec)</label>
+                            <input type="number" min="0.2" max="3" step="0.1" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_vad_silence_threshold_secs} onChange={e => setFormData({ ...formData, voice_vad_silence_threshold_secs: Number(e.target.value) || DEFAULT_VAD_SILENCE_THRESHOLD_SECS })} />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">VAD Threshold</label>
+                            <input type="number" min="0.1" max="0.95" step="0.05" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_vad_threshold} onChange={e => setFormData({ ...formData, voice_vad_threshold: Number(e.target.value) || DEFAULT_VAD_THRESHOLD })} />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Min Speech (ms)</label>
+                            <input type="number" min="50" max="2000" step="10" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_min_speech_duration_ms} onChange={e => setFormData({ ...formData, voice_min_speech_duration_ms: Number(e.target.value) || DEFAULT_MIN_SPEECH_DURATION_MS })} />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Min Silence (ms)</label>
+                            <input type="number" min="50" max="3000" step="10" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_min_silence_duration_ms} onChange={e => setFormData({ ...formData, voice_min_silence_duration_ms: Number(e.target.value) || DEFAULT_MIN_SILENCE_DURATION_MS })} />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-1.5">Recompute Window</label>
+                            <input type="number" min="0" max="50" step="1" className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 font-mono text-sm" value={formData.voice_max_tokens_to_recompute} onChange={e => setFormData({ ...formData, voice_max_tokens_to_recompute: Number(e.target.value) || DEFAULT_MAX_TOKENS_TO_RECOMPUTE })} />
+                          </div>
+                        </div>
+                      </div>
                     </div>
-                    <label className="relative inline-flex items-center cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={formData.is_exposed}
-                        onChange={e => setFormData({ ...formData, is_exposed: e.target.checked })}
-                        className="sr-only peer"
-                      />
-                      <div className="w-11 h-6 bg-indigo-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
-                    </label>
-                  </div>
+                  </details>
+                  )}
+
+                  {showCrewConfig('exposure') && (
+                  <details className="space-y-4 group">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-2xl border border-indigo-100 bg-indigo-50 px-4 py-4">
+                      <div className="flex items-center gap-3">
+                         <Globe size={20} className="text-indigo-600" />
+                         <div>
+                           <p className="text-sm font-bold text-slate-900">Expose to Neural Command (MCP)</p>
+                           <p className="text-[10px] text-indigo-600 font-bold uppercase tracking-wider">Make this crew invokable as MCP, API, and voice runtime</p>
+                         </div>
+                      </div>
+                      <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-700 group-open:bg-indigo-700 group-open:text-white">
+                        Expand
+                      </span>
+                    </summary>
+                    <div className="pt-2 space-y-4">
+                      <div className="flex items-center justify-between p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
+                        <div className="text-xs text-slate-600">
+                          When enabled, this crew can be served to API callers, MCP clients, and external voice consumers.
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={formData.is_exposed}
+                            onChange={e => setFormData({ ...formData, is_exposed: e.target.checked })}
+                            className="sr-only peer"
+                          />
+                          <div className="w-11 h-6 bg-indigo-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                        </label>
+                      </div>
+                      {formData.is_exposed && editingCrew && (
+                        <div className="rounded-2xl border border-cyan-200 bg-cyan-50 p-4 space-y-3">
+                          <div className="flex items-center gap-2 text-sm font-semibold text-cyan-900">
+                            <Radio size={16} />
+                            Voice Connection
+                          </div>
+                          <div className="text-xs text-cyan-900/80">Use this websocket endpoint to connect external realtime voice clients to the crew.</div>
+                          <div className="rounded-xl bg-white border border-cyan-100 px-3 py-2 font-mono text-xs break-all">
+                            {origin.replace(/^http/, 'ws')}/ws/voice?targetType=crew&targetId={editingCrew.id}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </details>
                   )}
                 </div>
 

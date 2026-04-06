@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { Plus, Trash2, Edit, Key, Server, Check, X, Shield, ExternalLink } from 'lucide-react';
+import { Plus, Trash2, Edit, Key, Server, Check, X, Shield, ExternalLink, Search } from 'lucide-react';
 import Pagination from '../components/Pagination';
 
 interface Provider {
@@ -27,6 +27,9 @@ export default function ProvidersPage() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [providersPage, setProvidersPage] = useState(1);
   const [providersPageSize, setProvidersPageSize] = useState(9);
+  const [search, setSearch] = useState('');
+  const [providerFilter, setProviderFilter] = useState<string>('all');
+  const [testStatus, setTestStatus] = useState<{ type: 'success' | 'error' | 'testing', message: string } | null>(null);
   
   const [formData, setFormData] = useState({
     name: '',
@@ -40,7 +43,8 @@ export default function ProvidersPage() {
     { id: 'google', name: 'Google Gemini' },
     { id: 'openai', name: 'OpenAI' },
     { id: 'anthropic', name: 'Anthropic' },
-    { id: 'openai-compatible', name: 'OpenAI Compatible (e.g. Ollama, vLLM)' }
+    { id: 'openai-compatible', name: 'OpenAI Compatible (e.g. Ollama, vLLM)' },
+    { id: 'litellm', name: 'LiteLLM Proxy / Enterprise' }
   ];
 
   useEffect(() => {
@@ -49,7 +53,7 @@ export default function ProvidersPage() {
 
   useEffect(() => {
     setProvidersPage(1);
-  }, [providers.length]);
+  }, [providers.length, search, providerFilter]);
 
   const fetchProviders = () => {
     fetch('/api/providers')
@@ -83,6 +87,7 @@ export default function ProvidersPage() {
     setFormData({ name: '', provider: 'openai', api_base: '', api_key: '', is_default: false });
     setIsCreating(false);
     setEditingId(null);
+    setTestStatus(null);
   };
 
   const startEdit = (provider: Provider) => {
@@ -95,6 +100,41 @@ export default function ProvidersPage() {
       });
       setEditingId(provider.id);
       setIsCreating(true);
+      setTestStatus(null);
+  };
+
+  const handleTestConnection = async () => {
+    if (!formData.api_key && !editingId) {
+        setTestStatus({ type: 'error', message: 'API Key is required to test connection.' });
+        return;
+    }
+    
+    if (formData.api_base?.endsWith('/chat/completions') || formData.api_base?.endsWith('/models')) {
+        setTestStatus({ type: 'error', message: 'Warning: API Base should usually end in /v1, not a specific endpoint path like /chat/completions.' });
+        return;
+    }
+
+    setTestStatus({ type: 'testing', message: 'Testing connection...' });
+    try {
+        if (editingId && !formData.api_key) {
+            setTestStatus({ type: 'error', message: 'Please temporarily re-enter your API key to test the connection.' });
+            return;
+        }
+
+        const res = await fetch('/api/providers/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(formData)
+        });
+        const data = await safeJson(res) || {};
+        if (res.ok) {
+            setTestStatus({ type: 'success', message: data.message || 'Connection successful!' });
+        } else {
+            setTestStatus({ type: 'error', message: data.error || 'Connection failed.' });
+        }
+    } catch (e: any) {
+        setTestStatus({ type: 'error', message: e.message || 'Network error occurred.' });
+    }
   };
 
   const deleteProvider = async (id: number) => {
@@ -109,31 +149,109 @@ export default function ProvidersPage() {
     }
   };
 
+  const filteredProviders = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return providers.filter((provider) => {
+      if (providerFilter === 'defaults' && !provider.is_default) return false;
+      if (providerFilter !== 'all' && providerFilter !== 'defaults' && provider.provider !== providerFilter) return false;
+      if (!query) return true;
+      const haystack = [provider.name, provider.provider, provider.api_base || ''].join(' ').toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [providers, search, providerFilter]);
+
   const pagedProviders = useMemo(() => {
     const start = (providersPage - 1) * providersPageSize;
-    return providers.slice(start, start + providersPageSize);
-  }, [providers, providersPage, providersPageSize]);
+    return filteredProviders.slice(start, start + providersPageSize);
+  }, [filteredProviders, providersPage, providersPageSize]);
+
+  const providerInsights = useMemo(() => ({
+    totalProviders: providers.length,
+    defaultProviders: providers.filter((provider) => provider.is_default).length,
+    openAiCompatible: providers.filter((provider) => provider.provider === 'openai-compatible').length,
+    managedKeys: providers.length,
+  }), [providers]);
 
   return (
     <div>
-      <div className="flex justify-between items-end mb-8">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900">LLM Providers</h1>
-          <p className="text-slate-500 mt-1">Configure AI model providers (Google, OpenAI, Anthropic, etc.)</p>
-          <p className="text-xs text-slate-400 mt-1">
-            For non-LLM API keys (e.g. Search, Databases), go to{' '}
-            <Link to="/credentials" className="text-brand-600 hover:underline font-medium inline-flex items-center gap-1">
-              Credentials <ExternalLink size={10} />
-            </Link>
-          </p>
+      <div className="swarm-hero p-6 mb-8">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="text-3xl font-black text-white">LLM Providers</h1>
+            <p className="text-slate-300 mt-1">Maintain the model backends your agents can route through, test them, and keep defaults explicit.</p>
+            <p className="text-xs text-slate-400 mt-2">
+              For non-LLM API keys, go to{' '}
+              <Link to="/credentials" className="text-cyan-200 hover:text-white font-medium inline-flex items-center gap-1">
+                Credentials <ExternalLink size={10} />
+              </Link>
+            </p>
+          </div>
+          <button
+            onClick={() => setIsCreating((prev) => !prev)}
+            className="bg-white/10 hover:bg-white/15 text-white px-4 py-2 rounded-xl flex items-center gap-2 transition-colors border border-white/10"
+          >
+            <Plus size={18} />
+            {isCreating ? 'Close Builder' : 'New Provider'}
+          </button>
         </div>
-        <button 
-          onClick={() => setIsCreating(true)}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
-        >
-          <Plus size={18} />
-          New Provider
-        </button>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-4 mt-6">
+          {[
+            { label: 'Providers', value: providerInsights.totalProviders },
+            { label: 'Defaults', value: providerInsights.defaultProviders },
+            { label: 'Compat Runtimes', value: providerInsights.openAiCompatible },
+            { label: 'Managed Keys', value: providerInsights.managedKeys },
+          ].map((item) => (
+            <div key={item.label} className="telemetry-tile p-4">
+              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">{item.label}</div>
+              <div className="mt-2 text-3xl font-black text-white">{item.value}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="relative w-full max-w-md">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full rounded-xl border border-slate-300 bg-white pl-10 pr-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+              placeholder="Search providers by name, type, or API base..."
+            />
+          </div>
+          <div className="flex items-center gap-2 text-xs text-slate-500">
+            <span className="font-medium text-slate-700">{filteredProviders.length}</span>
+            <span>visible of</span>
+            <span className="font-medium text-slate-700">{providers.length}</span>
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {[
+            { key: 'all', label: 'All' },
+            { key: 'defaults', label: 'Defaults' },
+            ...providerTypes.map((type) => ({ key: type.id, label: type.name })),
+          ].map((chip) => (
+            <button
+              key={chip.key}
+              onClick={() => setProviderFilter(chip.key)}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                providerFilter === chip.key
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+          <button
+            onClick={() => { setProviderFilter('all'); setSearch(''); }}
+            disabled={providerFilter === 'all' && !search.trim()}
+            className="ml-auto rounded-full px-3 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:hover:bg-white"
+          >
+            Reset
+          </button>
+        </div>
       </div>
 
       {isCreating && (
@@ -210,7 +328,25 @@ export default function ProvidersPage() {
                 </p>
             </div>
 
-            <div className="flex justify-end gap-3 pt-2">
+            <div className="flex justify-end gap-3 pt-2 items-center">
+              {testStatus && (
+                <div className={`mr-auto px-3 py-1.5 rounded-lg text-xs font-medium ${
+                    testStatus.type === 'success' ? 'bg-green-50 text-green-700 border border-green-200' :
+                    testStatus.type === 'error' ? 'bg-red-50 text-red-700 border border-red-200' :
+                    'bg-blue-50 text-blue-700 border border-blue-200 animate-pulse'
+                }`}>
+                    {testStatus.type === 'testing' ? 'Testing...' : testStatus.message}
+                </div>
+              )}
+              
+              <button 
+                type="button"
+                onClick={handleTestConnection}
+                disabled={testStatus?.type === 'testing'}
+                className="bg-slate-100 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-200 disabled:opacity-50"
+              >
+                Test Connection
+              </button>
               <button 
                 type="button"
                 onClick={resetForm}
@@ -286,7 +422,25 @@ export default function ProvidersPage() {
         
         {providers.length === 0 && !isCreating && (
           <div className="col-span-full text-center py-12 bg-slate-50 rounded-xl border border-dashed border-slate-300">
-            <p className="text-slate-500">No providers configured. Add one to get started!</p>
+            <p className="text-slate-500">No providers configured yet.</p>
+            <button
+              onClick={() => setIsCreating(true)}
+              className="mt-4 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+            >
+              <Plus size={16} />
+              Add Provider
+            </button>
+          </div>
+        )}
+        {providers.length > 0 && filteredProviders.length === 0 && (
+          <div className="col-span-full text-center py-12 bg-slate-50 rounded-xl border border-dashed border-slate-300">
+            <p className="text-slate-500">No providers match the current filters.</p>
+            <button
+              onClick={() => { setProviderFilter('all'); setSearch(''); }}
+              className="mt-4 inline-flex items-center gap-2 rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-900"
+            >
+              Clear Filters
+            </button>
           </div>
         )}
       </div>
@@ -294,7 +448,7 @@ export default function ProvidersPage() {
         <Pagination
           page={providersPage}
           pageSize={providersPageSize}
-          total={providers.length}
+          total={filteredProviders.length}
           onPageChange={setProvidersPage}
           onPageSizeChange={setProvidersPageSize}
           pageSizeOptions={[6, 9, 12, 18]}

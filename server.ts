@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
-import { createServer as createViteServer, ViteDevServer } from 'vite';
-import { initDb } from './src/db';
+import type { ViteDevServer } from 'vite';
+import { ensureAttachmentTables, ensureLearningTables, ensureVoiceTables, initDb } from './src/db';
 import db from './src/db';
 import { GoogleGenAI } from '@google/genai';
 import OpenAI from 'openai';
@@ -20,10 +20,11 @@ import JSON5 from 'json5';
 import { withRetry } from './src/utils/withRetry';
 import cookieParser from 'cookie-parser';
 import { registerPlatformRoutes } from './src/platform/routes';
-import { closePrisma, getPrisma } from './src/platform/prisma';
+import { closePrisma, ensurePrismaReady, getPrisma } from './src/platform/prisma';
 import { closeRedis, initRedis, isRedisConnected } from './src/infra/redis';
 import { getSqlitePath } from './src/db';
 import { startSqliteGcsSyncLoop, syncSqliteToGcs } from './src/infra/sqliteGcs';
+import { isAttachmentStorageConfigured, uploadAttachmentBuffer } from './src/infra/attachmentsStorage';
 import { randomTraceIdHex32, uuid } from './src/platform/crypto';
 import { verifyProjectApiKey } from './src/platform/apiKeys';
 import { syncPersistentMirrorFromPostgres } from './src/orchestrator/sqliteMirror';
@@ -38,35 +39,585 @@ import {
   finalizeSupervisorExecution as finalizeRuntimeSupervisorExecution,
   getAgentExecution as getRuntimeAgentExecution,
   getDelegationRows as getRuntimeDelegationRows,
+  getExecutionCostTotals as getRuntimeExecutionCostTotals,
   getJobRow as getRuntimeJobRow,
   getWorkflowRun as getRuntimeWorkflowRun,
   loadSessionConversation as loadRuntimeSessionConversation,
   loadSessionSummary as loadRuntimeSessionSummary,
   persistWorkflowRun as persistRuntimeWorkflowRun,
+  pruneRuntimeRetention,
   recoverRuntimeState,
   saveSessionConversation as saveRuntimeSessionConversation,
   saveSessionSummary as saveRuntimeSessionSummary,
   updateAgentExecution as updateRuntimeAgentExecution,
+  heartbeatJobLease as heartbeatRuntimeJobLease,
+  failExpiredJobLeases as failExpiredRuntimeJobLeases,
   updateJobResult as updateRuntimeJobResult,
   updateToolExecution as updateRuntimeToolExecution,
   waitForJob as waitForRuntimeJob,
   enqueueJob as enqueueRuntimeJob,
 } from './src/orchestrator/runtimeStore';
+import { acceptedExecutionResponse, shouldWaitForExecution } from './src/runtime/httpExecution';
+import { startRuntimeJobWorker } from './src/runtime/jobWorker';
+import {
+  appendCrewExecutionLog,
+  createCrewExecutionRecord,
+  getCrewExecution,
+  getCrewExecutionStatus,
+  readCrewExecutionLogs as readCrewExecutionLogsFromStore,
+  recoverCrewExecutionState,
+  syncAgentStatus,
+  syncCrewExecutionMetrics,
+  syncCrewExecutionStatus,
+} from './src/runtime/executionState';
+import { subscribeAgentExecution, subscribeCrewExecution, subscribeWorkflowRun } from './src/runtime/executionEvents';
 import { spawn } from 'child_process';
 import rateLimit from 'express-rate-limit';
 import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, unlink } from 'node:fs/promises';
 import * as z from 'zod/v4';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import * as internalTools from './src/orchestrator/internalTools.js';
+import { registerOrchestratorConfigRoutes } from './src/server/registerOrchestratorConfigRoutes';
+import { registerMcpAdminRoutes } from './src/server/registerMcpAdminRoutes';
+import { registerRuntimeControlRoutes } from './src/server/registerRuntimeControlRoutes';
+import { getNextCronOccurrenceUtc, parseCronExpression } from './src/server/cron';
+import { WebSocketServer, WebSocket } from 'ws';
+import { createRequire } from 'node:module';
+import { requireUser } from './src/platform/auth';
+import {
+  assignResourceOwner,
+  getScopedAgentIds,
+  getScopedBundleIds,
+  getScopedCrewIds,
+  getScopedProjectIds,
+  getScopedToolIds,
+  getScopedVoiceConfigIds,
+  getResourceAccess,
+  getLocalAccessSubsystemInfo,
+  requireManageableResource,
+  deleteResourceAccess,
+  requireVisibleAgentId,
+  requireVisibleBundleId,
+  requireVisibleCrewId,
+  requireVisibleProjectId,
+  requireVisibleToolId,
+  requireVisibleVoiceConfigId,
+  resolveOrchestratorAccessScope,
+  setResourceAccess,
+} from './src/server/orchestratorAccess';
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
+const runtimeRequire = createRequire(import.meta.url);
+const jsPackageInstallInFlight = new Map<string, Promise<void>>();
+
+// Test suites import `app` without calling `startServer()`, so the local mirror
+// schema must be ready at module load time as well.
+initDb();
+
+app.use((req, res, next) => {
+  ensurePrismaReady().then(() => next()).catch(next);
+});
 
 type CancelToken = { canceled: boolean; reason?: string };
 type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'canceled';
 
 // pricing logic moved inside startServer
+
+function slugifyValue(input: string) {
+  return String(input || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function packageToBaseName(input: string) {
+  const cleaned = String(input || '')
+    .trim()
+    .replace(/^@/, '')
+    .replace(/[\\/]/g, '_')
+    .replace(/[^a-zA-Z0-9_-]+/g, '_');
+  return slugifyValue(cleaned);
+}
+
+function compactMcpPackageAlias(input: string) {
+  const base = packageToBaseName(input)
+    .replace(/^npm_/, '')
+    .replace(/_mcp_server$/i, '')
+    .replace(/_mcp$/i, '')
+    .replace(/_server$/i, '');
+  return slugifyValue(base) || 'mcp';
+}
+
+function buildImportedMcpPrefix(packageName: string, namePrefix?: string) {
+  const explicit = slugifyValue(String(namePrefix || ''));
+  if (explicit) return explicit;
+  return compactMcpPackageAlias(packageName);
+}
+
+function buildImportedMcpExposedName(prefix: string, mcpToolName: string) {
+  const cleanPrefix = slugifyValue(prefix) || 'mcp';
+  const cleanToolName = slugifyValue(mcpToolName) || 'tool';
+  return `${cleanPrefix}_${cleanToolName}`;
+}
+
+function buildExposedMcpToolAlias(exposedName: string) {
+  const value = String(exposedName || '').trim();
+  if (!value) return 'tool';
+  return value.startsWith('tool_') ? value : `tool_${value}`;
+}
+
+function getKnownMcpPackageConfigError(packageName: string, env?: Record<string, string>) {
+  const normalizedPackage = String(packageName || '').trim().toLowerCase();
+  const normalizedEnv = env && typeof env === 'object' ? env : {};
+  const hasValue = (key: string) => String(normalizedEnv[key] || '').trim().length > 0;
+
+  if (normalizedPackage === 'meta-ads-mcp') {
+    if (!hasValue('META_ACCESS_TOKEN')) {
+      return 'meta-ads-mcp requires META_ACCESS_TOKEN. Add it in the Environment Variables JSON before importing or using this MCP.';
+    }
+  }
+
+  return null;
+}
+
+function buildWrappedStdioCommand(command: string, args: string[]) {
+  const wrapperPath = path.resolve(process.cwd(), 'scripts', 'mcp-stdio-wrapper.mjs');
+  return {
+    command: 'node',
+    args: [wrapperPath, '--command', String(command || '').trim(), '--args-json', JSON.stringify(args || [])],
+  };
+}
+
+type CommandRunResult = {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+};
+
+const mcpPackageInstallLocks = new Map<string, Promise<boolean>>();
+const mcpPackageReady = new Set<string>();
+const MCP_PACKAGE_PREFIX = path.resolve(process.cwd(), '.mcp-packages');
+
+function normalizeNpmPackageName(value: string) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function shellSingleQuote(value: string) {
+  return `'${String(value || '').replace(/'/g, `'\\''`)}'`;
+}
+
+async function runCommandCapture(command: string, args: string[], timeoutMs = 30000): Promise<CommandRunResult> {
+  return await new Promise<CommandRunResult>((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let finished = false;
+    const child = spawn(command, args, {
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const timer = setTimeout(() => {
+      if (finished) return;
+      try { child.kill('SIGKILL'); } catch {}
+    }, Math.max(1000, timeoutMs));
+    child.stdout.on('data', (chunk) => { stdout += String(chunk || ''); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk || ''); });
+    child.on('error', (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve({ code: -1, stdout, stderr: `${stderr}\n${String(error?.message || error)}`.trim() });
+    });
+    child.on('close', (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve({ code: typeof code === 'number' ? code : null, stdout, stderr });
+    });
+  });
+}
+
+async function commandExists(command: string) {
+  const normalized = String(command || '').trim();
+  if (!normalized) return false;
+  const result = await runCommandCapture('sh', ['-lc', `command -v ${shellSingleQuote(normalized)} >/dev/null 2>&1`], 10000);
+  return result.code === 0;
+}
+
+async function ensureGlobalNpmPackageInstalled(packageName: string, reason = 'runtime') {
+  const normalized = normalizeNpmPackageName(packageName);
+  if (!normalized) return false;
+  if (mcpPackageReady.has(normalized)) return true;
+  const inflight = mcpPackageInstallLocks.get(normalized);
+  if (inflight) return await inflight;
+
+  const installer = (async () => {
+    await mkdir(MCP_PACKAGE_PREFIX, { recursive: true }).catch(() => undefined);
+
+    const lsLocal = await runCommandCapture('npm', ['ls', '--prefix', MCP_PACKAGE_PREFIX, '--depth=0', normalized], 30000);
+    if (lsLocal.code === 0) {
+      mcpPackageReady.add(normalized);
+      return true;
+    }
+
+    const installLocal = await runCommandCapture('npm', ['install', '--prefix', MCP_PACKAGE_PREFIX, normalized], 180000);
+    if (installLocal.code === 0) {
+      console.log(`[mcp-package] ensured ${normalized} in local prefix (${reason})`);
+      mcpPackageReady.add(normalized);
+      return true;
+    }
+
+    const lsGlobal = await runCommandCapture('npm', ['ls', '-g', '--depth=0', normalized], 30000);
+    if (lsGlobal.code === 0) {
+      mcpPackageReady.add(normalized);
+      return true;
+    }
+    const installGlobal = await runCommandCapture('npm', ['install', '-g', normalized], 180000);
+    if (installGlobal.code !== 0) {
+      console.warn(
+        `[mcp-package] failed to install ${normalized} (${reason}): ${installLocal.stderr || installLocal.stdout || installGlobal.stderr || installGlobal.stdout || 'unknown error'}`
+      );
+      return false;
+    }
+    console.log(`[mcp-package] ensured ${normalized} globally (${reason})`);
+    mcpPackageReady.add(normalized);
+    return true;
+  })().finally(() => {
+    mcpPackageInstallLocks.delete(normalized);
+  });
+
+  mcpPackageInstallLocks.set(normalized, installer);
+  return await installer;
+}
+
+async function removeGlobalNpmPackageIfUnused(packageName: string) {
+  const normalized = normalizeNpmPackageName(packageName);
+  if (!normalized) return;
+  const prisma = getPrisma();
+  const tools = await prisma.orchestratorTool.findMany({
+    where: { type: 'mcp_stdio_proxy' },
+    select: { config: true },
+  });
+  const stillReferenced = tools.some((tool) => {
+    try {
+      const cfg = tool?.config ? JSON.parse(String(tool.config)) : {};
+      return normalizeNpmPackageName(String(cfg?.packageName || '')) === normalized;
+    } catch {
+      return false;
+    }
+  });
+  if (stillReferenced) return;
+  await runCommandCapture('npm', ['uninstall', '--prefix', MCP_PACKAGE_PREFIX, normalized], 120000);
+  const result = await runCommandCapture('npm', ['uninstall', '-g', normalized], 120000);
+  if (result.code === 0 || result.code === 1) {
+    mcpPackageReady.delete(normalized);
+    console.log(`[mcp-package] removed ${normalized} (no remaining tools)`);
+  }
+}
+
+function extractPackageNameFromToolConfig(toolConfig: any) {
+  return normalizeNpmPackageName(String(toolConfig?.packageName || ''));
+}
+
+async function resolveMcpRawInvocationFromConfig(config: any) {
+  const packageName = extractPackageNameFromToolConfig(config);
+  let rawCommand = String(config?.rawCommand || '').trim() || String(config?.command || '').trim();
+  let rawArgs = Array.isArray(config?.rawArgs)
+    ? config.rawArgs.map((x: any) => String(x))
+    : (Array.isArray(config?.args) ? config.args.map((x: any) => String(x)) : []);
+
+  if (!rawCommand && packageName) {
+    rawCommand = 'npx';
+    rawArgs = ['-y', packageName];
+  }
+
+  if (!rawCommand) return { command: '', args: rawArgs, packageName };
+
+  const existsBefore = await commandExists(rawCommand);
+  if (existsBefore) return { command: rawCommand, args: rawArgs, packageName };
+
+  if (packageName) {
+    await ensureGlobalNpmPackageInstalled(packageName, 'tool-restore');
+    const existsAfterInstall = await commandExists(rawCommand);
+    if (existsAfterInstall) return { command: rawCommand, args: rawArgs, packageName };
+    return { command: 'npx', args: ['--yes', '--prefix', MCP_PACKAGE_PREFIX, packageName], packageName };
+  }
+
+  return { command: rawCommand, args: rawArgs, packageName };
+}
+
+async function warmPersistedMcpPackagesFromTools() {
+  const prisma = getPrisma();
+  const tools = await prisma.orchestratorTool.findMany({
+    where: { type: 'mcp_stdio_proxy' },
+    select: { config: true },
+  });
+  const packages = new Set<string>();
+  for (const tool of tools) {
+    try {
+      const cfg = tool?.config ? JSON.parse(String(tool.config)) : {};
+      const pkg = extractPackageNameFromToolConfig(cfg);
+      if (pkg) packages.add(pkg);
+    } catch {}
+  }
+  for (const pkg of packages) {
+    await ensureGlobalNpmPackageInstalled(pkg, 'startup');
+  }
+}
+
+async function discoverMcpPackageTools(params: {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  packageName?: string;
+  timeoutMs?: number;
+}) {
+  const command = String(params.command || '').trim();
+  const args = Array.isArray(params.args) ? params.args.map((value) => String(value)) : [];
+  const timeoutMs = Number(params.timeoutMs || 45000);
+  const env = {
+    ...process.env,
+    ...(params.env || {}),
+  };
+  if (!command) throw new Error('command is required');
+  const knownConfigError = getKnownMcpPackageConfigError(String(params.packageName || ''), params.env);
+  if (knownConfigError) throw new Error(knownConfigError);
+  const wrapped = buildWrappedStdioCommand(command, args);
+
+  const client = new Client({ name: 'agentic-orchestrator', version: '1.0.0' }, { capabilities: {} });
+  const transport = new StdioClientTransport({
+    command: wrapped.command,
+    args: wrapped.args,
+    env,
+  } as any);
+
+  try {
+    await withTimeout(client.connect(transport), timeoutMs, 'MCP stdio connect');
+    const result = await withTimeout(client.listTools(), timeoutMs, 'MCP stdio listTools');
+    return result.tools || [];
+  } finally {
+    try { await client.close(); } catch {}
+  }
+}
+
+async function getToolInputSchemaForRecord(tool: any): Promise<any> {
+  if (!tool) return { type: 'object', properties: {}, additionalProperties: true };
+
+  let config: any = {};
+  try {
+    config = tool.config ? JSON.parse(tool.config) : {};
+  } catch {
+    config = {};
+  }
+
+  if (tool.type === 'http') {
+    const requiredArgs = Array.isArray(config?.requiredArgs) ? config.requiredArgs.map((value: any) => String(value)) : [];
+    const argSchema = config?.argSchema && typeof config.argSchema === 'object' ? config.argSchema : {};
+    const properties = Object.fromEntries(
+      requiredArgs.map((name: string) => {
+        const normalized = normalizeMcpName(String(name || ''));
+        const type = String(argSchema[name] || argSchema[normalized] || 'string');
+        return [normalized || name, { type }];
+      }),
+    );
+    return {
+      type: 'object',
+      properties,
+      required: requiredArgs.map((name: string) => normalizeMcpName(name) || name),
+      additionalProperties: true,
+    };
+  }
+
+  if (tool.type === 'mcp_stdio_proxy') {
+    const resolved = await resolveMcpRawInvocationFromConfig(config);
+    const rawCommand = String(resolved.command || '').trim();
+    const rawArgs = Array.isArray(resolved.args) ? resolved.args.map((x: any) => String(x)) : [];
+    const envFromConfig = config?.env && typeof config.env === 'object' ? (config.env as Record<string, string>) : {};
+    const packageName = String(resolved.packageName || '').trim();
+    const discovered = await discoverMcpPackageTools({
+      command: rawCommand,
+      args: rawArgs.length ? rawArgs : (Array.isArray(config?.args) ? config.args.map((x: any) => String(x)) : []),
+      env: envFromConfig,
+      packageName,
+      timeoutMs: Number(config?.timeoutMs || 45000),
+    });
+    const mcpToolName = String(config?.mcpToolName || '').trim();
+    const matched = discovered.find((entry: any) => String(entry?.name || '').trim() === mcpToolName);
+    if (matched?.inputSchema) return matched.inputSchema;
+    return {
+      type: 'object',
+      properties: {},
+      additionalProperties: true,
+    };
+  }
+
+  if (tool.type === 'internal') {
+    const requiredArgs = Array.isArray(config?.requiredArgs) ? config.requiredArgs.map((value: any) => String(value)) : [];
+    const argSchema = config?.argSchema && typeof config.argSchema === 'object' ? config.argSchema : {};
+    const argDescriptions = config?.argDescriptions && typeof config.argDescriptions === 'object' ? config.argDescriptions : {};
+    const propertyKeys = Array.from(new Set([
+      ...requiredArgs,
+      ...Object.keys(argSchema),
+      ...Object.keys(argDescriptions),
+    ].map((value) => String(value)).filter(Boolean)));
+    const properties = Object.fromEntries(
+      propertyKeys.map((name: string) => {
+        const normalized = normalizeMcpName(String(name || ''));
+        return [normalized || name, {
+          type: String(argSchema[name] || argSchema[normalized] || 'string'),
+          description: String(argDescriptions[name] || argDescriptions[normalized] || ''),
+        }];
+      }),
+    );
+    return {
+      type: 'object',
+      properties,
+      required: requiredArgs.map((name: string) => normalizeMcpName(name) || name),
+      additionalProperties: true,
+    };
+  }
+
+  return {
+    type: 'object',
+    properties: {},
+    additionalProperties: true,
+  };
+}
+
+function normalizeToolInputSchema(schema: any) {
+  if (!schema || typeof schema !== 'object') {
+    return { type: 'object', properties: {}, required: [], additionalProperties: true };
+  }
+  return {
+    type: typeof schema.type === 'string' ? schema.type : 'object',
+    properties: schema.properties && typeof schema.properties === 'object' ? schema.properties : {},
+    required: Array.isArray(schema.required) ? schema.required.map((value: any) => String(value)) : [],
+    additionalProperties: schema.additionalProperties !== false,
+  };
+}
+
+function summarizeInputSchemaForPrompt(schema: any, maxProps = 6) {
+  const normalized = normalizeToolInputSchema(schema);
+  const properties = normalized.properties || {};
+  const entries = Object.entries(properties).slice(0, maxProps);
+  const fieldSummary = entries.map(([name, value]: [string, any]) => {
+    const type = String(value?.type || 'string');
+    const enumSummary = Array.isArray(value?.enum) && value.enum.length
+      ? ` enum:${value.enum.slice(0, 4).map((entry: any) => String(entry)).join('|')}`
+      : '';
+    return `${name}:${type}${enumSummary}`;
+  }).join(', ');
+  const requiredSummary = normalized.required.length ? ` required:${normalized.required.join(',')}` : '';
+  const propertySummary = fieldSummary ? ` schema:${fieldSummary}` : '';
+  return `${requiredSummary}${propertySummary}`;
+}
+
+function getJsonSchemaTypeMatches(value: any, expectedType: string) {
+  switch (expectedType) {
+    case 'string':
+      return typeof value === 'string';
+    case 'number':
+      return typeof value === 'number' && Number.isFinite(value);
+    case 'integer':
+      return typeof value === 'number' && Number.isInteger(value);
+    case 'boolean':
+      return typeof value === 'boolean';
+    case 'array':
+      return Array.isArray(value);
+    case 'object':
+      return !!value && typeof value === 'object' && !Array.isArray(value);
+    case 'null':
+      return value === null;
+    default:
+      return true;
+  }
+}
+
+function coercePrimitiveForSchema(value: any, schema: any) {
+  const expectedType = String(schema?.type || '');
+  if (value == null) return value;
+  if (expectedType === 'string') return typeof value === 'string' ? value : String(value);
+  if (expectedType === 'number') {
+    if (typeof value === 'number') return value;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : value;
+  }
+  if (expectedType === 'integer') {
+    if (typeof value === 'number' && Number.isInteger(value)) return value;
+    const parsed = Number(value);
+    return Number.isInteger(parsed) ? parsed : value;
+  }
+  if (expectedType === 'boolean') {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'true') return true;
+      if (normalized === 'false') return false;
+    }
+    return value;
+  }
+  return value;
+}
+
+function validateValueAgainstSchema(value: any, schema: any, path: string): string[] {
+  if (!schema || typeof schema !== 'object') return [];
+  const errors: string[] = [];
+  const normalized = normalizeToolInputSchema(schema);
+  const expectedType = String(schema.type || normalized.type || '');
+  const coerced = coercePrimitiveForSchema(value, schema);
+
+  if (expectedType && !getJsonSchemaTypeMatches(coerced, expectedType)) {
+    errors.push(`${path} should be ${expectedType}`);
+    return errors;
+  }
+
+  if (Array.isArray(schema.enum) && schema.enum.length > 0 && !schema.enum.includes(coerced)) {
+    errors.push(`${path} must be one of: ${schema.enum.map((entry: any) => String(entry)).join(', ')}`);
+  }
+
+  if (expectedType === 'object') {
+    const objectValue = coerced && typeof coerced === 'object' && !Array.isArray(coerced) ? coerced : {};
+    const required = Array.isArray(schema.required) ? schema.required.map((entry: any) => String(entry)) : normalized.required;
+    for (const key of required) {
+      const nextValue = objectValue[key];
+      if (nextValue == null || (typeof nextValue === 'string' && nextValue.trim() === '')) {
+        errors.push(`${path}.${key} is required`);
+      }
+    }
+    const properties = schema.properties && typeof schema.properties === 'object' ? schema.properties : normalized.properties;
+    for (const [key, propertySchema] of Object.entries(properties)) {
+      if (!(key in objectValue)) continue;
+      errors.push(...validateValueAgainstSchema(objectValue[key], propertySchema, `${path}.${key}`));
+    }
+  }
+
+  if (expectedType === 'array' && Array.isArray(coerced) && schema.items && typeof schema.items === 'object') {
+    coerced.forEach((entry, index) => {
+      errors.push(...validateValueAgainstSchema(entry, schema.items, `${path}[${index}]`));
+    });
+  }
+
+  return errors;
+}
+
+function validateArgsAgainstInputSchema(args: any, schema: any) {
+  const normalized = normalizeToolInputSchema(schema);
+  const payload = args && typeof args === 'object' ? args : {};
+  const missing = normalized.required.filter((key: string) => {
+    const value = payload[key];
+    return value == null || (typeof value === 'string' && value.trim() === '');
+  });
+  const issues = validateValueAgainstSchema(payload, normalized, 'args');
+  return {
+    ok: missing.length === 0 && issues.length === 0,
+    missing,
+    issues,
+  };
+}
 
 
 // Initialize AgentOps
@@ -91,7 +642,12 @@ function getSetting(key: string): string | null {
 import { refreshPersistentMirror } from './src/orchestrator/sqliteMirror.js';
 
 async function setSetting(key: string, value: string | null) {
-  const prisma = getPrisma();
+  const prisma = await ensurePrismaReady();
+  if (value == null) {
+    db.prepare('DELETE FROM settings WHERE key = ?').run(key);
+  } else {
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+  }
   if (value == null) {
     await prisma.orchestratorSetting.deleteMany({ where: { key } });
   } else {
@@ -117,8 +673,10 @@ function requireMcpAuth(req: express.Request, res: express.Response): boolean {
 
 function getPlatformProjectIdForLocalProject(localProjectId: number | null | undefined): string | null {
   if (!localProjectId) return null;
-  const row = db.prepare('SELECT platform_project_id FROM project_links WHERE project_id = ?').get(localProjectId) as any;
-  return row?.platform_project_id ?? null;
+  const projectRow = db.prepare('SELECT platform_project_id FROM projects WHERE id = ?').get(localProjectId) as any;
+  if (projectRow?.platform_project_id) return String(projectRow.platform_project_id);
+  const legacyRow = db.prepare('SELECT platform_project_id FROM project_links WHERE project_id = ?').get(localProjectId) as any;
+  return legacyRow?.platform_project_id ? String(legacyRow.platform_project_id) : null;
 }
 
 type RuntimeAccessPolicy = {
@@ -217,11 +775,196 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 
 const JOB_CONCURRENCY = Number(process.env.JOB_CONCURRENCY) || 2;
 const JOB_TIMEOUT_MS = Number(process.env.JOB_TIMEOUT_MS) || 120000;
+const CREW_PARALLEL_TASK_CONCURRENCY = Math.max(1, Number(process.env.CREW_PARALLEL_TASK_CONCURRENCY) || 3);
+const CRON_SCHEDULER_POLL_MS = Math.max(5_000, Number(process.env.CRON_SCHEDULER_POLL_MS) || 15_000);
+const JOB_PRIORITY = {
+  CRITICAL: 300,
+  HIGH: 200,
+  NORMAL: 100,
+  LOW: 50,
+} as const;
 let workerTimer: NodeJS.Timeout | null = null;
+let cronSchedulerTimer: NodeJS.Timeout | null = null;
 let workerRunning = 0;
 const agentCancelTokens = new Map<number, CancelToken>();
 const crewCancelTokens = new Map<number, CancelToken>();
 const delegatedExecutionPromises = new Map<number, Promise<void>>();
+
+function readJobPriority(rawValue: unknown, fallback: number = JOB_PRIORITY.NORMAL) {
+  const value = Number(rawValue);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(1000, Math.max(0, Math.round(value)));
+}
+
+function readTenantKey(rawValue: unknown, fallback: string = 'global') {
+  const value = String(rawValue ?? '').trim();
+  if (!value) return fallback;
+  return value.slice(0, 120);
+}
+
+type AgentCronJobRow = {
+  id: number;
+  agent_id: number;
+  name: string;
+  cron_expr: string;
+  timezone: string;
+  task: string;
+  enabled: boolean;
+  priority: number;
+  tenant_key: string | null;
+  next_run_at: Date | string | null;
+  last_run_at: Date | string | null;
+  last_status: string | null;
+  last_error: string | null;
+  created_by_user_id: string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+};
+
+function asIsoString(value: Date | string | null | undefined) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString();
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
+function normalizeAgentCronJobRow(row: AgentCronJobRow) {
+  return {
+    id: Number(row.id),
+    agent_id: Number(row.agent_id),
+    name: String(row.name || ''),
+    cron_expr: String(row.cron_expr || ''),
+    timezone: String(row.timezone || 'UTC'),
+    task: String(row.task || ''),
+    enabled: Boolean(row.enabled),
+    priority: Number(row.priority ?? JOB_PRIORITY.NORMAL),
+    tenant_key: row.tenant_key || 'global',
+    next_run_at: asIsoString(row.next_run_at),
+    last_run_at: asIsoString(row.last_run_at),
+    last_status: row.last_status || null,
+    last_error: row.last_error || null,
+    created_by_user_id: row.created_by_user_id || null,
+    created_at: asIsoString(row.created_at),
+    updated_at: asIsoString(row.updated_at),
+  };
+}
+
+async function ensureAgentCronJobsTable() {
+  const prisma = getPrisma();
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS orchestrator_agent_cron_jobs (
+      id SERIAL PRIMARY KEY,
+      agent_id INTEGER NOT NULL REFERENCES orchestrator_agents(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      cron_expr TEXT NOT NULL,
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      task TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      priority INTEGER NOT NULL DEFAULT 100,
+      tenant_key TEXT DEFAULT 'global',
+      next_run_at TIMESTAMPTZ,
+      last_run_at TIMESTAMPTZ,
+      last_status TEXT,
+      last_error TEXT,
+      created_by_user_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS idx_orchestrator_agent_cron_jobs_due
+      ON orchestrator_agent_cron_jobs(enabled, next_run_at);
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS idx_orchestrator_agent_cron_jobs_agent
+      ON orchestrator_agent_cron_jobs(agent_id);
+  `);
+}
+
+function normalizeCrewProcess(value: unknown): 'sequential' | 'hierarchical' | 'parallel' {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'hierarchical') return 'hierarchical';
+  if (normalized === 'parallel') return 'parallel';
+  return 'sequential';
+}
+
+type CrewRoutingPolicy = {
+  allowPartialSuccess: boolean;
+  minSuccessfulUnits: number;
+  synthesisOnPartial: boolean;
+  failFastOnUnitError: boolean;
+  maxFailures: number | null;
+};
+
+function parseBooleanLike(value: unknown, fallback: boolean) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+  return fallback;
+}
+
+function parsePositiveIntLike(value: unknown): number | null {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  const rounded = Math.floor(numeric);
+  return rounded > 0 ? rounded : null;
+}
+
+function resolveCrewRoutingPolicy(
+  process: 'sequential' | 'hierarchical' | 'parallel',
+  totalUnits: number,
+  rawPolicy?: any
+): CrewRoutingPolicy {
+  const normalizedUnits = Math.max(1, Number.isFinite(totalUnits) ? Math.floor(totalUnits) : 1);
+  const defaults =
+    process === 'parallel'
+      ? {
+          allowPartialSuccess: true,
+          minSuccessfulUnits: Math.max(1, Math.ceil(normalizedUnits * 0.6)),
+          synthesisOnPartial: true,
+          failFastOnUnitError: false,
+          maxFailures: null as number | null,
+        }
+      : {
+          allowPartialSuccess: false,
+          minSuccessfulUnits: normalizedUnits,
+          synthesisOnPartial: true,
+          failFastOnUnitError: false,
+          maxFailures: null as number | null,
+        };
+  const policy = rawPolicy && typeof rawPolicy === 'object' ? rawPolicy : {};
+  const allowPartialSuccess = parseBooleanLike(
+    policy.allowPartialSuccess ?? policy.allow_partial_success,
+    defaults.allowPartialSuccess
+  );
+  const requestedMinSuccess = parsePositiveIntLike(
+    policy.minSuccessfulUnits ?? policy.min_successful_units ?? policy.quorum
+  );
+  const minSuccessfulUnits = Math.max(
+    1,
+    Math.min(
+      normalizedUnits,
+      requestedMinSuccess ?? defaults.minSuccessfulUnits
+    )
+  );
+  return {
+    allowPartialSuccess,
+    minSuccessfulUnits,
+    synthesisOnPartial: parseBooleanLike(
+      policy.synthesisOnPartial ?? policy.synthesis_on_partial,
+      defaults.synthesisOnPartial
+    ),
+    failFastOnUnitError: parseBooleanLike(
+      policy.failFastOnUnitError ?? policy.fail_fast_on_unit_error ?? policy.fail_fast,
+      defaults.failFastOnUnitError
+    ),
+    maxFailures: parsePositiveIntLike(policy.maxFailures ?? policy.max_failures),
+  };
+}
 
 function getCancelToken(map: Map<number, CancelToken>, id: number) {
   const existing = map.get(id);
@@ -307,6 +1050,7 @@ async function startDelegatedExecution(options: {
   sessionId?: string;
   userId?: string;
   source?: string;
+  routingPolicy?: CrewRoutingPolicy | null;
 }) {
   const parentExecutionId = await createDelegatedParentExecution({
     supervisorAgentId: Number(options.supervisorAgent.id),
@@ -325,6 +1069,7 @@ async function startDelegatedExecution(options: {
     synthesize: options.synthesize !== false,
     sessionId: options.sessionId,
     userId: options.userId,
+    routingPolicy: options.routingPolicy ?? null,
   });
   delegatedExecutionPromises.set(parentExecutionId, workflow.then(() => undefined));
   return { parentExecutionId, workflow };
@@ -355,13 +1100,426 @@ async function cascadeCancelDelegatedChildren(parentExecutionId: number, reason:
   }
 }
 
+async function executeDelegatedAgentRun(options: {
+  targetAgent: any;
+  task: string;
+  expectedOutput?: string;
+  context?: string;
+  parentExecutionId: number;
+  delegationTitle: string;
+  sessionId?: string;
+  userId?: string;
+  initiatedBy: string;
+  delegationDepth?: number;
+  logForwarder?: (log: any) => void;
+}) {
+  const {
+    targetAgent,
+    task,
+    expectedOutput = 'Return the most useful result for the delegating agent.',
+    context = '',
+    parentExecutionId,
+    delegationTitle,
+    sessionId,
+    userId,
+    initiatedBy,
+    delegationDepth = 1,
+    logForwarder,
+  } = options;
+
+  return await runAgent(
+    targetAgent,
+    { description: task, expected_output: expectedOutput },
+    context,
+    (log) => {
+      logForwarder?.(log);
+    },
+    {
+      initiatedBy,
+      sessionId,
+      userId,
+    },
+    {
+      parentExecutionId,
+      executionKind: 'delegated_child',
+      delegationTitle,
+      delegationDepth,
+    },
+  );
+}
+
+function normalizeAgentLookupKey(value: any): string {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function getDelegationCandidatesForAgent(currentAgent: any): any[] {
+  const currentId = Number(currentAgent?.id || 0);
+  const currentProjectId = Number(currentAgent?.project_id || 0);
+  if (currentProjectId > 0) {
+    return db.prepare(`
+      SELECT id, name, role, goal, project_id, tools_enabled
+      FROM agents
+      WHERE id != ? AND project_id = ?
+      ORDER BY name COLLATE NOCASE ASC
+    `).all(currentId, currentProjectId) as any[];
+  }
+  return db.prepare(`
+    SELECT id, name, role, goal, project_id, tools_enabled
+    FROM agents
+    WHERE id != ?
+    ORDER BY
+      CASE WHEN project_id IS NULL THEN 0 ELSE 1 END,
+      name COLLATE NOCASE ASC
+  `).all(currentId) as any[];
+}
+
+async function buildDelegationOrchestrationEvents(parentExecutionId: number, delegations: any[], supervisorStatus: string) {
+  const rows = Array.isArray(delegations) ? delegations : [];
+  const childExecutionIds = Array.from(new Set(
+    rows
+      .map((row) => Number(row?.child_execution_id || 0))
+      .filter((id) => Number.isFinite(id) && id > 0),
+  ));
+  const latestToolByExecutionId = new Map<number, { toolName: string; status: string }>();
+  if (childExecutionIds.length) {
+    const toolRows = await getPrisma().orchestratorToolExecution.findMany({
+      where: { agentExecutionId: { in: childExecutionIds } },
+      orderBy: { id: 'desc' },
+      select: { agentExecutionId: true, toolName: true, status: true },
+    });
+    for (const toolRow of toolRows) {
+      const execId = Number(toolRow.agentExecutionId || 0);
+      if (execId > 0 && !latestToolByExecutionId.has(execId)) {
+        latestToolByExecutionId.set(execId, {
+          toolName: String(toolRow.toolName || 'tool'),
+          status: String(toolRow.status || 'unknown'),
+        });
+      }
+    }
+  }
+  const events: any[] = [
+    {
+      key: `supervisor-dispatch-${parentExecutionId}`,
+      type: 'supervisor_decision',
+      actor: 'Supervisor',
+      label: 'Dispatch',
+      detail: supervisorStatus === 'running'
+        ? 'Supervisor is coordinating specialist handoffs.'
+        : `Supervisor finished with status ${supervisorStatus}.`,
+      status: supervisorStatus,
+      execution_id: parentExecutionId,
+      at: rows[0]?.created_at || new Date().toISOString(),
+    },
+  ];
+
+  for (const row of rows) {
+    if (String(row?.role || '') === 'delegate') {
+      events.push({
+        key: `handoff-sent-${row.id}`,
+        type: 'handoff_sent',
+        actor: 'Supervisor',
+        label: `Handoff to ${row.agent_name || `Agent ${row.agent_id}`}`,
+        detail: String(row.task || row.title || 'Delegated task').trim() || 'Delegated task',
+        status: row.status || 'queued',
+        execution_id: row.parent_execution_id || parentExecutionId,
+        child_execution_id: row.child_execution_id || null,
+        at: row.created_at || new Date().toISOString(),
+      });
+
+      if (row.status === 'queued') {
+        events.push({
+          key: `specialist-queued-${row.id}`,
+          type: 'specialist_queued',
+          actor: row.agent_name || `Agent ${row.agent_id}`,
+          label: 'Queued',
+          detail: `${row.agent_name || `Agent ${row.agent_id}`} is queued to take ownership of the delegated task.`,
+          status: row.status,
+          execution_id: row.child_execution_id || null,
+          parent_execution_id: row.parent_execution_id || parentExecutionId,
+          at: row.created_at || new Date().toISOString(),
+        });
+      }
+
+      if (row.status === 'running') {
+        events.push({
+          key: `specialist-started-${row.id}`,
+          type: 'specialist_started',
+          actor: row.agent_name || `Agent ${row.agent_id}`,
+          label: 'Started',
+          detail: `${row.agent_name || `Agent ${row.agent_id}`} accepted the handoff and is now working on it.`,
+          status: row.status,
+          execution_id: row.child_execution_id || null,
+          parent_execution_id: row.parent_execution_id || parentExecutionId,
+          at: row.updated_at || row.created_at || new Date().toISOString(),
+        });
+
+        const latestTool = latestToolByExecutionId.get(Number(row.child_execution_id || 0));
+        if (latestTool?.toolName) {
+          const toolEventType = latestTool.status === 'failed' ? 'specialist_retrying' : 'waiting_on_tool';
+          events.push({
+            key: `${toolEventType}-${row.id}-${latestTool.toolName}`,
+            type: toolEventType,
+            actor: row.agent_name || `Agent ${row.agent_id}`,
+            label: latestTool.status === 'failed' ? 'Retrying' : `Using ${latestTool.toolName}`,
+            detail: latestTool.status === 'failed'
+              ? `${row.agent_name || `Agent ${row.agent_id}`} hit an issue while using ${latestTool.toolName} and is attempting recovery.`
+              : `${row.agent_name || `Agent ${row.agent_id}`} is currently using ${latestTool.toolName}.`,
+            status: latestTool.status,
+            execution_id: row.child_execution_id || null,
+            parent_execution_id: row.parent_execution_id || parentExecutionId,
+            at: row.updated_at || row.created_at || new Date().toISOString(),
+          });
+        }
+      }
+    }
+
+    events.push({
+      key: `specialist-returned-${row.id}`,
+      type: String(row?.role || '') === 'synthesis' ? 'supervisor_resumed' : 'specialist_returned',
+      actor: row.agent_name || `Agent ${row.agent_id}`,
+      label: String(row?.role || '') === 'synthesis' ? 'Synthesis' : 'Specialist response',
+      detail: String(row.result || row.error || (row.status === 'running' ? 'Working on delegated task…' : 'No response returned yet.')).trim(),
+      status: row.status || 'queued',
+      execution_id: row.child_execution_id || null,
+      parent_execution_id: row.parent_execution_id || parentExecutionId,
+      at: row.updated_at || row.created_at || new Date().toISOString(),
+    });
+
+    if (String(row?.role || '') === 'delegate' && (row.status === 'completed' || row.status === 'failed' || row.status === 'canceled')) {
+      events.push({
+        key: `supervisor-resumed-${row.id}`,
+        type: 'supervisor_resumed',
+        actor: 'Supervisor',
+        label: 'Supervisor resumed',
+        detail: row.status === 'completed'
+          ? `Supervisor received ${row.agent_name || `Agent ${row.agent_id}`}'s result and resumed orchestration.`
+          : `Supervisor resumed after ${row.agent_name || `Agent ${row.agent_id}`}'s delegated step ended with status ${row.status}.`,
+        status: row.status,
+        execution_id: row.parent_execution_id || parentExecutionId,
+        child_execution_id: row.child_execution_id || null,
+        at: row.updated_at || row.created_at || new Date().toISOString(),
+      });
+    }
+  }
+
+  return events;
+}
+
+function buildDelegationRosterContext(currentAgent: any): string {
+  const candidates = getDelegationCandidatesForAgent(currentAgent);
+  if (!candidates.length) {
+    return 'No delegate agents are available for handoff right now.';
+  }
+  const lines = candidates.slice(0, 12).map((candidate: any) => {
+    const role = String(candidate.role || 'specialist').trim();
+    const goal = compactPromptText(String(candidate.goal || '').trim(), 90);
+    const toolsState = candidate.tools_enabled === 0 || candidate.tools_enabled === false ? 'tools disabled' : 'tools enabled';
+    return `- ${candidate.name} (id:${candidate.id}, role:${role}, ${toolsState})${goal ? ` - goal: ${goal}` : ''}`;
+  });
+  return [
+    'Available delegate agents for handoff:',
+    ...lines,
+    'Use delegate_to_agent only when a specialist is clearly better suited than continuing directly.',
+    'When you delegate, choose one of the exact names above when possible and give the child agent a narrow, concrete task.',
+  ].join('\n');
+}
+
+function resolveDelegationTarget(args: any, currentAgent: any): { targetAgent: any; candidates: any[] } {
+  const targetAgentId = Number(args?.target_agent_id ?? args?.agent_id ?? 0);
+  const targetAgentName = String(args?.target_agent_name || args?.agent_name || '').trim();
+  const candidates = getDelegationCandidatesForAgent(currentAgent);
+
+  if (Number.isFinite(targetAgentId) && targetAgentId > 0) {
+    const byId = candidates.find((candidate: any) => Number(candidate.id) === targetAgentId);
+    if (byId) return { targetAgent: byId, candidates };
+  }
+
+  if (!targetAgentName) {
+    throw new Error('Target agent not found. Provide target_agent_id or target_agent_name.');
+  }
+
+  const normalizedTarget = normalizeAgentLookupKey(targetAgentName);
+  const exact = candidates.find((candidate: any) => normalizeAgentLookupKey(candidate.name) === normalizedTarget);
+  if (exact) return { targetAgent: exact, candidates };
+
+  const containsMatches = candidates.filter((candidate: any) => {
+    const candidateKey = normalizeAgentLookupKey(candidate.name);
+    return candidateKey.includes(normalizedTarget) || normalizedTarget.includes(candidateKey);
+  });
+  if (containsMatches.length === 1) {
+    return { targetAgent: containsMatches[0], candidates };
+  }
+  if (containsMatches.length > 1) {
+    const suggestions = containsMatches.slice(0, 6).map((candidate: any) => `${candidate.name} (#${candidate.id})`).join(', ');
+    throw new Error(`Target agent name "${targetAgentName}" is ambiguous. Choose one of: ${suggestions}.`);
+  }
+
+  const suggestions = candidates.slice(0, 8).map((candidate: any) => `${candidate.name} (#${candidate.id})`).join(', ');
+  throw new Error(`Target agent "${targetAgentName}" was not found. Available delegate agents: ${suggestions || 'none'}.`);
+}
+
+async function delegateToAgentTool(args: any, ctx?: ToolExecutionContext): Promise<string> {
+  const currentAgent = ctx?.agent;
+  const parentExecutionId = Number(ctx?.executionId || 0);
+  if (!currentAgent?.id || parentExecutionId <= 0) {
+    throw new Error('delegate_to_agent can only be used during an active agent execution.');
+  }
+
+  const currentDepth = Number(ctx?.runMeta?.delegationDepth || 0);
+  if (currentDepth >= 3) {
+    throw new Error('Maximum delegation depth reached. Ask the current agent to finish with the available information.');
+  }
+
+  const title = String(args?.title || '').trim();
+  const taskText = String(args?.task || args?.prompt || args?.message || '').trim();
+  const extraContext = String(args?.context || '').trim();
+  const expectedOutput = String(args?.expected_output || 'Return the most useful result for the delegating agent.').trim();
+  const shareSession = args?.share_session !== false;
+
+  if (!taskText) throw new Error('delegate_to_agent requires task.');
+
+  const { targetAgent, candidates } = resolveDelegationTarget(args, currentAgent);
+  if (Number(targetAgent.id) === Number(currentAgent.id)) {
+    throw new Error('delegate_to_agent cannot target the same agent. Continue the work directly or choose another agent.');
+  }
+  if (currentAgent.project_id != null && targetAgent.project_id != null && Number(currentAgent.project_id) !== Number(targetAgent.project_id)) {
+    throw new Error('Cross-project delegation is not allowed. Choose an agent in the same project.');
+  }
+  if (!candidates.length) {
+    throw new Error('No delegate agents are available for this agent.');
+  }
+
+  const delegationTitle = title || `${currentAgent.name} -> ${targetAgent.name}`;
+  const combinedContext = [
+    `Delegated by agent "${currentAgent.name}" (ID ${currentAgent.id}).`,
+    `Target specialist: "${targetAgent.name}" (ID ${targetAgent.id}, role: ${String(targetAgent.role || 'specialist')}).`,
+    extraContext ? `Delegation context:\n${extraContext}` : '',
+    'Return a concise specialist result that the delegating agent can directly use to continue or answer the user.',
+  ].filter(Boolean).join('\n\n');
+
+  const row = await getPrisma().orchestratorAgentDelegation.create({
+    data: {
+      parentExecutionId,
+      agentId: Number(targetAgent.id),
+      role: 'delegate',
+      title: delegationTitle,
+      status: 'running',
+      task: taskText,
+    },
+    select: { id: true },
+  });
+
+  ctx?.logCallback?.({
+    type: 'delegation_start',
+    agent: currentAgent.name,
+    target_agent: targetAgent.name,
+    title: delegationTitle,
+    execution_id: parentExecutionId,
+    task: taskText,
+  });
+
+  try {
+    const result = await executeDelegatedAgentRun({
+      targetAgent,
+      task: taskText,
+      expectedOutput,
+      context: combinedContext,
+      parentExecutionId,
+      delegationTitle,
+      sessionId: shareSession ? ctx?.invocation?.sessionId : undefined,
+      userId: ctx?.invocation?.userId,
+      initiatedBy: 'delegate_to_agent',
+      delegationDepth: currentDepth + 1,
+      logForwarder: (log) => {
+        ctx?.logCallback?.({
+          ...log,
+          delegated_by: currentAgent.name,
+          delegated_to: targetAgent.name,
+          parent_execution_id: parentExecutionId,
+          delegation_title: delegationTitle,
+        });
+      },
+    });
+
+    await getPrisma().orchestratorAgentDelegation.update({
+      where: { id: row.id },
+      data: {
+        childExecutionId: Number(result.exec_id || 0) || undefined,
+        status: 'completed',
+        result: result.text,
+        updatedAt: new Date(),
+      },
+    });
+
+    return JSON.stringify({
+      delegated: true,
+      target_agent: {
+        id: Number(targetAgent.id),
+        name: String(targetAgent.name || ''),
+      },
+      delegation: {
+        id: row.id,
+        title: delegationTitle,
+        parent_execution_id: parentExecutionId,
+        child_execution_id: Number(result.exec_id || 0) || null,
+      },
+      result: result.text,
+      usage: result.usage,
+    }, null, 2);
+  } catch (e: any) {
+    const message = formatExecutionError(e, 'Delegated agent execution failed');
+    await getPrisma().orchestratorAgentDelegation.update({
+      where: { id: row.id },
+      data: {
+        status: 'failed',
+        error: message,
+        updatedAt: new Date(),
+      },
+    });
+    ctx?.logCallback?.({
+      type: 'delegation_error',
+      agent: currentAgent.name,
+      target_agent: targetAgent.name,
+      title: delegationTitle,
+      message,
+    });
+    throw new Error(message);
+  }
+}
+
 type AgentSessionRow = { id: string; user_id: string | null };
+type AttachmentRef = {
+  id: string;
+  kind: 'image' | 'audio' | 'pdf' | 'file';
+  name: string;
+  mime_type?: string | null;
+  size_bytes?: number | null;
+  url: string;
+  storage_key?: string;
+  local_path?: string;
+  created_at?: string;
+};
+type SessionMessage = {
+  role: string;
+  content: string;
+  ts?: string;
+  attachments?: AttachmentRef[];
+};
+type FeedbackPayload = {
+  rating?: 'up' | 'down' | string;
+  solved?: boolean | null;
+  feedback?: string;
+};
 
 async function ensureAgentSession(agentId: number, sessionId?: string, userId?: string): Promise<AgentSessionRow> {
   return await ensureRuntimeAgentSession(agentId, sessionId, userId);
 }
 
-async function loadSessionConversation(sessionId: string): Promise<Array<{ role: string; content: string; ts?: string }>> {
+async function loadSessionConversation(sessionId: string): Promise<SessionMessage[]> {
   return await loadRuntimeSessionConversation(sessionId);
 }
 
@@ -369,12 +1527,1763 @@ async function loadSessionSummary(sessionId: string): Promise<string> {
   return await loadRuntimeSessionSummary(sessionId);
 }
 
-async function saveSessionConversation(sessionId: string, messages: Array<{ role: string; content: string; ts?: string }>) {
+async function saveSessionConversation(sessionId: string, messages: SessionMessage[]) {
   await saveRuntimeSessionConversation(sessionId, messages);
+}
+
+function inferAttachmentKind(mimeType?: string | null): AttachmentRef['kind'] {
+  const normalized = String(mimeType || '').toLowerCase();
+  if (normalized.startsWith('image/')) return 'image';
+  if (normalized.startsWith('audio/')) return 'audio';
+  if (normalized === 'application/pdf') return 'pdf';
+  return 'file';
+}
+
+function normalizeAttachmentRow(row: any): AttachmentRef {
+  return {
+    id: String(row.id || ''),
+    kind: inferAttachmentKind(row.mime_type || row.kind),
+    name: String(row.original_name || row.name || 'attachment'),
+    mime_type: row.mime_type || null,
+    size_bytes: row.size_bytes != null ? Number(row.size_bytes) : null,
+    url: String(row.file_url || row.url || ''),
+    storage_key: row.storage_key || undefined,
+    local_path: row.local_path || undefined,
+    created_at: row.created_at || undefined,
+  };
+}
+
+function normalizeIncomingAttachments(value: any): AttachmentRef[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => ({
+      id: String(item?.id || '').trim(),
+      kind: inferAttachmentKind(item?.mime_type || item?.kind),
+      name: String(item?.name || item?.original_name || 'attachment').trim(),
+      mime_type: item?.mime_type ? String(item.mime_type) : null,
+      size_bytes: Number.isFinite(Number(item?.size_bytes)) ? Number(item.size_bytes) : null,
+      url: String(item?.url || item?.file_url || '').trim(),
+      storage_key: item?.storage_key ? String(item.storage_key) : undefined,
+      local_path: item?.local_path ? String(item.local_path) : undefined,
+      created_at: item?.created_at ? String(item.created_at) : undefined,
+    }))
+    .filter((item) => item.id && item.url);
+}
+
+function buildAttachmentContext(attachments: AttachmentRef[]) {
+  if (!attachments.length) return '';
+  const lines = attachments.map((attachment, index) => {
+    const parts = [
+      `${index + 1}. ${attachment.name}`,
+      `attachment_id=${attachment.id}`,
+      attachment.kind ? `type=${attachment.kind}` : '',
+      attachment.mime_type ? `mime=${attachment.mime_type}` : '',
+      attachment.size_bytes != null ? `size=${attachment.size_bytes} bytes` : '',
+      attachment.url ? `url=${attachment.url}` : '',
+      attachment.local_path ? `local_file_path=${attachment.local_path}` : '',
+    ].filter(Boolean);
+    return parts.join(' | ');
+  });
+  return [
+    'User attachments:',
+    ...lines,
+    'Use these URLs directly when a tool requires an asset URL or file reference.',
+  ].join('\n');
+}
+
+function getAttachmentsForScope(scopeType: string, scopeId: string) {
+  ensureAttachmentTables();
+  const rows = db.prepare(`
+    SELECT id, kind, original_name, mime_type, size_bytes, storage_key, file_url, local_path, created_at
+    FROM attachments
+    WHERE scope_type = ? AND scope_id = ?
+    ORDER BY created_at ASC, id ASC
+  `).all(scopeType, scopeId) as any[];
+  return rows.map(normalizeAttachmentRow);
+}
+
+function getAttachmentById(attachmentId: string) {
+  ensureAttachmentTables();
+  const row = db.prepare(`
+    SELECT *
+    FROM attachments
+    WHERE id = ?
+    LIMIT 1
+  `).get(attachmentId) as any;
+  return row || null;
+}
+
+function normalizeTaskSignature(text: string) {
+  const tokens = String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token.length > 2)
+    .slice(0, 8);
+  return tokens.join('_');
+}
+
+async function getExecutionToolSequence(execId: number) {
+  const rows = await getPrisma().orchestratorToolExecution.findMany({
+    where: { agentExecutionId: execId, status: 'completed' },
+    orderBy: { id: 'asc' },
+    select: { toolName: true },
+  });
+  return rows
+    .map((row) => String(row.toolName || '').trim())
+    .filter(Boolean);
+}
+
+async function getExecutionFailedTools(execId: number) {
+  const rows = await getPrisma().orchestratorToolExecution.findMany({
+    where: {
+      agentExecutionId: execId,
+      NOT: { status: 'completed' },
+    },
+    orderBy: { id: 'asc' },
+    select: { toolName: true, error: true, status: true },
+    take: 5,
+  });
+  return rows.map((row) => ({
+    tool_name: String(row.toolName || '').trim(),
+    error: compactPromptText(String(row.error || row.status || '').trim(), 220),
+    status: String(row.status || '').trim(),
+  })).filter((row) => row.tool_name);
+}
+
+function getUserAgentPreference(userId: string | null | undefined, agentId: number) {
+  if (!userId) return '';
+  ensureLearningTables();
+  const row = db.prepare(`
+    SELECT preference_text
+    FROM user_agent_preferences
+    WHERE user_id = ? AND agent_id = ?
+    LIMIT 1
+  `).get(userId, agentId) as any;
+  return String(row?.preference_text || '').trim();
+}
+
+function saveUserAgentPreference(userId: string, agentId: number, preferenceText: string) {
+  ensureLearningTables();
+  const text = compactPromptText(preferenceText, 1200);
+  db.prepare(`
+    INSERT INTO user_agent_preferences (user_id, agent_id, preference_text, updated_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id, agent_id) DO UPDATE SET
+      preference_text = excluded.preference_text,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(userId, agentId, text);
+}
+
+function listRelevantLearningLessons(agentId: number, userId: string | null | undefined, taskDescription: string) {
+  ensureLearningTables();
+  const taskSignature = normalizeTaskSignature(taskDescription);
+  const rows = db.prepare(`
+    SELECT id, lesson_kind, task_signature, guidance, weight, updated_at
+    FROM agent_learning_lessons
+    WHERE agent_id = ?
+      AND (user_id IS NULL OR user_id = ?)
+      AND (
+        task_signature IS NULL OR task_signature = '' OR task_signature = ?
+      )
+    ORDER BY
+      CASE WHEN task_signature = ? THEN 0 ELSE 1 END,
+      weight DESC,
+      updated_at DESC
+    LIMIT 5
+  `).all(agentId, userId || null, taskSignature, taskSignature) as any[];
+  return rows.map((row) => ({
+    id: Number(row.id),
+    lesson_kind: String(row.lesson_kind || ''),
+    task_signature: String(row.task_signature || ''),
+    guidance: String(row.guidance || ''),
+    weight: Number(row.weight || 0),
+  }));
+}
+
+function buildLearningGuidance(agentId: number, userId: string | null | undefined, taskDescription: string) {
+  if (!isLearningEnabled('agent', Number(agentId))) return '';
+  const preferenceText = getUserAgentPreference(userId, agentId);
+  const lessons = listRelevantLearningLessons(agentId, userId, taskDescription);
+  const sections: string[] = [];
+  if (preferenceText) {
+    sections.push(`User preferences:\n- ${compactPromptText(preferenceText, 500)}`);
+  }
+  if (lessons.length) {
+    sections.push([
+      'Learned execution guidance:',
+      ...lessons.map((lesson, index) => `- ${index + 1}. [${lesson.lesson_kind}] ${compactPromptText(lesson.guidance, 500)}`),
+      'Prefer the shortest validated path and do not repeat previously failed patterns without new input.',
+    ].join('\n'));
+  }
+  return sections.join('\n\n');
+}
+
+function buildCrewLearningGuidance(crewId: number, userId: string | null | undefined, objective: string) {
+  if (!isLearningEnabled('crew', Number(crewId))) return '';
+  ensureLearningTables();
+  const taskSignature = normalizeTaskSignature(objective);
+  const rows = db.prepare(`
+    SELECT rating, solved, feedback_text, created_at
+    FROM crew_run_feedback
+    WHERE crew_id = ?
+      AND (user_id IS NULL OR user_id = ?)
+    ORDER BY created_at DESC
+    LIMIT 5
+  `).all(crewId, userId || null) as any[];
+  const hints = rows
+    .map((row) => {
+      const solved = row?.solved == null ? null : Number(row.solved) === 1;
+      const text = compactPromptText(String(row?.feedback_text || '').trim(), 220);
+      if (!text) return '';
+      if (row?.rating === 'down' || solved === false) return `Avoid repeating: ${text}`;
+      return `Validated approach: ${text}`;
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+  if (!hints.length) return '';
+  return [
+    `Learned crew guidance for similar objectives (${taskSignature || 'general'}):`,
+    ...hints.map((hint) => `- ${hint}`),
+    '- Prefer the shortest collaborative path that solves the objective and avoid repeating previously criticized behavior.',
+  ].join('\n');
+}
+
+function buildWorkflowLearningGuidance(workflowId: number, userId: string | null | undefined, input: any) {
+  if (!isLearningEnabled('workflow', Number(workflowId))) return '';
+  ensureLearningTables();
+  const signatureSource = typeof input === 'string' ? input : JSON.stringify(input || {});
+  const taskSignature = normalizeTaskSignature(signatureSource);
+  const rows = db.prepare(`
+    SELECT rating, solved, feedback_text, created_at
+    FROM workflow_run_feedback
+    WHERE workflow_id = ?
+      AND (user_id IS NULL OR user_id = ?)
+    ORDER BY created_at DESC
+    LIMIT 5
+  `).all(workflowId, userId || null) as any[];
+  const hints = rows
+    .map((row) => {
+      const solved = row?.solved == null ? null : Number(row.solved) === 1;
+      const text = compactPromptText(String(row?.feedback_text || '').trim(), 220);
+      if (!text) return '';
+      if (row?.rating === 'down' || solved === false) return `Avoid this workflow pattern: ${text}`;
+      return `Reuse this workflow pattern: ${text}`;
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+  if (!hints.length) return '';
+  return [
+    `Learned workflow guidance for similar inputs (${taskSignature || 'general'}):`,
+    ...hints.map((hint) => `- ${hint}`),
+    '- Keep the flow efficient: prefer the shortest validated route and skip redundant branches.',
+  ].join('\n');
+}
+
+function isLearningEnabled(resourceType: 'agent' | 'crew' | 'workflow', resourceId: number) {
+  ensureLearningTables();
+  const row = db.prepare(`
+    SELECT enabled
+    FROM entity_learning_settings
+    WHERE resource_type = ? AND resource_id = ?
+    LIMIT 1
+  `).get(resourceType, resourceId) as any;
+  if (!row) return true;
+  return Number(row.enabled) === 1;
+}
+
+function setLearningEnabled(resourceType: 'agent' | 'crew' | 'workflow', resourceId: number, enabled: boolean) {
+  ensureLearningTables();
+  db.prepare(`
+    INSERT INTO entity_learning_settings (resource_type, resource_id, enabled, updated_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(resource_type, resource_id) DO UPDATE SET
+      enabled = excluded.enabled,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(resourceType, resourceId, enabled ? 1 : 0);
+}
+
+async function recordExecutionFeedback(exec: any, userId: string, payload: FeedbackPayload) {
+  ensureLearningTables();
+  const agentId = Number(exec?.agent_id || 0);
+  if (!Number.isFinite(agentId) || agentId <= 0) {
+    throw new Error('Execution is missing an agent id.');
+  }
+  const rating = payload.rating === 'down' ? 'down' : payload.rating === 'up' ? 'up' : null;
+  const solved = typeof payload.solved === 'boolean' ? payload.solved : null;
+  const feedbackText = compactPromptText(String(payload.feedback || '').trim(), 1200);
+  const taskSignature = normalizeTaskSignature(String(exec?.task || ''));
+  const toolSequence = await getExecutionToolSequence(Number(exec.id));
+  const failedTools = (rating === 'down' || solved === false) ? await getExecutionFailedTools(Number(exec.id)) : [];
+
+  const result = db.prepare(`
+    INSERT INTO run_feedback (execution_id, agent_id, user_id, session_id, rating, solved, feedback_text, task_signature, tool_sequence)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    Number(exec.id),
+    agentId,
+    userId,
+    exec?.session_id ? String(exec.session_id) : null,
+    rating,
+    solved == null ? null : (solved ? 1 : 0),
+    feedbackText || null,
+    taskSignature || null,
+    toolSequence.length ? JSON.stringify(toolSequence) : null,
+  );
+  const feedbackId = Number(result.lastInsertRowid || 0);
+
+  if (feedbackText && /preference|prefer|always|tone|format|style/i.test(feedbackText)) {
+    saveUserAgentPreference(userId, agentId, feedbackText);
+  }
+
+  const lessonKind = (rating === 'down' || solved === false) ? 'failure_avoidance' : (rating === 'up' || solved === true) ? 'success_path' : '';
+  if (lessonKind) {
+    const sequenceText = toolSequence.length ? toolSequence.join(' -> ') : '';
+    const guidance = lessonKind === 'failure_avoidance'
+      ? compactPromptText(
+          feedbackText ||
+          `Avoid repeating the previous failed path${sequenceText ? ` (${sequenceText})` : ''} without gathering the missing input first.`,
+          700,
+        )
+      : compactPromptText(
+          feedbackText ||
+          (sequenceText
+            ? `For similar tasks, prefer this validated path: ${sequenceText}. Keep the answer concise and stop once the task is solved.`
+            : 'A direct concise answer solved a similar task. Prefer the shortest validated path.'),
+          700,
+        );
+    db.prepare(`
+      INSERT INTO agent_learning_lessons (agent_id, user_id, lesson_kind, task_signature, guidance, weight, source_feedback_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `).run(
+      agentId,
+      userId,
+      lessonKind,
+      taskSignature || null,
+      guidance,
+      lessonKind === 'failure_avoidance' ? 90 : 70,
+      feedbackId || null,
+    );
+  }
+
+  for (const failedTool of failedTools.slice(0, 3)) {
+    const guidance = compactPromptText(
+      [
+        feedbackText || '',
+        `Avoid immediately retrying tool ${failedTool.tool_name} with the same path.`,
+        failedTool.error ? `Last observed error/status: ${failedTool.error}.` : '',
+        'Verify required inputs first or choose a shorter alternate path.',
+      ].filter(Boolean).join(' '),
+      700,
+    );
+    db.prepare(`
+      INSERT INTO agent_learning_lessons (agent_id, user_id, lesson_kind, task_signature, guidance, weight, source_feedback_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `).run(
+      agentId,
+      userId,
+      'tool_failure',
+      taskSignature || null,
+      guidance,
+      95,
+      feedbackId || null,
+    );
+  }
+
+  return {
+    id: feedbackId,
+    agent_id: agentId,
+    task_signature: taskSignature,
+    tool_sequence: toolSequence,
+  };
+}
+
+function recordCrewExecutionFeedback(exec: any, userId: string, payload: FeedbackPayload) {
+  ensureLearningTables();
+  const rating = payload.rating === 'down' ? 'down' : payload.rating === 'up' ? 'up' : null;
+  const solved = typeof payload.solved === 'boolean' ? payload.solved : null;
+  const feedbackText = compactPromptText(String(payload.feedback || '').trim(), 1200);
+  const result = db.prepare(`
+    INSERT INTO crew_run_feedback (execution_id, crew_id, user_id, rating, solved, feedback_text)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    Number(exec.id),
+    Number(exec.crew_id),
+    userId,
+    rating,
+    solved == null ? null : (solved ? 1 : 0),
+    feedbackText || null,
+  );
+  return { id: Number(result.lastInsertRowid || 0), execution_id: Number(exec.id), crew_id: Number(exec.crew_id) };
+}
+
+function recordWorkflowRunFeedback(run: any, userId: string, payload: FeedbackPayload) {
+  ensureLearningTables();
+  const rating = payload.rating === 'down' ? 'down' : payload.rating === 'up' ? 'up' : null;
+  const solved = typeof payload.solved === 'boolean' ? payload.solved : null;
+  const feedbackText = compactPromptText(String(payload.feedback || '').trim(), 1200);
+  const result = db.prepare(`
+    INSERT INTO workflow_run_feedback (workflow_run_id, workflow_id, user_id, rating, solved, feedback_text)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    Number(run.id),
+    Number(run.workflowId || run.workflow_id),
+    userId,
+    rating,
+    solved == null ? null : (solved ? 1 : 0),
+    feedbackText || null,
+  );
+  return { id: Number(result.lastInsertRowid || 0), workflow_run_id: Number(run.id), workflow_id: Number(run.workflowId || run.workflow_id) };
+}
+
+function getPublicBaseUrl() {
+  const configured = String(
+    process.env.PUBLIC_BASE_URL ||
+    process.env.APP_BASE_URL ||
+    process.env.ORCHESTRATOR_PUBLIC_URL ||
+    ''
+  ).trim();
+  return configured.replace(/\/+$/g, '');
+}
+
+function createAttachmentPublicLink(attachmentId: string, expiresInSeconds = 3600) {
+  ensureAttachmentTables();
+  const attachment = getAttachmentById(attachmentId);
+  if (!attachment) throw new Error(`Attachment not found: ${attachmentId}`);
+  const token = randomUUID();
+  const ttlSeconds = Math.max(60, Math.min(24 * 60 * 60, Math.round(Number(expiresInSeconds) || 3600)));
+  const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+  db.prepare(`
+    INSERT INTO attachment_public_links (attachment_id, token, expires_at)
+    VALUES (?, ?, ?)
+  `).run(attachmentId, token, expiresAt);
+  const baseUrl = getPublicBaseUrl();
+  const path = `/api/public/attachments/${token}`;
+  return {
+    attachment_id: attachmentId,
+    token,
+    expires_at: expiresAt,
+    public_url: baseUrl ? `${baseUrl}${path}` : path,
+  };
+}
+
+function getAttachmentPublicLink(token: string) {
+  ensureAttachmentTables();
+  const row = db.prepare(`
+    SELECT id, attachment_id, token, expires_at, created_at
+    FROM attachment_public_links
+    WHERE token = ?
+    LIMIT 1
+  `).get(token) as any;
+  return row || null;
+}
+
+function isAttachmentIdKey(key: string) {
+  return /(^|_)(attachment_id|image_attachment_id|file_attachment_id)$/i.test(String(key || ''));
+}
+
+function attachmentFieldPrefix(key: string) {
+  const normalized = String(key || '').trim();
+  if (!normalized || normalized === 'attachment_id') return 'attachment';
+  return normalized.replace(/_id$/i, '');
+}
+
+function enrichArgsWithAttachments(input: any): any {
+  if (Array.isArray(input)) return input.map((item) => enrichArgsWithAttachments(item));
+  if (!input || typeof input !== 'object') return input;
+
+  const output: Record<string, any> = {};
+  for (const [key, rawValue] of Object.entries(input)) {
+    const value = enrichArgsWithAttachments(rawValue);
+    output[key] = value;
+
+    if (typeof value === 'string' && isAttachmentIdKey(key)) {
+      const row = getAttachmentById(value);
+      if (!row) continue;
+      const meta = normalizeAttachmentRow(row);
+      const prefix = attachmentFieldPrefix(key);
+      output[prefix] = meta;
+      output[`${prefix}_url`] = meta.url;
+      output[`${prefix}_name`] = meta.name;
+      output[`${prefix}_mime_type`] = meta.mime_type || null;
+      output[`${prefix}_kind`] = meta.kind;
+      if (meta.local_path) output[`${prefix}_local_path`] = meta.local_path;
+      if (prefix === 'attachment' && meta.kind === 'image' && !output.image_url) {
+        output.image_url = meta.url;
+      }
+      if (prefix === 'attachment' && meta.local_path && meta.kind === 'image' && !output.image_local_path) {
+        output.image_local_path = meta.local_path;
+      }
+    }
+  }
+  return output;
+}
+
+async function resolveAttachmentUploadValue(templateValue: any, args: any) {
+  if (typeof templateValue !== 'string') return null;
+  const match = templateValue.trim().match(/^\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}$/);
+  if (!match) return null;
+  const pathKey = match[1];
+  if (!/attachment/i.test(pathKey)) return null;
+  const resolved = getByPath(args, pathKey.startsWith('args.') ? pathKey.slice(5) : pathKey);
+  const attachmentId = typeof resolved === 'string'
+    ? resolved
+    : (resolved && typeof resolved === 'object' && typeof resolved.id === 'string' ? resolved.id : '');
+  if (!attachmentId) return null;
+  const row = getAttachmentById(attachmentId);
+  return row ? normalizeAttachmentRow(row) : null;
+}
+
+async function curlRequestTool(args: any) {
+  const method = String(args?.method || 'GET').toUpperCase();
+  const url = String(args?.url || '').trim();
+  if (!url) throw new Error('curl_request requires url.');
+  const headers = args?.headers && typeof args.headers === 'object' ? { ...args.headers } : {};
+  const timeoutMs = Math.max(1000, Math.min(120000, Number(args?.timeout_ms || 30000)));
+  const followRedirects = args?.follow_redirects !== false;
+  const bodyInput = args?.body;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method,
+      headers,
+      redirect: followRedirects ? 'follow' : 'manual',
+      body: ['GET', 'HEAD'].includes(method) ? undefined : (
+        typeof bodyInput === 'string'
+          ? bodyInput
+          : (bodyInput == null ? undefined : JSON.stringify(bodyInput))
+      ),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    return JSON.stringify({
+      ok: res.ok,
+      status: res.status,
+      status_text: res.statusText,
+      url: res.url,
+      headers: Object.fromEntries(res.headers.entries()),
+      body: text,
+    }, null, 2);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function generateAttachmentPublicUrlTool(args: any) {
+  const attachmentId = String(args?.attachment_id || '').trim();
+  if (!attachmentId) throw new Error('generate_attachment_public_url requires attachment_id.');
+  const expiresInSeconds = Number(args?.expires_in_seconds || 3600);
+  const link = createAttachmentPublicLink(attachmentId, expiresInSeconds);
+  const attachment = normalizeAttachmentRow(getAttachmentById(attachmentId));
+  return JSON.stringify({
+    ...link,
+    name: attachment.name,
+    mime_type: attachment.mime_type || null,
+    kind: attachment.kind,
+  }, null, 2);
 }
 
 async function saveSessionSummary(sessionId: string, summary: string) {
   await saveRuntimeSessionSummary(sessionId, summary);
+}
+
+type VoiceSessionRow = {
+  id: string;
+  agent_id: number;
+  status: string;
+  transport: string;
+  voice_provider: string;
+  voice_id: string | null;
+  tts_model_id: string | null;
+  stt_model_id: string | null;
+  transcript: string | null;
+  reply_text: string | null;
+  meta: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type VoiceSocketContext = {
+  sessionId: string;
+  agentId: number;
+  targetType: 'agent' | 'crew';
+  targetId: number;
+  targetName: string;
+  voiceId: string;
+  ttsModelId: string;
+  sttModelId: string;
+  outputFormat: string;
+  audioMimeType: string;
+  audioChunks: Buffer[];
+  sampleRate: number;
+  languageCode: string;
+  autoTts: boolean;
+  vadEnabled?: boolean;
+  vadSilenceThresholdSecs?: number;
+  vadThreshold?: number;
+  minSpeechDurationMs?: number;
+  minSilenceDurationMs?: number;
+  maxTokensToRecompute?: number;
+  browserNoiseSuppression?: boolean;
+  browserEchoCancellation?: boolean;
+  browserAutoGainControl?: boolean;
+  pushToTalk?: boolean;
+  attachments?: AttachmentRef[];
+  sttSocket?: WebSocket | null;
+  lastVoiceProgressAt?: number;
+  lastVoiceProgressText?: string;
+  isExecuting?: boolean;
+  lastCommittedTranscript?: string;
+  isUserSpeaking?: boolean;
+  turnState?: 'idle' | 'listening' | 'thinking' | 'speaking';
+  activeTtsAbort?: AbortController | null;
+  activeProgressTtsAbort?: AbortController | null;
+};
+
+const DEFAULT_VOICE_ID = process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'JBFqnCBsd6RMkjVDRZzb';
+const DEFAULT_TTS_MODEL = process.env.ELEVENLABS_DEFAULT_TTS_MODEL || 'eleven_multilingual_v2';
+const DEFAULT_STT_MODEL = process.env.ELEVENLABS_DEFAULT_STT_MODEL || 'scribe_v2_realtime';
+const DEFAULT_TTS_FORMAT = process.env.ELEVENLABS_DEFAULT_OUTPUT_FORMAT || 'mp3_44100_128';
+const DEFAULT_STT_SAMPLE_RATE = Number(process.env.ELEVENLABS_DEFAULT_SAMPLE_RATE || 16000);
+const DEFAULT_VAD_ENABLED = true;
+const DEFAULT_VAD_SILENCE_THRESHOLD_SECS = Number(process.env.ELEVENLABS_DEFAULT_VAD_SILENCE_THRESHOLD_SECS || 0.8);
+const DEFAULT_VAD_THRESHOLD = Number(process.env.ELEVENLABS_DEFAULT_VAD_THRESHOLD || 0.6);
+const DEFAULT_MIN_SPEECH_DURATION_MS = Number(process.env.ELEVENLABS_DEFAULT_MIN_SPEECH_DURATION_MS || 220);
+const DEFAULT_MIN_SILENCE_DURATION_MS = Number(process.env.ELEVENLABS_DEFAULT_MIN_SILENCE_DURATION_MS || 420);
+const DEFAULT_MAX_TOKENS_TO_RECOMPUTE = Number(process.env.ELEVENLABS_DEFAULT_MAX_TOKENS_TO_RECOMPUTE || 5);
+const DEFAULT_BROWSER_NOISE_SUPPRESSION = true;
+const DEFAULT_BROWSER_ECHO_CANCELLATION = true;
+const DEFAULT_BROWSER_AUTO_GAIN_CONTROL = false;
+const voiceSocketContexts = new Map<WebSocket, VoiceSocketContext>();
+let voiceWss: WebSocketServer | null = null;
+
+function clampNumber(value: any, fallback: number, min: number, max: number) {
+  const next = Number(value);
+  if (!Number.isFinite(next)) return fallback;
+  return Math.min(max, Math.max(min, next));
+}
+
+function normalizeVoiceRuntimeMeta(meta: any = {}) {
+  return {
+    preset_id: Number.isFinite(Number(meta?.preset_id)) && Number(meta?.preset_id) > 0 ? Number(meta.preset_id) : null,
+    vad_enabled: meta?.vad_enabled !== false,
+    vad_silence_threshold_secs: clampNumber(meta?.vad_silence_threshold_secs, DEFAULT_VAD_SILENCE_THRESHOLD_SECS, 0.2, 3),
+    vad_threshold: clampNumber(meta?.vad_threshold, DEFAULT_VAD_THRESHOLD, 0.1, 0.95),
+    min_speech_duration_ms: Math.round(clampNumber(meta?.min_speech_duration_ms, DEFAULT_MIN_SPEECH_DURATION_MS, 50, 2000)),
+    min_silence_duration_ms: Math.round(clampNumber(meta?.min_silence_duration_ms, DEFAULT_MIN_SILENCE_DURATION_MS, 50, 3000)),
+    max_tokens_to_recompute: Math.round(clampNumber(meta?.max_tokens_to_recompute, DEFAULT_MAX_TOKENS_TO_RECOMPUTE, 0, 50)),
+    browser_noise_suppression: meta?.browser_noise_suppression !== false,
+    browser_echo_cancellation: meta?.browser_echo_cancellation !== false,
+    browser_auto_gain_control: meta?.browser_auto_gain_control === true,
+    push_to_talk: meta?.push_to_talk === true,
+  };
+}
+
+function resolveVoiceTarget(targetType: string, targetId: number) {
+  if (targetType === 'crew') {
+    const crew = db.prepare('SELECT id, name, process, coordinator_agent_id FROM crews WHERE id = ?').get(targetId) as any;
+    if (!crew) return null;
+    const fallbackAgent = crew.coordinator_agent_id
+      ? (db.prepare('SELECT id, name FROM agents WHERE id = ?').get(crew.coordinator_agent_id) as any)
+      : (db.prepare(`
+          SELECT a.id, a.name
+          FROM agents a
+          JOIN crew_agents ca ON ca.agent_id = a.id
+          WHERE ca.crew_id = ?
+          ORDER BY ca.id ASC
+          LIMIT 1
+        `).get(targetId) as any);
+    if (!fallbackAgent?.id) return null;
+    return {
+      targetType: 'crew' as const,
+      targetId: Number(crew.id),
+      targetName: String(crew.name || `Crew ${crew.id}`),
+      agentId: Number(fallbackAgent.id),
+      crew,
+    };
+  }
+
+  const agent = db.prepare('SELECT id, name, role FROM agents WHERE id = ?').get(targetId) as any;
+  if (!agent) return null;
+  return {
+    targetType: 'agent' as const,
+    targetId: Number(agent.id),
+    targetName: String(agent.name || `Agent ${agent.id}`),
+    agentId: Number(agent.id),
+    agent,
+  };
+}
+
+function getAgentVoiceProfile(agentId: number) {
+  ensureVoiceTables();
+  const row = db.prepare('SELECT * FROM agent_voice_profiles WHERE agent_id = ?').get(agentId) as any;
+  if (!row) return null;
+  const meta = normalizeVoiceRuntimeMeta(safeJsonParse(row.meta, {}));
+  return {
+    agent_id: row.agent_id,
+    voice_provider: row.voice_provider || 'elevenlabs',
+    voice_id: row.voice_id || DEFAULT_VOICE_ID,
+    tts_model_id: row.tts_model_id || DEFAULT_TTS_MODEL,
+    stt_model_id: row.stt_model_id || DEFAULT_STT_MODEL,
+    output_format: row.output_format || DEFAULT_TTS_FORMAT,
+    sample_rate: Number(row.sample_rate || DEFAULT_STT_SAMPLE_RATE),
+    language_code: row.language_code || 'en',
+    auto_tts: Boolean(row.auto_tts ?? 1),
+    meta,
+  };
+}
+
+function getCrewVoiceProfile(crewId: number) {
+  ensureVoiceTables();
+  const row = db.prepare('SELECT * FROM crew_voice_profiles WHERE crew_id = ?').get(crewId) as any;
+  if (!row) return null;
+  const meta = normalizeVoiceRuntimeMeta(safeJsonParse(row.meta, {}));
+  return {
+    crew_id: row.crew_id,
+    voice_provider: row.voice_provider || 'elevenlabs',
+    voice_id: row.voice_id || DEFAULT_VOICE_ID,
+    tts_model_id: row.tts_model_id || DEFAULT_TTS_MODEL,
+    stt_model_id: row.stt_model_id || DEFAULT_STT_MODEL,
+    output_format: row.output_format || DEFAULT_TTS_FORMAT,
+    sample_rate: Number(row.sample_rate || DEFAULT_STT_SAMPLE_RATE),
+    language_code: row.language_code || 'en',
+    auto_tts: Boolean(row.auto_tts ?? 1),
+    meta,
+  };
+}
+
+function listVoiceConfigPresets() {
+  ensureVoiceTables();
+  const rows = db.prepare('SELECT * FROM voice_config_presets ORDER BY updated_at DESC, id DESC').all() as any[];
+  return rows.map((row) => ({
+    id: Number(row.id),
+    name: row.name,
+    voice_provider: row.voice_provider || 'elevenlabs',
+    voice_id: row.voice_id || DEFAULT_VOICE_ID,
+    tts_model_id: row.tts_model_id || DEFAULT_TTS_MODEL,
+    stt_model_id: row.stt_model_id || DEFAULT_STT_MODEL,
+    output_format: row.output_format || DEFAULT_TTS_FORMAT,
+    sample_rate: Number(row.sample_rate || DEFAULT_STT_SAMPLE_RATE),
+    language_code: row.language_code || 'en',
+    auto_tts: Boolean(row.auto_tts ?? 1),
+    notes: row.notes || '',
+    meta: normalizeVoiceRuntimeMeta(safeJsonParse(row.meta, {})),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }));
+}
+
+function getVoiceConfigPreset(presetId: number) {
+  ensureVoiceTables();
+  const row = db.prepare('SELECT * FROM voice_config_presets WHERE id = ?').get(presetId) as any;
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    name: row.name,
+    voice_provider: row.voice_provider || 'elevenlabs',
+    voice_id: row.voice_id || DEFAULT_VOICE_ID,
+    tts_model_id: row.tts_model_id || DEFAULT_TTS_MODEL,
+    stt_model_id: row.stt_model_id || DEFAULT_STT_MODEL,
+    output_format: row.output_format || DEFAULT_TTS_FORMAT,
+    sample_rate: Number(row.sample_rate || DEFAULT_STT_SAMPLE_RATE),
+    language_code: row.language_code || 'en',
+    auto_tts: Boolean(row.auto_tts ?? 1),
+    notes: row.notes || '',
+    meta: normalizeVoiceRuntimeMeta(safeJsonParse(row.meta, {})),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function saveVoiceConfigPreset(presetId: number | null, payload: any) {
+  ensureVoiceTables();
+  const normalizedName = String(payload.name || '').trim();
+  if (!normalizedName) throw new Error('Voice preset name is required');
+  const runtimeMeta = normalizeVoiceRuntimeMeta(payload.meta || {});
+  const params = [
+    normalizedName,
+    'elevenlabs',
+    String(payload.voice_id || DEFAULT_VOICE_ID),
+    String(payload.tts_model_id || DEFAULT_TTS_MODEL),
+    String(payload.stt_model_id || DEFAULT_STT_MODEL),
+    String(payload.output_format || DEFAULT_TTS_FORMAT),
+    Number(payload.sample_rate || DEFAULT_STT_SAMPLE_RATE),
+    String(payload.language_code || 'en'),
+    payload.auto_tts === false ? 0 : 1,
+    String(payload.notes || '').trim(),
+    JSON.stringify(runtimeMeta),
+  ];
+  if (presetId && Number.isFinite(presetId)) {
+    db.prepare(`
+      UPDATE voice_config_presets
+      SET name = ?, voice_provider = ?, voice_id = ?, tts_model_id = ?, stt_model_id = ?, output_format = ?, sample_rate = ?, language_code = ?, auto_tts = ?, notes = ?, meta = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(...params, presetId);
+    return getVoiceConfigPreset(presetId);
+  }
+  const result = db.prepare(`
+    INSERT INTO voice_config_presets (
+      name, voice_provider, voice_id, tts_model_id, stt_model_id, output_format, sample_rate, language_code, auto_tts, notes, meta, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `).run(...params);
+  return getVoiceConfigPreset(Number(result.lastInsertRowid));
+}
+
+function saveAgentVoiceProfile(agentId: number, payload: any) {
+  ensureVoiceTables();
+  const runtimeMeta = normalizeVoiceRuntimeMeta(payload.meta || {});
+  db.prepare(`
+    INSERT INTO agent_voice_profiles (
+      agent_id, voice_provider, voice_id, tts_model_id, stt_model_id, output_format, sample_rate, language_code, auto_tts, meta, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(agent_id) DO UPDATE SET
+      voice_provider = excluded.voice_provider,
+      voice_id = excluded.voice_id,
+      tts_model_id = excluded.tts_model_id,
+      stt_model_id = excluded.stt_model_id,
+      output_format = excluded.output_format,
+      sample_rate = excluded.sample_rate,
+      language_code = excluded.language_code,
+      auto_tts = excluded.auto_tts,
+      meta = excluded.meta,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(
+    agentId,
+    'elevenlabs',
+    String(payload.voice_id || DEFAULT_VOICE_ID),
+    String(payload.tts_model_id || DEFAULT_TTS_MODEL),
+    String(payload.stt_model_id || DEFAULT_STT_MODEL),
+    String(payload.output_format || DEFAULT_TTS_FORMAT),
+    Number(payload.sample_rate || DEFAULT_STT_SAMPLE_RATE),
+    String(payload.language_code || 'en'),
+    payload.auto_tts === false ? 0 : 1,
+    JSON.stringify(runtimeMeta),
+  );
+}
+
+function saveCrewVoiceProfile(crewId: number, payload: any) {
+  ensureVoiceTables();
+  const runtimeMeta = normalizeVoiceRuntimeMeta(payload.meta || {});
+  db.prepare(`
+    INSERT INTO crew_voice_profiles (
+      crew_id, voice_provider, voice_id, tts_model_id, stt_model_id, output_format, sample_rate, language_code, auto_tts, meta, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(crew_id) DO UPDATE SET
+      voice_provider = excluded.voice_provider,
+      voice_id = excluded.voice_id,
+      tts_model_id = excluded.tts_model_id,
+      stt_model_id = excluded.stt_model_id,
+      output_format = excluded.output_format,
+      sample_rate = excluded.sample_rate,
+      language_code = excluded.language_code,
+      auto_tts = excluded.auto_tts,
+      meta = excluded.meta,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(
+    crewId,
+    'elevenlabs',
+    String(payload.voice_id || DEFAULT_VOICE_ID),
+    String(payload.tts_model_id || DEFAULT_TTS_MODEL),
+    String(payload.stt_model_id || DEFAULT_STT_MODEL),
+    String(payload.output_format || DEFAULT_TTS_FORMAT),
+    Number(payload.sample_rate || DEFAULT_STT_SAMPLE_RATE),
+    String(payload.language_code || 'en'),
+    payload.auto_tts === false ? 0 : 1,
+    JSON.stringify(runtimeMeta),
+  );
+}
+
+function getVoiceCredentialApiKey() {
+  const credential = db.prepare(`
+    SELECT api_key
+    FROM credentials
+    WHERE provider IN ('elevenlabs_voice', 'elevenlabs')
+    ORDER BY CASE WHEN provider = 'elevenlabs_voice' THEN 0 ELSE 1 END, id ASC
+    LIMIT 1
+  `).get() as any;
+  return String(credential?.api_key || process.env.ELEVENLABS_API_KEY || '').trim();
+}
+
+function appendVoiceSessionEvent(sessionId: string, type: string, payload: any) {
+  ensureVoiceTables();
+  db.prepare('INSERT INTO voice_session_events (session_id, type, payload) VALUES (?, ?, ?)')
+    .run(sessionId, type, JSON.stringify(payload ?? {}));
+  db.prepare('UPDATE voice_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
+}
+
+function updateVoiceSession(sessionId: string, patch: Partial<{
+  status: string;
+  transcript: string;
+  reply_text: string;
+  voice_id: string;
+  tts_model_id: string;
+  stt_model_id: string;
+  meta: any;
+}>) {
+  ensureVoiceTables();
+  const fields: string[] = [];
+  const values: any[] = [];
+  if (patch.status != null) { fields.push('status = ?'); values.push(patch.status); }
+  if (patch.transcript != null) { fields.push('transcript = ?'); values.push(patch.transcript); }
+  if (patch.reply_text != null) { fields.push('reply_text = ?'); values.push(patch.reply_text); }
+  if (patch.voice_id != null) { fields.push('voice_id = ?'); values.push(patch.voice_id); }
+  if (patch.tts_model_id != null) { fields.push('tts_model_id = ?'); values.push(patch.tts_model_id); }
+  if (patch.stt_model_id != null) { fields.push('stt_model_id = ?'); values.push(patch.stt_model_id); }
+  if (patch.meta != null) { fields.push('meta = ?'); values.push(JSON.stringify(patch.meta)); }
+  fields.push('updated_at = CURRENT_TIMESTAMP');
+  if (!fields.length) return;
+  values.push(sessionId);
+  db.prepare(`UPDATE voice_sessions SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+function createVoiceSession(agentId: number, options?: Partial<VoiceSocketContext>) {
+  ensureVoiceTables();
+  const sessionId = randomUUID();
+  db.prepare(`
+    INSERT INTO voice_sessions (
+      id, agent_id, status, transport, voice_provider, voice_id, tts_model_id, stt_model_id, transcript, reply_text, meta
+    ) VALUES (?, ?, 'connected', 'websocket', 'elevenlabs', ?, ?, ?, '', '', ?)
+  `).run(
+    sessionId,
+    agentId,
+    options?.voiceId || DEFAULT_VOICE_ID,
+    options?.ttsModelId || DEFAULT_TTS_MODEL,
+    options?.sttModelId || DEFAULT_STT_MODEL,
+    JSON.stringify({
+      output_format: options?.outputFormat || DEFAULT_TTS_FORMAT,
+      target_type: options?.targetType || 'agent',
+      target_id: options?.targetId || agentId,
+      target_name: options?.targetName || null,
+    }),
+  );
+  appendVoiceSessionEvent(sessionId, 'session.started', {
+    agent_id: agentId,
+    target_type: options?.targetType || 'agent',
+    target_id: options?.targetId || agentId,
+    target_name: options?.targetName || null,
+  });
+  return sessionId;
+}
+
+function getVoiceSession(sessionId: string) {
+  ensureVoiceTables();
+  return db.prepare('SELECT * FROM voice_sessions WHERE id = ?').get(sessionId) as VoiceSessionRow | undefined;
+}
+
+async function persistUploadedAttachment(params: {
+  file: any;
+  scopeType?: string | null;
+  scopeId?: string | null;
+  agentId?: number | null;
+  crewId?: number | null;
+  uploaderUserId?: string | null;
+  uploaderOrgId?: string | null;
+}) {
+  ensureAttachmentTables();
+  if (!isAttachmentStorageConfigured()) {
+    throw new Error('Attachment storage is not configured. Set GCS_ATTACHMENTS_BUCKET or reuse GCS_SQLITE_BUCKET before uploading files.');
+  }
+
+  const file = params.file;
+  if (!file?.path) throw new Error('Uploaded file payload is missing a temporary path.');
+
+  const attachmentId = randomUUID();
+  try {
+    const fileBuffer = await readFile(file.path);
+    const stored = await uploadAttachmentBuffer({
+      attachmentId,
+      buffer: fileBuffer,
+      originalName: String(file.originalname || 'upload.bin'),
+      mimeType: file.mimetype ? String(file.mimetype) : undefined,
+    });
+    const resolvedFileUrl = stored.fileUrl || `/api/attachments/${attachmentId}/content`;
+    const kind = inferAttachmentKind(file.mimetype);
+    db.prepare(`
+      INSERT INTO attachments (
+        id, scope_type, scope_id, agent_id, crew_id, uploader_user_id, uploader_org_id,
+        kind, original_name, mime_type, size_bytes, storage_provider, storage_key, file_url, local_path, metadata
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      attachmentId,
+      params.scopeType || null,
+      params.scopeId || null,
+      params.agentId ?? null,
+      params.crewId ?? null,
+      params.uploaderUserId || null,
+      params.uploaderOrgId || null,
+      kind,
+      String(file.originalname || 'upload.bin'),
+      file.mimetype ? String(file.mimetype) : null,
+      Number.isFinite(Number(file.size)) ? Number(file.size) : null,
+      stored.provider,
+      stored.storageKey,
+      resolvedFileUrl,
+      stored.localPath || null,
+      JSON.stringify({
+        field_name: file.fieldname || null,
+      }),
+    );
+
+    const row = db.prepare(`
+      SELECT id, kind, original_name, mime_type, size_bytes, storage_key, file_url, local_path, created_at
+      FROM attachments
+      WHERE id = ?
+    `).get(attachmentId) as any;
+    return normalizeAttachmentRow(row);
+  } finally {
+    await unlink(file.path).catch(() => undefined);
+  }
+}
+
+async function transcribeVoiceAudio(buffer: Buffer, mimeType: string, sttModelId: string) {
+  const apiKey = getVoiceCredentialApiKey();
+  if (!apiKey) throw new Error('ElevenLabs voice credential is not configured.');
+  const form = new FormData();
+  form.set('model_id', sttModelId || DEFAULT_STT_MODEL);
+  const extension = mimeType.includes('wav') ? 'wav' : mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mpeg') ? 'mp3' : 'webm';
+  form.set('file', new Blob([buffer], { type: mimeType || 'audio/webm' }), `voice-input.${extension}`);
+  const res = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
+    method: 'POST',
+    headers: { 'xi-api-key': apiKey },
+    body: form,
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`ElevenLabs STT failed (${res.status}): ${detail || 'Unknown error'}`);
+  }
+  const data: any = await res.json().catch(() => ({}));
+  return String(data?.text || data?.transcript || '').trim();
+}
+
+async function streamSynthesizeVoiceAudio(
+  text: string,
+  voiceId: string,
+  ttsModelId: string,
+  outputFormat: string,
+  onChunk: (chunk: Buffer) => void | Promise<void>,
+  signal?: AbortSignal,
+) {
+  const apiKey = getVoiceCredentialApiKey();
+  if (!apiKey) throw new Error('ElevenLabs voice credential is not configured.');
+  const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream`, {
+    method: 'POST',
+    headers: {
+      'xi-api-key': apiKey,
+      'Content-Type': 'application/json',
+      'Accept': 'audio/mpeg',
+    },
+    body: JSON.stringify({
+      text,
+      model_id: ttsModelId || DEFAULT_TTS_MODEL,
+      output_format: outputFormat || DEFAULT_TTS_FORMAT,
+    }),
+    signal,
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`ElevenLabs TTS failed (${res.status}): ${detail || 'Unknown error'}`);
+  }
+  if (!res.body) throw new Error('ElevenLabs TTS returned no response body');
+  const reader = res.body.getReader();
+  while (true) {
+    if (signal?.aborted) throw new Error('TTS aborted');
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value?.length) continue;
+    await onChunk(Buffer.from(value));
+  }
+}
+
+async function synthesizeVoiceAudio(text: string, voiceId: string, ttsModelId: string, outputFormat: string) {
+  const chunks: Buffer[] = [];
+  await streamSynthesizeVoiceAudio(text, voiceId, ttsModelId, outputFormat, (chunk) => {
+    chunks.push(chunk);
+  });
+  return Buffer.concat(chunks);
+}
+
+function setVoiceTurnState(ws: WebSocket, ctx: VoiceSocketContext, state: 'idle' | 'listening' | 'thinking' | 'speaking', extra?: any) {
+  if (ctx.turnState === state) return;
+  ctx.turnState = state;
+  appendVoiceSessionEvent(ctx.sessionId, 'turn.state', { state, ...(extra || {}) });
+  sendVoiceSocketEvent(ws, 'turn.state', { sessionId: ctx.sessionId, state, ...(extra || {}) });
+}
+
+function interruptVoicePlayback(ws: WebSocket, ctx: VoiceSocketContext, reason: string) {
+  let interrupted = false;
+  if (ctx.activeTtsAbort) {
+    ctx.activeTtsAbort.abort();
+    ctx.activeTtsAbort = null;
+    interrupted = true;
+  }
+  if (ctx.activeProgressTtsAbort) {
+    ctx.activeProgressTtsAbort.abort();
+    ctx.activeProgressTtsAbort = null;
+    interrupted = true;
+  }
+  if (interrupted) {
+    appendVoiceSessionEvent(ctx.sessionId, 'tts.interrupted', { reason });
+    sendVoiceSocketEvent(ws, 'tts.interrupted', { sessionId: ctx.sessionId, reason });
+  }
+}
+
+function sendVoiceSocketEvent(ws: WebSocket, type: string, payload: any = {}) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type, ...payload }));
+}
+
+function splitVoiceReplyIntoChunks(text: string) {
+  const normalized = String(text || '').trim();
+  if (!normalized) return [];
+  const sentenceMatches = normalized.match(/[^.!?]+[.!?]+|[^.!?]+$/g);
+  const sentences = (sentenceMatches || [normalized]).map((part) => String(part || '').trim()).filter(Boolean);
+  const chunks: string[] = [];
+  let current = '';
+  for (const sentence of sentences) {
+    const next = current ? `${current} ${sentence}` : sentence;
+    if (next.length <= 180) {
+      current = next;
+      continue;
+    }
+    if (current) chunks.push(current);
+    current = sentence;
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function buildVoiceConversationSystemPrompt(agent: { name?: string; role?: string; goal?: string; backstory?: string }) {
+  const name = agent.name || 'Agent';
+  const role = agent.role || 'assistant';
+  const goal = agent.goal ? `Goal: ${agent.goal}` : '';
+  const backstory = agent.backstory ? `Backstory: ${agent.backstory}` : '';
+  return [
+    `You are ${name}, a ${role}.`,
+    goal,
+    backstory,
+    'You are responding in a realtime voice conversation.',
+    'Respond naturally, clearly, and concisely in spoken language.',
+    'Do not output JSON, markdown, XML, or role labels.',
+  ].filter(Boolean).join('\n');
+}
+
+function extractReadySpeechSegments(buffer: string, flushAll = false) {
+  const text = String(buffer || '');
+  if (!text.trim()) return { ready: [] as string[], remainder: '' };
+  const matches = text.match(/[^.!?]+[.!?]+(?:\s+|$)/g) || [];
+  const ready = matches.map((part) => String(part || '').trim()).filter(Boolean);
+  const consumed = matches.join('');
+  let remainder = text.slice(consumed.length);
+  if (flushAll && remainder.trim()) {
+    ready.push(remainder.trim());
+    remainder = '';
+  }
+  if (!flushAll && !ready.length && text.trim().length > 160) {
+    const splitAt = text.lastIndexOf(' ', 160);
+    const idx = splitAt > 40 ? splitAt : 160;
+    ready.push(text.slice(0, idx).trim());
+    remainder = text.slice(idx).trimStart();
+  }
+  return { ready, remainder };
+}
+
+function buildVoiceProgressUpdate(log: any, targetType: 'agent' | 'crew', targetName: string) {
+  if (!log || typeof log !== 'object') return null;
+  const agentName = String(log.agent || '').trim();
+  const toolName = String(log.tool || '').trim();
+  const title = String(log.title || '').trim();
+  const result = String(log.result || '').trim();
+  const message = String(log.message || '').trim();
+
+  switch (String(log.type || '')) {
+    case 'tool_call':
+      if (!toolName) return null;
+      return agentName
+        ? `${agentName} is using ${toolName}.`
+        : `${targetType === 'crew' ? targetName : 'The agent'} is using ${toolName}.`;
+    case 'tool_result':
+      if (!toolName) return null;
+      return agentName
+        ? `${agentName} finished ${toolName}.`
+        : `${toolName} finished successfully.`;
+    case 'delegation_start':
+      return title ? `Delegating work: ${title}.` : 'Delegating work to a specialist.';
+    case 'crew_delegate':
+      if (log.status === 'completed') return `${agentName || 'A specialist'} finished a delegated step.`;
+      if (log.status === 'failed') return `${agentName || 'A specialist'} hit an issue during a delegated step.`;
+      return title ? `Delegated step in progress: ${title}.` : null;
+    case 'crew_synthesis_step':
+      return 'The coordinator is synthesizing specialist results.';
+    case 'crew_summary':
+      return result ? `Interim summary: ${result.slice(0, 220)}` : null;
+    case 'crew_result':
+      return 'The crew has finished and the final answer is ready.';
+    case 'thought':
+      if (!message) return null;
+      if (/queued|waiting for a worker/i.test(message)) return `${targetName} is queued and waiting to start.`;
+      if (/claimed the run|starting execution/i.test(message)) return `${targetName} is now running.`;
+      if (/launching delegation/i.test(message)) return 'The coordinator is launching specialist delegates.';
+      if (/generated .* runtime task/i.test(message)) return `${targetName} generated runtime tasks and is moving ahead.`;
+      return null;
+    case 'finish':
+      return agentName ? `${agentName} completed its step.` : `${targetName} completed a step.`;
+    case 'error':
+      return message ? `There is an issue: ${message}` : 'An error occurred during execution.';
+    default:
+      return null;
+  }
+}
+
+async function emitVoiceProgress(ws: WebSocket, ctx: VoiceSocketContext, summary: string | null, extra?: any) {
+  const text = String(summary || '').trim();
+  if (!text) return;
+  const now = Date.now();
+  if (ctx.lastVoiceProgressText === text) return;
+  if (ctx.lastVoiceProgressAt && now - ctx.lastVoiceProgressAt < 3000) return;
+
+  ctx.lastVoiceProgressAt = now;
+  ctx.lastVoiceProgressText = text;
+  appendVoiceSessionEvent(ctx.sessionId, 'voice.progress', { text, ...(extra || {}) });
+  sendVoiceSocketEvent(ws, 'voice.progress', { sessionId: ctx.sessionId, text, ...(extra || {}) });
+
+  if (!ctx.autoTts) return;
+  const abortController = new AbortController();
+  ctx.activeProgressTtsAbort = abortController;
+  sendVoiceSocketEvent(ws, 'voice.progress.audio.start', {
+    sessionId: ctx.sessionId,
+    text,
+    mimeType: ctx.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
+    outputFormat: ctx.outputFormat,
+  });
+  let totalBytes = 0;
+  streamSynthesizeVoiceAudio(text, ctx.voiceId, ctx.ttsModelId, ctx.outputFormat, (chunk) => {
+    totalBytes += chunk.length;
+    sendVoiceSocketEvent(ws, 'voice.progress.audio.chunk', {
+      sessionId: ctx.sessionId,
+      text,
+      audio: chunk.toString('base64'),
+      mimeType: ctx.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
+      outputFormat: ctx.outputFormat,
+    });
+  }, abortController.signal)
+    .then(() => {
+      if (ctx.activeProgressTtsAbort === abortController) ctx.activeProgressTtsAbort = null;
+      appendVoiceSessionEvent(ctx.sessionId, 'voice.progress.audio', {
+        text,
+        bytes: totalBytes,
+        output_format: ctx.outputFormat,
+      });
+      sendVoiceSocketEvent(ws, 'voice.progress.audio.complete', {
+        sessionId: ctx.sessionId,
+        text,
+        mimeType: ctx.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg',
+        outputFormat: ctx.outputFormat,
+        bytes: totalBytes,
+      });
+    })
+    .catch((error) => {
+      if (ctx.activeProgressTtsAbort === abortController) ctx.activeProgressTtsAbort = null;
+      if (abortController.signal.aborted) return;
+      appendVoiceSessionEvent(ctx.sessionId, 'voice.progress.error', { message: error?.message || 'Failed to synthesize voice progress' });
+      sendVoiceSocketEvent(ws, 'voice.progress.error', { sessionId: ctx.sessionId, message: error?.message || 'Failed to synthesize voice progress' });
+    });
+}
+
+async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSocketContext, transcriptText: string) {
+  const transcript = String(transcriptText || '').trim();
+  if (!transcript) return;
+  if (current.isExecuting) {
+    sendVoiceSocketEvent(ws, 'voice.busy', { sessionId: current.sessionId, message: 'Voice target is still processing the previous utterance.' });
+    return;
+  }
+  if (current.lastCommittedTranscript === transcript) return;
+
+  current.isExecuting = true;
+  current.lastCommittedTranscript = transcript;
+  try {
+    const currentAttachments = getAttachmentsForScope('voice_session', current.sessionId);
+    current.attachments = currentAttachments;
+    const attachmentContext = buildAttachmentContext(currentAttachments);
+    setVoiceTurnState(ws, current, 'thinking', { transcript });
+    updateVoiceSession(current.sessionId, { status: 'processing', transcript });
+    appendVoiceSessionEvent(current.sessionId, 'stt.final', { text: transcript });
+    sendVoiceSocketEvent(ws, 'stt.final', { sessionId: current.sessionId, text: transcript });
+    await emitVoiceProgress(ws, current, `Understood. Starting ${current.targetName}.`, {
+      targetType: current.targetType,
+      targetId: current.targetId,
+    });
+
+    let reply = '';
+    let executionId: number | null = null;
+    let usage: any = null;
+    let streamedReplyToClient = false;
+
+    if (current.targetType === 'crew') {
+      const crewId = current.targetId;
+      const crewInput = [transcript, attachmentContext].filter(Boolean).join('\n\n');
+      const crewExecution = await createCrewExecutionRecord({
+        db,
+        prisma: getPrisma(),
+        crewId: Number(crewId),
+        initialInput: crewInput || '',
+        retryOf: null,
+        status: 'pending',
+      });
+      executionId = Number(crewExecution.id);
+      await appendCrewExecutionLog({
+        db,
+        prisma: getPrisma(),
+        executionId,
+        type: 'thought',
+        payload: { agent: 'system', message: 'Voice-triggered crew run queued.' },
+      });
+      sendVoiceSocketEvent(ws, 'runtime.event', { event: { type: 'status', message: 'Crew execution queued' }, executionId });
+      await emitVoiceProgress(ws, current, `${current.targetName} has been queued and will start shortly.`, { executionId });
+      await enqueueJob('run_crew', {
+        crewId,
+        executionId,
+        initialInput: crewInput || '',
+        initiatedBy: 'voice_console',
+      });
+
+      let lastLogCount = 0;
+      while (true) {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        const logs = await readCrewExecutionLogsFromStore({
+          prisma: getPrisma(),
+          executionId,
+        });
+        const newLogs = logs.slice(lastLogCount);
+        lastLogCount = logs.length;
+        for (const log of newLogs) {
+          appendVoiceSessionEvent(current.sessionId, 'runtime.event', log);
+          sendVoiceSocketEvent(ws, 'runtime.event', { event: log, executionId });
+          await emitVoiceProgress(ws, current, buildVoiceProgressUpdate(log, current.targetType, current.targetName), {
+            executionId,
+            logType: log?.type || null,
+          });
+        }
+        const execution = await getCrewExecution({
+          prisma: getPrisma(),
+          executionId,
+        });
+        const status = String(execution?.status || 'pending');
+        if (status === 'completed' || status === 'failed' || status === 'canceled') {
+          reply = extractCrewFinalResult(logs).trim();
+          if (!reply) {
+            const lastError = [...logs].reverse().find((log: any) => log?.type === 'error');
+            reply = String(lastError?.message || `Crew run ${status}.`).trim();
+          }
+          break;
+        }
+      }
+    } else {
+      const agentRow = db.prepare('SELECT * FROM agents WHERE id = ?').get(current.agentId) as any;
+      if (!agentRow) throw new Error('Agent not found');
+      const agentSession = await ensureAgentSession(current.agentId, current.sessionId, `voice_${current.sessionId}`);
+      sendVoiceSocketEvent(ws, 'runtime.event', { event: { type: 'status', message: 'Agent execution started' } });
+
+      const directToolsEnabled = agentRow.tools_enabled !== 0 && agentRow.tools_enabled !== false;
+      const linkedToolCount = directToolsEnabled
+        ? Number((db.prepare('SELECT COUNT(*) as count FROM agent_tools WHERE agent_id = ?').get(current.agentId) as any)?.count || 0)
+        : 0;
+      const linkedMcpToolCount = directToolsEnabled
+        ? Number((db.prepare('SELECT COUNT(*) as count FROM agent_mcp_tools WHERE agent_id = ?').get(current.agentId) as any)?.count || 0)
+        : 0;
+      const linkedMcpBundleCount = directToolsEnabled
+        ? Number((db.prepare('SELECT COUNT(*) as count FROM agent_mcp_bundles WHERE agent_id = ?').get(current.agentId) as any)?.count || 0)
+        : 0;
+      const canDirectStream =
+        linkedToolCount === 0 &&
+        linkedMcpToolCount === 0 &&
+        linkedMcpBundleCount === 0 &&
+        ['openai', 'openai-compatible', 'litellm', 'google'].includes(String(agentRow.provider || 'google'));
+
+      if (canDirectStream) {
+        const sessionConversation = await loadSessionConversation(agentSession.id);
+        const sessionSummary = await loadSessionSummary(agentSession.id);
+        const memoryContext = buildMemoryContext(sessionSummary, sessionConversation);
+        const systemPrompt = buildVoiceConversationSystemPrompt(agentRow);
+        const config = await getProviderConfig(agentRow.provider || 'google');
+        const providerType = config.providerType;
+        const model = String(agentRow?.model || 'gemini-1.5-flash');
+        const apiKey = config.apiKey;
+        if (!apiKey) throw new Error(`API Key not found for provider: ${agentRow.provider || 'google'}`);
+
+        sendVoiceSocketEvent(ws, 'runtime.event', { event: { type: 'status', message: 'Using direct voice stream path' } });
+        sendVoiceSocketEvent(ws, 'agent.reply.start', {
+          sessionId: current.sessionId,
+          executionId: null,
+          usage: null,
+        });
+        streamedReplyToClient = true;
+
+        let fullReply = '';
+        let speechBuffer = '';
+        let speechQueue: string[] = [];
+        let speechWorker: Promise<void> | null = null;
+        const mimeType = current.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg';
+        const startTtsIfNeeded = () => {
+          if (!current.autoTts || speechWorker) return;
+          speechWorker = (async () => {
+            const abortController = new AbortController();
+            current.activeTtsAbort = abortController;
+            sendVoiceSocketEvent(ws, 'tts.processing', { sessionId: current.sessionId });
+            sendVoiceSocketEvent(ws, 'tts.start', {
+              sessionId: current.sessionId,
+              mimeType,
+              outputFormat: current.outputFormat,
+            });
+            let totalBytes = 0;
+            let index = 0;
+            try {
+              while (speechQueue.length) {
+                const segment = speechQueue.shift();
+                if (!segment) continue;
+                setVoiceTurnState(ws, current, 'speaking');
+                sendVoiceSocketEvent(ws, 'tts.segment.start', {
+                  sessionId: current.sessionId,
+                  index,
+                  text: segment,
+                });
+                await streamSynthesizeVoiceAudio(segment, current.voiceId, current.ttsModelId, current.outputFormat, (chunk) => {
+                  totalBytes += chunk.length;
+                  sendVoiceSocketEvent(ws, 'tts.chunk', {
+                    sessionId: current.sessionId,
+                    audio: chunk.toString('base64'),
+                    mimeType,
+                    outputFormat: current.outputFormat,
+                  });
+                }, abortController.signal);
+                sendVoiceSocketEvent(ws, 'tts.segment.complete', {
+                  sessionId: current.sessionId,
+                  index,
+                  text: segment,
+                });
+                index += 1;
+              }
+              appendVoiceSessionEvent(current.sessionId, 'tts.audio', {
+                bytes: totalBytes,
+                output_format: current.outputFormat,
+              });
+              sendVoiceSocketEvent(ws, 'tts.complete', {
+                sessionId: current.sessionId,
+                mimeType,
+                outputFormat: current.outputFormat,
+                bytes: totalBytes,
+              });
+            } finally {
+              if (current.activeTtsAbort === abortController) current.activeTtsAbort = null;
+              speechWorker = null;
+            }
+          })();
+        };
+        const enqueueSpeechSegments = (textChunk: string, flushAll = false) => {
+          speechBuffer = `${speechBuffer}${textChunk}`;
+          const { ready, remainder } = extractReadySpeechSegments(speechBuffer, flushAll);
+          speechBuffer = remainder;
+          if (ready.length) {
+            speechQueue.push(...ready);
+            startTtsIfNeeded();
+          }
+        };
+        const onTextDelta = (deltaText: string) => {
+          const clean = String(deltaText || '');
+          if (!clean) return;
+          fullReply += clean;
+          sendVoiceSocketEvent(ws, 'agent.reply.delta', {
+            sessionId: current.sessionId,
+            text: clean,
+            fullText: fullReply,
+            executionId: null,
+          });
+          enqueueSpeechSegments(clean, false);
+        };
+
+        const userPrompt = [
+          memoryContext ? `Conversation memory:\n${memoryContext}` : '',
+          attachmentContext ? `${attachmentContext}` : '',
+          `User said:\n${transcript}`,
+        ].filter(Boolean).join('\n\n');
+
+        setVoiceTurnState(ws, current, 'thinking');
+        if (providerType === 'openai' || providerType === 'openai-compatible' || providerType === 'litellm') {
+          const openai = new OpenAI({
+            apiKey,
+            baseURL: config.apiBase,
+            fetch: async (url: string | Request | URL, init?: RequestInit) => {
+              const headers = new Headers(init?.headers);
+              Array.from(headers.keys()).forEach(k => {
+                if (k.toLowerCase().startsWith('x-stainless')) headers.delete(k);
+              });
+              headers.set('User-Agent', 'curl/8.7.1');
+              headers.set('x-litellm-api-key', apiKey!);
+              return fetch(url, { ...init, headers });
+            }
+          });
+          const stream = await openai.chat.completions.create({
+            model,
+            stream: true,
+            temperature: normalizeNumber(agentRow.temperature) ?? undefined,
+            max_tokens: normalizeNumber(agentRow.max_tokens) ?? undefined,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+          });
+          for await (const chunk of stream as any) {
+            const delta = String(chunk?.choices?.[0]?.delta?.content || '');
+            if (delta) onTextDelta(delta);
+          }
+        } else if (providerType === 'google') {
+          const ai = new GoogleGenAI({ apiKey });
+          const stream = await (ai.models as any).generateContentStream({
+            model,
+            contents: `${systemPrompt}\n\n${userPrompt}`,
+            config: {
+              temperature: normalizeNumber(agentRow.temperature) ?? undefined,
+              maxOutputTokens: normalizeNumber(agentRow.max_tokens) ?? undefined,
+            }
+          });
+          for await (const chunk of stream) {
+            const delta = String((chunk as any)?.text || '');
+            if (delta) onTextDelta(delta);
+          }
+        }
+
+        enqueueSpeechSegments('', true);
+        if (speechWorker) await speechWorker;
+        reply = fullReply.trim();
+        if (!reply) reply = 'I did not generate a response.';
+        const nextConversation = [
+          ...sessionConversation,
+          {
+            role: 'user',
+            content: transcript,
+            ts: new Date().toISOString(),
+            ...(currentAttachments.length ? { attachments: currentAttachments } : {}),
+          },
+          { role: 'assistant', content: reply, ts: new Date().toISOString() },
+        ].slice(-12);
+        await saveSessionConversation(agentSession.id, nextConversation);
+        sendVoiceSocketEvent(ws, 'agent.reply.complete', {
+          sessionId: current.sessionId,
+          text: reply,
+          executionId: null,
+          usage: null,
+        });
+      } else {
+        const result = await runAgent(
+          agentRow,
+          { description: transcript, expected_output: 'A helpful spoken response.' },
+          '',
+          (log) => {
+            appendVoiceSessionEvent(current.sessionId, 'runtime.event', log);
+            sendVoiceSocketEvent(ws, 'runtime.event', { event: log });
+            void emitVoiceProgress(ws, current, buildVoiceProgressUpdate(log, current.targetType, current.targetName), {
+              logType: log?.type || null,
+            });
+          },
+          {
+            initiatedBy: 'voice_console',
+            sessionId: agentSession.id,
+            userId: agentSession.user_id ?? `voice_${current.sessionId}`,
+            userMessage: transcript,
+            attachments: currentAttachments,
+          }
+        );
+        reply = String(result?.text || '').trim();
+        executionId = Number(result?.exec_id || 0) || null;
+        usage = result?.usage ?? null;
+      }
+    }
+
+    updateVoiceSession(current.sessionId, { status: 'speaking', reply_text: reply });
+    appendVoiceSessionEvent(current.sessionId, 'agent.reply', {
+      text: reply,
+      execution_id: executionId,
+      usage,
+    });
+    const replyChunks = splitVoiceReplyIntoChunks(reply);
+    if (!streamedReplyToClient) {
+      sendVoiceSocketEvent(ws, 'agent.reply.start', {
+        sessionId: current.sessionId,
+        executionId,
+        usage,
+      });
+      let replySoFar = '';
+      for (const chunk of replyChunks) {
+        replySoFar = replySoFar ? `${replySoFar} ${chunk}` : chunk;
+        sendVoiceSocketEvent(ws, 'agent.reply.delta', {
+          sessionId: current.sessionId,
+          text: chunk,
+          fullText: replySoFar,
+          executionId,
+        });
+      }
+      sendVoiceSocketEvent(ws, 'agent.reply.complete', {
+        sessionId: current.sessionId,
+        text: reply,
+        executionId,
+        usage,
+      });
+    }
+    sendVoiceSocketEvent(ws, 'agent.reply', {
+      sessionId: current.sessionId,
+      text: reply,
+      executionId,
+      usage,
+    });
+
+    if (reply && current.autoTts) {
+      const mimeType = current.outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg';
+      const abortController = new AbortController();
+      current.activeTtsAbort = abortController;
+      setVoiceTurnState(ws, current, 'speaking');
+      sendVoiceSocketEvent(ws, 'tts.processing', { sessionId: current.sessionId });
+      sendVoiceSocketEvent(ws, 'tts.start', {
+        sessionId: current.sessionId,
+        mimeType,
+        outputFormat: current.outputFormat,
+      });
+      let totalBytes = 0;
+      const ttsChunks = replyChunks.length ? replyChunks : [reply];
+      for (let index = 0; index < ttsChunks.length; index += 1) {
+        const ttsChunk = ttsChunks[index];
+        sendVoiceSocketEvent(ws, 'tts.segment.start', {
+          sessionId: current.sessionId,
+          index,
+          text: ttsChunk,
+        });
+        await streamSynthesizeVoiceAudio(ttsChunk, current.voiceId, current.ttsModelId, current.outputFormat, (chunk) => {
+          totalBytes += chunk.length;
+          sendVoiceSocketEvent(ws, 'tts.chunk', {
+            sessionId: current.sessionId,
+            audio: chunk.toString('base64'),
+            mimeType,
+            outputFormat: current.outputFormat,
+          });
+        }, abortController.signal);
+        sendVoiceSocketEvent(ws, 'tts.segment.complete', {
+          sessionId: current.sessionId,
+          index,
+          text: ttsChunk,
+        });
+      }
+      if (current.activeTtsAbort === abortController) current.activeTtsAbort = null;
+      appendVoiceSessionEvent(current.sessionId, 'tts.audio', {
+        bytes: totalBytes,
+        output_format: current.outputFormat,
+      });
+      sendVoiceSocketEvent(ws, 'tts.complete', {
+        sessionId: current.sessionId,
+        mimeType,
+        outputFormat: current.outputFormat,
+        bytes: totalBytes,
+      });
+    }
+
+    updateVoiceSession(current.sessionId, { status: 'completed' });
+    appendVoiceSessionEvent(current.sessionId, 'session.completed', {});
+    sendVoiceSocketEvent(ws, 'session.completed', { sessionId: current.sessionId });
+    setVoiceTurnState(ws, current, 'idle');
+  } finally {
+    current.activeTtsAbort = null;
+    current.isExecuting = false;
+  }
+}
+
+function openRealtimeSttSocket(ctx: VoiceSocketContext, browserSocket: WebSocket) {
+  const apiKey = getVoiceCredentialApiKey();
+  if (!apiKey) throw new Error('ElevenLabs voice credential is not configured.');
+  if (ctx.sttSocket && ctx.sttSocket.readyState === WebSocket.OPEN) return ctx.sttSocket;
+
+  const params = new URLSearchParams({
+    model_id: String(ctx.sttModelId || DEFAULT_STT_MODEL),
+    sample_rate: String(ctx.sampleRate || DEFAULT_STT_SAMPLE_RATE),
+    audio_format: `pcm_${ctx.sampleRate || DEFAULT_STT_SAMPLE_RATE}`,
+  });
+  if (ctx.vadEnabled === false) {
+    params.set('commit_strategy', 'manual');
+  } else {
+    params.set('commit_strategy', 'vad');
+    params.set('vad_silence_threshold_secs', String(ctx.vadSilenceThresholdSecs ?? DEFAULT_VAD_SILENCE_THRESHOLD_SECS));
+    params.set('vad_threshold', String(ctx.vadThreshold ?? DEFAULT_VAD_THRESHOLD));
+    params.set('min_speech_duration_ms', String(ctx.minSpeechDurationMs ?? DEFAULT_MIN_SPEECH_DURATION_MS));
+    params.set('min_silence_duration_ms', String(ctx.minSilenceDurationMs ?? DEFAULT_MIN_SILENCE_DURATION_MS));
+    params.set('max_tokens_to_recompute', String(ctx.maxTokensToRecompute ?? DEFAULT_MAX_TOKENS_TO_RECOMPUTE));
+  }
+  if (ctx.languageCode) {
+    params.set('language_code', ctx.languageCode);
+  }
+  const url = `wss://api.elevenlabs.io/v1/speech-to-text/realtime?${params.toString()}`;
+  const sttSocket = new WebSocket(url, {
+    headers: {
+      'xi-api-key': apiKey,
+    },
+  });
+
+  sttSocket.on('open', () => {
+    sendVoiceSocketEvent(browserSocket, 'stt.socket.open', { sessionId: ctx.sessionId });
+    setVoiceTurnState(browserSocket, ctx, 'listening');
+  });
+
+  sttSocket.on('message', (raw) => {
+    try {
+      const payload = JSON.parse(String(raw || '{}'));
+      appendVoiceSessionEvent(ctx.sessionId, 'stt.realtime', payload);
+      const partial = String(payload?.text || payload?.transcript || '').trim();
+      const messageType = String(payload?.message_type || '');
+      const speechStarted = messageType === 'speech_started' || messageType === 'speech_start';
+      const speechStopped = messageType === 'speech_stopped' || messageType === 'speech_end';
+      if (speechStarted || (partial && !ctx.isUserSpeaking)) {
+        ctx.isUserSpeaking = true;
+        interruptVoicePlayback(browserSocket, ctx, 'user_speaking');
+        appendVoiceSessionEvent(ctx.sessionId, 'speech.started', { raw: payload });
+        sendVoiceSocketEvent(browserSocket, 'speech.started', { sessionId: ctx.sessionId, raw: payload });
+        setVoiceTurnState(browserSocket, ctx, 'listening');
+      }
+      if (speechStopped) {
+        ctx.isUserSpeaking = false;
+        appendVoiceSessionEvent(ctx.sessionId, 'speech.stopped', { raw: payload });
+        sendVoiceSocketEvent(browserSocket, 'speech.stopped', { sessionId: ctx.sessionId, raw: payload });
+      }
+      const normalizedType =
+        messageType === 'committed_transcript' || messageType === 'committed_transcript_with_timestamps' || payload?.is_final || payload?.final
+          ? 'stt.final'
+          : messageType === 'partial_transcript'
+            ? 'stt.partial'
+            : 'stt.event';
+      if (partial && normalizedType !== 'stt.event') {
+        if (normalizedType === 'stt.final') {
+          ctx.isUserSpeaking = false;
+          appendVoiceSessionEvent(ctx.sessionId, 'speech.stopped', { raw: payload, transcript: partial });
+          sendVoiceSocketEvent(browserSocket, 'speech.stopped', { sessionId: ctx.sessionId, raw: payload, transcript: partial });
+          updateVoiceSession(ctx.sessionId, { transcript: partial });
+          void executeVoiceTargetFromTranscript(browserSocket, ctx, partial);
+        } else {
+          sendVoiceSocketEvent(browserSocket, normalizedType, { sessionId: ctx.sessionId, text: partial, raw: payload });
+        }
+      } else {
+        sendVoiceSocketEvent(browserSocket, 'stt.event', { sessionId: ctx.sessionId, raw: payload });
+      }
+    } catch {
+      sendVoiceSocketEvent(browserSocket, 'stt.event', { sessionId: ctx.sessionId, raw: String(raw || '') });
+    }
+  });
+
+  sttSocket.on('close', () => {
+    if (ctx.sttSocket === sttSocket) ctx.sttSocket = null;
+    sendVoiceSocketEvent(browserSocket, 'stt.socket.closed', { sessionId: ctx.sessionId });
+  });
+
+  sttSocket.on('error', (error: any) => {
+    sendVoiceSocketEvent(browserSocket, 'error', { message: error?.message || 'Realtime STT socket error' });
+  });
+
+  ctx.sttSocket = sttSocket;
+  return sttSocket;
 }
 
 function formatConversation(messages: Array<{ role: string; content: string; ts?: string }>): string {
@@ -485,7 +3394,7 @@ async function createWorkflowRun(workflowId: number, triggerType: string, input:
   return await createRuntimeWorkflowRun(workflowId, triggerType, input, graph);
 }
 
-async function runWorkflowExecution(runId: number): Promise<{ run_id: number; status: string; output: any }> {
+async function runWorkflowExecution(runId: number, userId?: string | null): Promise<{ run_id: number; status: string; output: any }> {
   const run = await getRuntimeWorkflowRun(runId);
   if (!run) throw new Error('Workflow run not found');
   const workflow = await getPrisma().orchestratorWorkflow.findUnique({ where: { id: run.workflow_id } });
@@ -512,6 +3421,7 @@ async function runWorkflowExecution(runId: number): Promise<{ run_id: number; st
   }
 
   const input = safeJsonParse<any>(run.input, {});
+  const workflowGuidance = buildWorkflowLearningGuidance(Number(workflow.id), userId || null, input);
   const logs: any[] = [];
   const nodeOutputs: Record<string, any> = {};
   const queue = startNodes.map((node) => node.id);
@@ -536,17 +3446,21 @@ async function runWorkflowExecution(runId: number): Promise<{ run_id: number; st
 
     let nodeResult: any = null;
     if (type === 'trigger') {
-      nodeResult = { input };
+      nodeResult = {
+        input,
+        learning_guidance: workflowGuidance || undefined,
+      };
     } else if (type === 'agent') {
       const agentId = Number(data.agentId);
       const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any;
       if (!agent) throw new Error(`Workflow agent node references missing agent ${agentId}`);
-      const taskText = renderWorkflowTemplate(
+      const renderedTask = renderWorkflowTemplate(
         data.prompt || data.task || 'Handle the workflow input: {{input.message}}',
         input,
         nodeOutputs,
         lastOutput
       ) || 'Handle the workflow input.';
+      const taskText = workflowGuidance ? `${workflowGuidance}\n\nWorkflow task:\n${renderedTask}` : renderedTask;
       const jobId = await enqueueJob('run_agent', {
         agentId,
         task: taskText,
@@ -569,23 +3483,34 @@ async function runWorkflowExecution(runId: number): Promise<{ run_id: number; st
         nodeOutputs,
         lastOutput
       ) || '';
-      const execInfo = db.prepare(`
-        INSERT INTO crew_executions (crew_id, status, initial_input, retry_of, logs)
-        VALUES (?, 'running', ?, NULL, '[]')
-      `).run(crewId, initialInput);
-      const executionId = Number(execInfo.lastInsertRowid);
+      const crewInput = workflowGuidance ? `${workflowGuidance}\n\nWorkflow objective:\n${initialInput}` : initialInput;
+      const crewExecution = await createCrewExecutionRecord({
+        db,
+        prisma: getPrisma(),
+        crewId: Number(crewId),
+        initialInput: crewInput,
+        retryOf: null,
+        status: 'running',
+      });
+      const executionId = Number(crewExecution.id);
       await runCrewExecution(
         crewId,
         executionId,
-        initialInput,
-        { initiatedBy: 'workflow_node_crew' }
+        crewInput,
+        { initiatedBy: 'workflow_node_crew', userId: userId || undefined }
       );
-      const crewExecution = db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any;
-      const crewLogs = readCrewExecutionLogs(executionId);
+      const crewExecutionState = await getCrewExecution({
+        prisma: getPrisma(),
+        executionId,
+      });
+      const crewLogs = await readCrewExecutionLogsFromStore({
+        prisma: getPrisma(),
+        executionId,
+      });
       nodeResult = {
         text: extractCrewFinalResult(crewLogs),
         execution_id: executionId,
-        status: crewExecution?.status || 'completed',
+        status: crewExecutionState?.status || 'completed',
       };
     } else if (type === 'loop') {
       const items = parseWorkflowList(
@@ -733,14 +3658,18 @@ function summarizeToolArgsForPrompt(args: any, maxChars = 500): string {
   }
 }
 
-function describeToolForPrompt(tool: any): string {
+function describeToolForPrompt(tool: any, schema?: any): string {
   let requiredArgsText = '';
-  try {
-    const cfg = tool.config ? JSON.parse(tool.config) : {};
-    if (Array.isArray(cfg?.requiredArgs) && cfg.requiredArgs.length) {
-      requiredArgsText = ` args:${cfg.requiredArgs.map((x: any) => String(x)).join(',')}`;
-    }
-  } catch {}
+  if (schema) {
+    requiredArgsText = summarizeInputSchemaForPrompt(schema);
+  } else {
+    try {
+      const cfg = tool.config ? JSON.parse(tool.config) : {};
+      if (Array.isArray(cfg?.requiredArgs) && cfg.requiredArgs.length) {
+        requiredArgsText = ` required:${cfg.requiredArgs.map((x: any) => String(x)).join(',')}`;
+      }
+    } catch {}
+  }
   const name = String(tool?.name || 'tool');
   const description = compactPromptText(tool?.description || 'No description provided.', 110);
   return `- ${name}: ${description}${requiredArgsText}`;
@@ -795,623 +3724,27 @@ app.put('/api/platform/ingestion', async (req, res) => {
 });
 
 // MCP exposure configuration
-app.get('/api/mcp/config', (_req, res) => {
-  const token = getSetting(SETTINGS_KEY_MCP_AUTH_TOKEN);
-  res.json({ auth_token: token || null });
-});
-
-app.put('/api/mcp/config', async (req, res) => {
-  const { auth_token } = req.body || {};
-  if (auth_token === '' || auth_token == null) {
-    await setSetting(SETTINGS_KEY_MCP_AUTH_TOKEN, null);
-    return res.json({ auth_token: null });
-  }
-  if (typeof auth_token !== 'string') return res.status(400).json({ error: 'auth_token must be a string' });
-  await setSetting(SETTINGS_KEY_MCP_AUTH_TOKEN, auth_token.trim());
-  res.json({ auth_token: auth_token.trim() });
-});
-
-// MCP exposed tools
-app.get('/api/mcp/exposed-tools', async (_req, res) => {
-  try {
-    const prisma = getPrisma();
-    const [tools, exposures] = await Promise.all([
-      prisma.orchestratorTool.findMany({
-        orderBy: { name: 'asc' },
-        select: { id: true, name: true, description: true, category: true, type: true },
-      }),
-      prisma.orchestratorMcpExposedTool.findMany({
-        select: { toolId: true, exposedName: true, description: true },
-      }),
-    ]);
-    const exposureByToolId = new Map(exposures.map((row) => [row.toolId, row]));
-    res.json(tools.map((tool) => {
-      const exposure = exposureByToolId.get(tool.id);
-      return {
-        tool_id: tool.id,
-        tool_name: tool.name,
-        tool_description: tool.description,
-        category: tool.category,
-        tool_type: tool.type,
-        exposed_name: exposure?.exposedName ?? null,
-        exposed_description: exposure?.description ?? null,
-      };
-    }));
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/mcp/exposed-tools/:toolId/versions', (req, res) => {
-  const toolId = Number(req.params.toolId);
-  if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
-  const tool = db.prepare('SELECT id, name FROM tools WHERE id = ?').get(toolId) as any;
-  if (!tool) return res.status(404).json({ error: 'Tool not found' });
-  const versions = db.prepare(`
-    SELECT id, tool_id, version_number, exposed_name, description, is_exposed, change_kind, created_at
-    FROM mcp_exposed_tool_versions
-    WHERE tool_id = ?
-    ORDER BY version_number DESC, id DESC
-  `).all(toolId);
-  res.json({ tool, versions });
-});
-
-app.put('/api/mcp/exposed-tools/:toolId', async (req, res) => {
-  const toolId = Number(req.params.toolId);
-  if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
-  const { exposed, exposed_name, description } = req.body || {};
-  const tool = db.prepare('SELECT id, name, description FROM tools WHERE id = ?').get(toolId) as any;
-  if (!tool) return res.status(404).json({ error: 'Tool not found' });
-
-  const currentVersion = Number((db.prepare('SELECT MAX(version_number) as max_version FROM mcp_exposed_tool_versions WHERE tool_id = ?').get(toolId) as any)?.max_version || 0);
-
-  try {
-    const prisma = getPrisma();
-    if (!exposed) {
-      await prisma.orchestratorMcpExposedTool.deleteMany({ where: { toolId } });
-      await prisma.orchestratorAgentMcpTool.deleteMany({ where: { toolId } });
-      await prisma.orchestratorMcpExposedToolVersion.create({
-        data: {
-          toolId,
-          versionNumber: currentVersion + 1,
-          exposedName: null,
-          description: null,
-          isExposed: false,
-          changeKind: 'disable',
-        },
-      });
-      await refreshPersistentMirror();
-      return res.json({ exposed: false });
-    }
-
-    const name = typeof exposed_name === 'string' && exposed_name.trim()
-      ? exposed_name.trim()
-      : String(tool.name).toLowerCase().replace(/[^a-z0-9_\\-]/g, '_');
-    const desc = typeof description === 'string' && description.trim()
-      ? description.trim()
-      : (tool.description || '');
-
-    await prisma.orchestratorMcpExposedTool.upsert({
-      where: { toolId },
-      update: {
-        exposedName: name,
-        description: desc,
-        updatedAt: new Date(),
-      },
-      create: {
-        toolId,
-        exposedName: name,
-        description: desc,
-      },
-    });
-    await prisma.orchestratorMcpExposedToolVersion.create({
-      data: {
-        toolId,
-        versionNumber: currentVersion + 1,
-        exposedName: name,
-        description: desc,
-        isExposed: true,
-        changeKind: currentVersion === 0 ? 'create' : 'update',
-      },
-    });
-    await refreshPersistentMirror();
-
-    res.json({ exposed: true, exposed_name: name, description: desc });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message || 'Failed to update exposed tool' });
-  }
-});
-
-app.post('/api/mcp/exposed-tools/:toolId/restore/:versionId', async (req, res) => {
-  const toolId = Number(req.params.toolId);
-  const versionId = Number(req.params.versionId);
-  if (!Number.isFinite(toolId) || !Number.isFinite(versionId)) return res.status(400).json({ error: 'Invalid tool or version id' });
-  const version = db.prepare(`
-    SELECT *
-    FROM mcp_exposed_tool_versions
-    WHERE id = ? AND tool_id = ?
-    LIMIT 1
-  `).get(versionId, toolId) as any;
-  if (!version) return res.status(404).json({ error: 'Exposure version not found' });
-  const currentVersion = Number((db.prepare('SELECT MAX(version_number) as max_version FROM mcp_exposed_tool_versions WHERE tool_id = ?').get(toolId) as any)?.max_version || 0);
-  try {
-    const prisma = getPrisma();
-    if (!version.is_exposed) {
-      await prisma.orchestratorMcpExposedTool.deleteMany({ where: { toolId } });
-      await prisma.orchestratorAgentMcpTool.deleteMany({ where: { toolId } });
-      await prisma.orchestratorMcpExposedToolVersion.create({
-        data: {
-          toolId,
-          versionNumber: currentVersion + 1,
-          exposedName: null,
-          description: null,
-          isExposed: false,
-          changeKind: 'restore',
-        },
-      });
-      await refreshPersistentMirror();
-      return res.json({ success: true, exposed: false, version: currentVersion + 1 });
-    }
-    await prisma.orchestratorMcpExposedTool.upsert({
-      where: { toolId },
-      update: {
-        exposedName: version.exposed_name,
-        description: version.description || '',
-        updatedAt: new Date(),
-      },
-      create: {
-        toolId,
-        exposedName: version.exposed_name,
-        description: version.description || '',
-      },
-    });
-    await prisma.orchestratorMcpExposedToolVersion.create({
-      data: {
-        toolId,
-        versionNumber: currentVersion + 1,
-        exposedName: version.exposed_name,
-        description: version.description || '',
-        isExposed: true,
-        changeKind: 'restore',
-      },
-    });
-    await refreshPersistentMirror();
-    res.json({ success: true, exposed: true, version: currentVersion + 1 });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message || 'Failed to restore exposed tool version' });
-  }
-});
-
-// MCP bundles: expose a selected set of tools as one MCP endpoint.
-app.get('/api/mcp/bundles', async (_req, res) => {
-  try {
-    const prisma = getPrisma();
-    const [bundles, bundleTools, tools, exposures] = await Promise.all([
-      prisma.orchestratorMcpBundle.findMany({ orderBy: { updatedAt: 'desc' } }),
-      prisma.orchestratorMcpBundleTool.findMany({ orderBy: [{ bundleId: 'asc' }, { toolId: 'asc' }] }),
-      prisma.orchestratorTool.findMany({
-        select: { id: true, name: true, description: true, category: true },
-      }),
-      prisma.orchestratorMcpExposedTool.findMany({
-        select: { toolId: true, exposedName: true },
-      }),
-    ]);
-    const toolById = new Map(tools.map((tool) => [tool.id, tool]));
-    const exposureByToolId = new Map(exposures.map((row) => [row.toolId, row.exposedName]));
-    const toolsByBundle = new Map<number, any[]>();
-    for (const row of bundleTools) {
-      const tool = toolById.get(row.toolId);
-      if (!tool) continue;
-      if (!toolsByBundle.has(row.bundleId)) toolsByBundle.set(row.bundleId, []);
-      toolsByBundle.get(row.bundleId)!.push({
-        tool_id: tool.id,
-        tool_name: tool.name,
-        tool_description: tool.description,
-        category: tool.category,
-        exposed_name: exposureByToolId.get(tool.id) || null,
-      });
-    }
-    res.json(bundles.map((b) => ({
-      id: b.id,
-      name: b.name,
-      slug: b.slug,
-      description: b.description,
-      created_at: b.createdAt,
-      updated_at: b.updatedAt,
-      tools: toolsByBundle.get(b.id) || [],
-      tool_count: (toolsByBundle.get(b.id) || []).length,
-    })));
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-function getMcpBundleDependencies(bundleId: number) {
-  const agents = db.prepare(`
-    SELECT a.id, a.name
-    FROM agent_mcp_bundles amb
-    JOIN agents a ON a.id = amb.agent_id
-    WHERE amb.bundle_id = ?
-    ORDER BY a.name ASC
-  `).all(bundleId) as any[];
-  return {
-    agents,
-    agents_count: agents.length,
-  };
-}
-
-app.get('/api/mcp/bundles/:id/versions', (req, res) => {
-  const bundleId = Number(req.params.id);
-  if (!Number.isFinite(bundleId)) return res.status(400).json({ error: 'Invalid bundle id' });
-  const bundle = db.prepare('SELECT id, name, slug FROM mcp_bundles WHERE id = ?').get(bundleId) as any;
-  if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
-  const versions = db.prepare(`
-    SELECT id, bundle_id, version_number, name, slug, description, tool_ids, change_kind, created_at
-    FROM mcp_bundle_versions
-    WHERE bundle_id = ?
-    ORDER BY version_number DESC, id DESC
-  `).all(bundleId);
-  const dependencies = getMcpBundleDependencies(bundleId);
-  res.json({ bundle, versions, dependencies });
-});
-
-app.post('/api/mcp/bundles', async (req, res) => {
-  const { name, slug, description, tool_ids } = req.body || {};
-  const parsedIds = Array.isArray(tool_ids) ? [...new Set(tool_ids.map((v: any) => Number(v)).filter((n: number) => Number.isFinite(n)))] : [];
-  if (!parsedIds.length) return res.status(400).json({ error: 'tool_ids must include at least one tool' });
-  const cleanName = typeof name === 'string' && name.trim() ? name.trim() : 'MCP Bundle';
-  const cleanSlug = (typeof slug === 'string' && slug.trim() ? slug.trim() : cleanName.toLowerCase())
-    .replace(/[^a-z0-9_-]/gi, '_')
-    .toLowerCase();
-  if (!cleanSlug) return res.status(400).json({ error: 'Invalid slug' });
-
-  try {
-    const prisma = getPrisma();
-    const existing = await prisma.orchestratorMcpBundle.findUnique({ where: { slug: cleanSlug } });
-    let bundleId: number;
-    let previousVersion = 0;
-    if (existing) {
-      bundleId = existing.id;
-      previousVersion = Number((await prisma.orchestratorMcpBundleVersion.aggregate({
-        where: { bundleId },
-        _max: { versionNumber: true },
-      }))._max.versionNumber || 0);
-      await prisma.orchestratorMcpBundle.update({
-        where: { id: bundleId },
-        data: {
-          name: cleanName,
-          description: typeof description === 'string' ? description : null,
-          updatedAt: new Date(),
-        },
-      });
-    } else {
-      const created = await prisma.orchestratorMcpBundle.create({
-        data: {
-          name: cleanName,
-          slug: cleanSlug,
-          description: typeof description === 'string' ? description : null,
-        },
-      });
-      bundleId = created.id;
-    }
-
-    const validTools = await prisma.orchestratorTool.findMany({
-      where: { id: { in: parsedIds } },
-      select: { id: true },
-    });
-    await prisma.orchestratorMcpBundleTool.deleteMany({ where: { bundleId } });
-    if (validTools.length) {
-      await prisma.orchestratorMcpBundleTool.createMany({
-        data: validTools.map((row) => ({ bundleId, toolId: row.id })),
-        skipDuplicates: true,
-      });
-    }
-    await prisma.orchestratorMcpBundleVersion.create({
-      data: {
-        bundleId,
-        versionNumber: previousVersion + 1 || 1,
-        name: cleanName,
-        slug: cleanSlug,
-        description: typeof description === 'string' ? description : null,
-        toolIds: JSON.stringify(validTools.map((row) => row.id)),
-        changeKind: previousVersion === 0 ? 'create' : 'update',
-      },
-    });
-    await refreshPersistentMirror();
-    res.json({ success: true, id: bundleId, slug: cleanSlug });
-  } catch (e: any) {
-    res.status(400).json({ error: e.message || 'Failed to save MCP bundle' });
-  }
-});
-
-app.post('/api/mcp/bundles/:id/restore/:versionId', async (req, res) => {
-  const bundleId = Number(req.params.id);
-  const versionId = Number(req.params.versionId);
-  if (!Number.isFinite(bundleId) || !Number.isFinite(versionId)) return res.status(400).json({ error: 'Invalid bundle or version id' });
-  const bundle = db.prepare('SELECT id FROM mcp_bundles WHERE id = ?').get(bundleId) as any;
-  if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
-  const version = db.prepare(`
-    SELECT *
-    FROM mcp_bundle_versions
-    WHERE id = ? AND bundle_id = ?
-    LIMIT 1
-  `).get(versionId, bundleId) as any;
-  if (!version) return res.status(404).json({ error: 'Bundle version not found' });
-  let toolIds: number[] = [];
-  try {
-    const parsed = JSON.parse(version.tool_ids || '[]');
-    toolIds = Array.isArray(parsed) ? parsed.map((x: any) => Number(x)).filter((x: number) => Number.isFinite(x)) : [];
-  } catch {}
-  const currentVersion = Number((db.prepare('SELECT MAX(version_number) as max_version FROM mcp_bundle_versions WHERE bundle_id = ?').get(bundleId) as any)?.max_version || 0);
-  try {
-    const prisma = getPrisma();
-    const validTools = await prisma.orchestratorTool.findMany({
-      where: { id: { in: toolIds } },
-      select: { id: true },
-    });
-    await prisma.orchestratorMcpBundle.update({
-      where: { id: bundleId },
-      data: {
-        name: version.name,
-        slug: version.slug,
-        description: version.description || null,
-        updatedAt: new Date(),
-      },
-    });
-    await prisma.orchestratorMcpBundleTool.deleteMany({ where: { bundleId } });
-    if (validTools.length) {
-      await prisma.orchestratorMcpBundleTool.createMany({
-        data: validTools.map((row) => ({ bundleId, toolId: row.id })),
-        skipDuplicates: true,
-      });
-    }
-    await prisma.orchestratorMcpBundleVersion.create({
-      data: {
-        bundleId,
-        versionNumber: currentVersion + 1,
-        name: version.name,
-        slug: version.slug,
-        description: version.description || null,
-        toolIds: JSON.stringify(validTools.map((row) => row.id)),
-        changeKind: 'restore',
-      },
-    });
-    await refreshPersistentMirror();
-    res.json({ success: true, version: currentVersion + 1 });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message || 'Failed to restore bundle version' });
-  }
-});
-
-app.delete('/api/mcp/bundles/:id', async (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid bundle id' });
-  const force = String(req.query.force || '') === 'true';
-  const dependencies = getMcpBundleDependencies(id);
-  if (dependencies.agents_count > 0 && !force) {
-    return res.status(409).json({ error: 'Bundle is still linked to agents.', dependencies });
-  }
-  try {
-    const prisma = getPrisma();
-    await prisma.orchestratorAgentMcpBundle.deleteMany({ where: { bundleId: id } });
-    await prisma.orchestratorMcpBundleTool.deleteMany({ where: { bundleId: id } });
-    await prisma.orchestratorMcpBundleVersion.deleteMany({ where: { bundleId: id } });
-    await prisma.orchestratorMcpBundle.delete({ where: { id } });
-    await refreshPersistentMirror();
-    res.json({ success: true, forced: force });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message || 'Failed to delete MCP bundle' });
-  }
+registerMcpAdminRoutes({
+  app,
+  db,
+  getPrisma,
+  getSetting,
+  setSetting,
+  refreshPersistentMirror,
+  settingsKeyMcpAuthToken: SETTINGS_KEY_MCP_AUTH_TOKEN,
+  getToolInputSchemaForRecord,
+  executeTool,
 });
 
 // Per-project platform linkage (local project -> platform project)
-app.get('/api/projects/:id/platform-link', async (req, res) => {
-  try {
-    const localProjectId = Number(req.params.id);
-    if (!Number.isFinite(localProjectId)) return res.status(400).json({ error: 'Invalid project id' });
-    const row = await getPrisma().orchestratorProjectLink.findUnique({
-      where: { projectId: localProjectId },
-      select: { platformProjectId: true },
-    });
-    res.json({ platformProjectId: row?.platformProjectId ?? null });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.put('/api/projects/:id/platform-link', async (req, res) => {
-  try {
-    const prisma = getPrisma();
-    const localProjectId = Number(req.params.id);
-    if (!Number.isFinite(localProjectId)) return res.status(400).json({ error: 'Invalid project id' });
-
-    let localProject = await prisma.orchestratorProject.findUnique({ where: { id: localProjectId }, select: { id: true } });
-    if (!localProject) {
-      const localProjectName = req.body?.localProjectName as unknown;
-      if (typeof localProjectName === 'string' && localProjectName.trim()) {
-        localProject = await prisma.orchestratorProject.findFirst({
-          where: { name: localProjectName.trim() },
-          orderBy: { id: 'desc' },
-          select: { id: true },
-        });
-      }
-    }
-    if (!localProject) return res.status(404).json({ error: 'Project not found' });
-
-    const platformProjectId = req.body?.platformProjectId as unknown;
-    if (platformProjectId == null || platformProjectId === '') {
-      await prisma.orchestratorProjectLink.deleteMany({ where: { projectId: localProject.id } });
-      await refreshPersistentMirror();
-      return res.json({ platformProjectId: null });
-    }
-    if (typeof platformProjectId !== 'string') return res.status(400).json({ error: 'platformProjectId must be a string' });
-
-    const project = await getPrisma().project.findUnique({ where: { id: platformProjectId } });
-    if (!project) return res.status(400).json({ error: 'Platform project not found' });
-
-    await prisma.orchestratorProjectLink.upsert({
-      where: { projectId: localProject.id },
-      update: { platformProjectId, updatedAt: new Date() },
-      create: { projectId: localProject.id, platformProjectId },
-    });
-    await refreshPersistentMirror();
-
-    res.json({ platformProjectId });
-  } catch (e: any) {
-    console.error('Failed to update project link:', e);
-    res.status(500).json({ error: e.message });
-  }
+registerOrchestratorConfigRoutes({
+  app,
+  db,
+  getPrisma,
+  refreshPersistentMirror,
 });
 
 // API Routes
-
-// --- Credentials ---
-app.get('/api/credentials', async (req, res) => {
-  try {
-    const category = String(req.query.category || '').trim();
-    const credentials = await getPrisma().orchestratorCredential.findMany({
-      where: category ? { category } : undefined,
-      orderBy: { id: 'asc' },
-    });
-    res.json(credentials.map((row) => ({
-      id: row.id,
-      provider: row.provider,
-      name: row.name || row.provider,
-      key_name: row.keyName || 'Authorization',
-      category: row.category || 'general',
-      api_key: '********',
-    })));
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/credentials', async (req, res) => {
-  const { provider, name, key_name, category, api_key, key_value } = req.body || {};
-  const credentialKey = String(provider || '').trim();
-  const secretValue = String(api_key || key_value || '').trim();
-  const categoryValue = String(category || 'general').trim() || 'general';
-  if (!credentialKey) return res.status(400).json({ error: 'provider (credential key) is required' });
-  if (!secretValue) return res.status(400).json({ error: 'api_key (credential value) is required' });
-  try {
-    await getPrisma().orchestratorCredential.upsert({
-      where: { provider: credentialKey },
-      update: {
-        name: String(name || credentialKey).trim(),
-        keyName: String(key_name || 'Authorization').trim(),
-        category: categoryValue,
-        apiKey: secretValue,
-        updatedAt: new Date(),
-      },
-      create: {
-        provider: credentialKey,
-        name: String(name || credentialKey).trim(),
-        keyName: String(key_name || 'Authorization').trim(),
-        category: categoryValue,
-        apiKey: secretValue,
-      },
-    });
-    await refreshPersistentMirror();
-    res.json({ success: true });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.delete('/api/credentials/:id', async (req, res) => {
-  try {
-    await getPrisma().orchestratorCredential.delete({ where: { id: Number(req.params.id) } });
-    await refreshPersistentMirror();
-    res.json({ success: true });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// --- LLM Providers ---
-app.get('/api/providers', async (req, res) => {
-  try {
-    const providers = await getPrisma().orchestratorLlmProvider.findMany({
-      orderBy: { id: 'asc' },
-    });
-    res.json(providers.map((row) => ({
-      id: row.id,
-      name: row.name,
-      provider: row.provider,
-      api_base: row.apiBase,
-      api_key: '********',
-      is_default: row.isDefault,
-    })));
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/providers', async (req, res) => {
-  const { name, provider, api_base, api_key, is_default } = req.body;
-  const prisma = getPrisma();
-  try {
-    if (is_default) {
-      await prisma.orchestratorLlmProvider.updateMany({
-        where: { provider },
-        data: { isDefault: false, updatedAt: new Date() },
-      });
-    }
-    const created = await prisma.orchestratorLlmProvider.create({
-      data: {
-        name,
-        provider,
-        apiBase: api_base || null,
-        apiKey: api_key || null,
-        isDefault: Boolean(is_default),
-      },
-    });
-    await refreshPersistentMirror();
-    res.json({ id: created.id });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.put('/api/providers/:id', async (req, res) => {
-  const { name, provider, api_base, api_key, is_default } = req.body;
-  const prisma = getPrisma();
-  try {
-    if (is_default) {
-      await prisma.orchestratorLlmProvider.updateMany({
-        where: { provider, id: { not: Number(req.params.id) } },
-        data: { isDefault: false, updatedAt: new Date() },
-      });
-    }
-    const existing = await prisma.orchestratorLlmProvider.findUnique({ where: { id: Number(req.params.id) } });
-    if (!existing) return res.status(404).json({ error: 'Provider not found' });
-    await prisma.orchestratorLlmProvider.update({
-      where: { id: Number(req.params.id) },
-      data: {
-        name,
-        provider,
-        apiBase: api_base || null,
-        apiKey: api_key && api_key !== '********' ? api_key : existing.apiKey,
-        isDefault: Boolean(is_default),
-        updatedAt: new Date(),
-      },
-    });
-    await refreshPersistentMirror();
-    res.json({ success: true });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.delete('/api/providers/:id', async (req, res) => {
-  try {
-    await getPrisma().orchestratorLlmProvider.delete({ where: { id: Number(req.params.id) } });
-    await refreshPersistentMirror();
-    res.json({ success: true });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
 
 // --- Model Pricing ---
 app.get('/api/pricing', (_req, res) => {
@@ -1458,8 +3791,20 @@ app.get('/api/providers/:id/models', async (req, res) => {
 
     let models: { id: string, name: string }[] = [];
 
-    if (config.providerType === 'openai' || config.providerType === 'openai-compatible') {
-      const openai = new OpenAI({ apiKey: config.apiKey, baseURL: config.apiBase });
+    if (config.providerType === 'openai' || config.providerType === 'openai-compatible' || config.providerType === 'litellm') {
+      const openai = new OpenAI({ 
+          apiKey: config.apiKey, 
+          baseURL: config.apiBase,
+          fetch: async (url: string | Request | URL, init?: RequestInit) => {
+              const headers = new Headers(init?.headers);
+              Array.from(headers.keys()).forEach(k => {
+                  if (k.toLowerCase().startsWith('x-stainless')) headers.delete(k);
+              });
+              headers.set('User-Agent', 'curl/8.7.1');
+              if (config.providerType === 'litellm') headers.set('x-litellm-api-key', config.apiKey!);
+              return fetch(url, { ...init, headers });
+          }
+      });
       const response = await openai.models.list();
       models = response.data.map(m => ({ id: m.id, name: m.id }));
     } else if (config.providerType === 'anthropic') { // Original condition, assuming config.type is not available here
@@ -1499,6 +3844,45 @@ app.get('/api/providers/:id/models', async (req, res) => {
     res.json(models);
   } catch (e: any) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/providers/test', async (req, res) => {
+  try {
+    const { provider, api_base, api_key } = req.body;
+    if (!api_key) return res.status(400).json({ error: 'API Key is required to test connection.' });
+
+    let modelsCount = 0;
+    if (provider === 'openai' || provider === 'openai-compatible' || provider === 'litellm') {
+      const openai = new OpenAI({ 
+          apiKey: api_key, 
+          baseURL: api_base,
+          fetch: async (url: string | Request | URL, init?: RequestInit) => {
+              const headers = new Headers(init?.headers);
+              Array.from(headers.keys()).forEach(k => {
+                  if (k.toLowerCase().startsWith('x-stainless')) headers.delete(k);
+              });
+              headers.set('User-Agent', 'curl/8.7.1');
+              if (provider === 'litellm') headers.set('x-litellm-api-key', api_key);
+              return fetch(url, { ...init, headers });
+          }
+      });
+      const response = await openai.models.list();
+      modelsCount = response.data.length;
+    } else if (provider === 'anthropic') {
+      const anthropic = new Anthropic({ apiKey: api_key });
+      const response = await anthropic.models.list();
+      modelsCount = response.data.length;
+    } else {
+      const ai = new GoogleGenAI({ apiKey: api_key });
+      const response = await ai.models.list();
+      for await (const _m of response) { modelsCount++; }
+    }
+    res.json({ success: true, message: `Connection successful! Found ${modelsCount} models.` });
+  } catch (e: any) {
+    let errorMsg = e.message || String(e);
+    if (errorMsg.includes('404')) errorMsg += ' (Check if your API Base URL accidentally includes /chat/completions or is missing /v1)';
+    res.status(400).json({ error: errorMsg });
   }
 });
 
@@ -1567,16 +3951,19 @@ async function validateMCPConfig(config: any) {
 }
 
 // --- Tools ---
-app.get('/api/tools', async (req, res) => {
+app.get('/api/tools', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const scopedToolIds = getScopedToolIds(scope);
+    if (scopedToolIds && !scopedToolIds.length) return res.json([]);
     const prisma = getPrisma();
     const [tools, agentTools, agents, exposures, bundleTools, bundles] = await Promise.all([
-      prisma.orchestratorTool.findMany({ orderBy: { name: 'asc' } }),
-      prisma.orchestratorAgentTool.findMany({ orderBy: [{ toolId: 'asc' }, { agentId: 'asc' }] }),
-      prisma.orchestratorAgent.findMany({ select: { id: true, name: true } }),
-      prisma.orchestratorMcpExposedTool.findMany(),
-      prisma.orchestratorMcpBundleTool.findMany({ orderBy: [{ toolId: 'asc' }, { bundleId: 'asc' }] }),
-      prisma.orchestratorMcpBundle.findMany({ select: { id: true, name: true, slug: true } }),
+      prisma.orchestratorTool.findMany({ where: scopedToolIds ? { id: { in: scopedToolIds } } : undefined, orderBy: { name: 'asc' } }),
+      prisma.orchestratorAgentTool.findMany({ where: scopedToolIds ? { toolId: { in: scopedToolIds } } : undefined, orderBy: [{ toolId: 'asc' }, { agentId: 'asc' }] }),
+      prisma.orchestratorAgent.findMany({ where: getScopedAgentIds(scope) ? { id: { in: getScopedAgentIds(scope)! } } : undefined, select: { id: true, name: true } }),
+      prisma.orchestratorMcpExposedTool.findMany({ where: scopedToolIds ? { toolId: { in: scopedToolIds } } : undefined }),
+      prisma.orchestratorMcpBundleTool.findMany({ where: scopedToolIds ? { toolId: { in: scopedToolIds } } : undefined, orderBy: [{ toolId: 'asc' }, { bundleId: 'asc' }] }),
+      prisma.orchestratorMcpBundle.findMany({ where: getScopedBundleIds(scope) ? { id: { in: getScopedBundleIds(scope)! } } : undefined, select: { id: true, name: true, slug: true } }),
     ]);
     const agentById = new Map(agents.map((agent) => [agent.id, agent]));
     const exposureByToolId = new Map(exposures.map((row) => [row.toolId, row]));
@@ -1627,14 +4014,17 @@ app.get('/api/tools', async (req, res) => {
   }
 });
 
-function getToolDependencies(toolId: number) {
+function getToolDependencies(toolId: number, scope?: Awaited<ReturnType<typeof resolveOrchestratorAccessScope>>) {
+  const scopedAgentIds = scope?.isAdmin ? null : Array.from(scope?.allowedAgentIds || []);
+  const scopedBundleIds = scope?.isAdmin ? null : Array.from(scope?.allowedBundleIds || []);
   const linkedAgents = db.prepare(`
     SELECT a.id, a.name
     FROM agent_tools at
     JOIN agents a ON a.id = at.agent_id
     WHERE at.tool_id = ?
+      ${scopedAgentIds ? `AND a.id IN (${scopedAgentIds.map(() => '?').join(',') || 'NULL'})` : ''}
     ORDER BY a.name ASC
-  `).all(toolId) as any[];
+  `).all(toolId, ...(scopedAgentIds || [])) as any[];
   const exposed = db.prepare(`
     SELECT exposed_name, description, updated_at
     FROM mcp_exposed_tools
@@ -1646,15 +4036,17 @@ function getToolDependencies(toolId: number) {
     FROM mcp_bundle_tools bt
     JOIN mcp_bundles b ON b.id = bt.bundle_id
     WHERE bt.tool_id = ?
+      ${scopedBundleIds ? `AND b.id IN (${scopedBundleIds.map(() => '?').join(',') || 'NULL'})` : ''}
     ORDER BY b.name ASC
-  `).all(toolId) as any[];
+  `).all(toolId, ...(scopedBundleIds || [])) as any[];
   const mcpAgents = db.prepare(`
     SELECT a.id, a.name
     FROM agent_mcp_tools amt
     JOIN agents a ON a.id = amt.agent_id
     WHERE amt.tool_id = ?
+      ${scopedAgentIds ? `AND a.id IN (${scopedAgentIds.map(() => '?').join(',') || 'NULL'})` : ''}
     ORDER BY a.name ASC
-  `).all(toolId) as any[];
+  `).all(toolId, ...(scopedAgentIds || [])) as any[];
   return {
     agents: linkedAgents,
     agents_count: linkedAgents.length,
@@ -1717,17 +4109,19 @@ async function getToolUsageStats(toolId: number) {
   };
 }
 
-app.get('/api/tools/:id/dependencies', async (req, res) => {
+app.get('/api/tools/:id/dependencies', requireUser, async (req, res) => {
   const toolId = Number(req.params.id);
   if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleToolId(scope, toolId);
     const prisma = getPrisma();
     const tool = await prisma.orchestratorTool.findUnique({
       where: { id: toolId },
       select: { id: true, name: true, version: true, updatedAt: true },
     });
     if (!tool) return res.status(404).json({ error: 'Tool not found' });
-    const dependencies = getToolDependencies(toolId);
+    const dependencies = getToolDependencies(toolId, scope);
     const versionCount = await prisma.orchestratorToolVersion.count({ where: { toolId } });
     const usage = await getToolUsageStats(toolId);
     res.json({
@@ -1746,10 +4140,12 @@ app.get('/api/tools/:id/dependencies', async (req, res) => {
   }
 });
 
-app.get('/api/tools/:id/versions', async (req, res) => {
+app.get('/api/tools/:id/versions', requireUser, async (req, res) => {
   const toolId = Number(req.params.id);
   if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleToolId(scope, toolId);
     const prisma = getPrisma();
     const tool = await prisma.orchestratorTool.findUnique({
       where: { id: toolId },
@@ -1780,14 +4176,17 @@ app.get('/api/tools/:id/versions', async (req, res) => {
   }
 });
 
-app.post('/api/tools/:id/restore/:versionId', async (req, res) => {
+app.post('/api/tools/:id/restore/:versionId', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const prisma = getPrisma();
     const toolId = Number(req.params.id);
     const versionId = Number(req.params.versionId);
     if (!Number.isFinite(toolId) || !Number.isFinite(versionId)) {
       return res.status(400).json({ error: 'Invalid tool or version id' });
     }
+    requireVisibleToolId(scope, toolId);
+    if (!scope.isAdmin) requireManageableResource(scope, 'tool', toolId);
     const tool = db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId) as any;
     if (!tool) return res.status(404).json({ error: 'Tool not found' });
     const version = db.prepare(`
@@ -1847,9 +4246,11 @@ app.post('/api/tools/:id/restore/:versionId', async (req, res) => {
   }
 });
 
-app.get('/api/tools/:id/usage', async (req, res) => {
+app.get('/api/tools/:id/usage', requireUser, async (req, res) => {
   const toolId = Number(req.params.id);
   if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  requireVisibleToolId(scope, toolId);
   const tool = db.prepare('SELECT id, name FROM tools WHERE id = ?').get(toolId) as any;
   if (!tool) return res.status(404).json({ error: 'Tool not found' });
   const usage = await getToolUsageStats(toolId);
@@ -1881,8 +4282,9 @@ function inferToolCategory(name: any, description: any, type: any, config: any, 
   return explicit || 'General';
 }
 
-app.post('/api/tools', async (req, res) => {
+app.post('/api/tools', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const prisma = getPrisma();
     const { name, description, category, type, config, skip_validate } = req.body;
     if (type === 'mcp') {
@@ -1920,6 +4322,9 @@ app.post('/api/tools', async (req, res) => {
         createdAt: new Date(now),
       },
     });
+    if (!scope.isAdmin && req.user) {
+      assignResourceOwner('tool', Number(created.id), req.user);
+    }
     await refreshPersistentMirror();
     res.json({ id: created.id });
   } catch (e: any) {
@@ -1927,10 +4332,13 @@ app.post('/api/tools', async (req, res) => {
   }
 });
 
-app.put('/api/tools/:id', async (req, res) => {
+app.put('/api/tools/:id', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const prisma = getPrisma();
     const { id } = req.params;
+    requireVisibleToolId(scope, Number(id));
+    if (!scope.isAdmin) requireManageableResource(scope, 'tool', Number(id));
     const { name, description, category, type, config, skip_validate } = req.body;
     if (type === 'mcp') {
       if (!skip_validate) {
@@ -1978,7 +4386,7 @@ app.put('/api/tools/:id', async (req, res) => {
   }
 });
 
-app.post('/api/tools/http-test', async (req, res) => {
+app.post('/api/tools/http-test', requireUser, async (req, res) => {
   try {
     const { config, args } = req.body || {};
     if (!config || typeof config !== 'object') {
@@ -1991,7 +4399,20 @@ app.post('/api/tools/http-test', async (req, res) => {
   }
 });
 
-app.post('/api/tools/mcp-test', async (req, res) => {
+app.post('/api/tools/javascript-packages/install', requireUser, async (req, res) => {
+  try {
+    const packages = normalizeJavascriptPackages(req.body?.packages);
+    if (!packages.length) {
+      return res.status(400).json({ error: 'Provide at least one valid package name.' });
+    }
+    await ensureJavascriptPackagesInstalled(packages);
+    return res.json({ success: true, installed: packages });
+  } catch (e: any) {
+    return res.status(400).json({ error: e?.message || 'Failed to install JavaScript packages' });
+  }
+});
+
+app.post('/api/tools/mcp-test', requireUser, async (req, res) => {
   try {
     const { serverUrl, apiKey, credentialId, transportType, customHeaders } = req.body || {};
     const result = await validateMCPConfig({ serverUrl, apiKey, credentialId, transportType, customHeaders });
@@ -2007,15 +4428,336 @@ app.post('/api/tools/mcp-test', async (req, res) => {
   }
 });
 
-app.delete('/api/tools/:id', async (req, res) => {
+app.post('/api/tools/import-mcp-package', requireUser, async (req, res) => {
+  try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const prisma = getPrisma();
+    const {
+      packageName,
+      packageCommand,
+      packageArgs,
+      env,
+      namePrefix,
+      bundleName,
+      bundleSlug,
+      bundleDescription,
+      createBundle,
+      exposeTools,
+      exposeBundle,
+      timeoutMs,
+    } = req.body || {};
+
+    const normalizedPackageName = String(packageName || '').trim();
+    if (!normalizedPackageName) return res.status(400).json({ error: 'packageName is required' });
+    await ensureGlobalNpmPackageInstalled(normalizedPackageName, 'import-mcp-package');
+
+    const command = String(packageCommand || 'npx').trim();
+    const args = Array.isArray(packageArgs) && packageArgs.length
+      ? packageArgs.map((value: any) => String(value))
+      : ['-y', normalizedPackageName];
+
+    const envObject = env && typeof env === 'object' && !Array.isArray(env)
+      ? Object.fromEntries(
+          Object.entries(env)
+            .filter(([key]) => String(key || '').trim())
+            .map(([key, value]) => [String(key).trim(), String(value ?? '')])
+        )
+      : {};
+
+    const discoveredTools = await discoverMcpPackageTools({
+      command,
+      args,
+      env: envObject,
+      packageName: normalizedPackageName,
+      timeoutMs: Number(timeoutMs || 45000),
+    });
+
+    if (!discoveredTools.length) {
+      return res.status(400).json({ error: `No MCP tools were discovered from package "${normalizedPackageName}".` });
+    }
+
+    const resolvedPrefix = buildImportedMcpPrefix(normalizedPackageName, namePrefix);
+    const now = new Date();
+    const createdOrUpdatedTools: Array<{ id: number; name: string; mcpToolName: string }> = [];
+
+    for (const discoveredTool of discoveredTools) {
+      const mcpToolName = String((discoveredTool as any)?.name || '').trim();
+      if (!mcpToolName) continue;
+      const localToolName = `${resolvedPrefix}_${slugifyValue(mcpToolName) || 'tool'}`;
+      const toolDescription = String((discoveredTool as any)?.description || '').trim()
+        || `Imported from npm MCP package "${normalizedPackageName}" as stdio tool "${mcpToolName}".`;
+      const wrapped = buildWrappedStdioCommand(command, args);
+      const config = {
+        packageName: normalizedPackageName,
+        rawCommand: command,
+        rawArgs: args,
+        command: wrapped.command,
+        args: wrapped.args,
+        env: envObject,
+        mcpToolName,
+        timeoutMs: Number(timeoutMs || 45000),
+      };
+      const serializedConfig = JSON.stringify(config);
+      const resolvedCategory = inferToolCategory(localToolName, toolDescription, 'mcp_stdio_proxy', config, 'MCP');
+      const existing = await prisma.orchestratorTool.findFirst({
+        where: { name: localToolName },
+        select: { id: true, version: true },
+      });
+
+      let toolId: number;
+      let versionNumber: number;
+      if (existing) {
+        if (!scope.isAdmin) requireManageableResource(scope, 'tool', Number(existing.id));
+        versionNumber = Number(existing.version || 1) + 1;
+        await prisma.orchestratorTool.update({
+          where: { id: existing.id },
+          data: {
+            description: toolDescription,
+            category: resolvedCategory,
+            type: 'mcp_stdio_proxy',
+            config: serializedConfig,
+            version: versionNumber,
+            updatedAt: now,
+          },
+        });
+        await prisma.orchestratorToolVersion.create({
+          data: {
+            toolId: existing.id,
+            versionNumber,
+            name: localToolName,
+            description: toolDescription,
+            category: resolvedCategory,
+            type: 'mcp_stdio_proxy',
+            config: serializedConfig,
+            changeKind: 'update',
+            createdAt: now,
+          },
+        });
+        toolId = existing.id;
+      } else {
+        const created = await prisma.orchestratorTool.create({
+          data: {
+            name: localToolName,
+            description: toolDescription,
+            category: resolvedCategory,
+            type: 'mcp_stdio_proxy',
+            config: serializedConfig,
+            version: 1,
+            updatedAt: now,
+          },
+        });
+        await prisma.orchestratorToolVersion.create({
+          data: {
+            toolId: created.id,
+            versionNumber: 1,
+            name: localToolName,
+            description: toolDescription,
+            category: resolvedCategory,
+            type: 'mcp_stdio_proxy',
+            config: serializedConfig,
+            changeKind: 'create',
+            createdAt: now,
+          },
+        });
+        if (!scope.isAdmin && req.user) {
+          assignResourceOwner('tool', Number(created.id), req.user);
+        }
+        toolId = created.id;
+      }
+
+      createdOrUpdatedTools.push({ id: toolId, name: localToolName, mcpToolName });
+
+      if (exposeTools !== false) {
+        const exposedName = buildImportedMcpExposedName(resolvedPrefix, mcpToolName);
+        const currentVersion = Number((await prisma.orchestratorMcpExposedToolVersion.aggregate({
+          where: { toolId },
+          _max: { versionNumber: true },
+        }))._max.versionNumber || 0);
+
+        await prisma.orchestratorMcpExposedTool.upsert({
+          where: { toolId },
+          update: {
+            exposedName,
+            description: toolDescription,
+            updatedAt: now,
+          },
+          create: {
+            toolId,
+            exposedName,
+            description: toolDescription,
+          },
+        });
+        await prisma.orchestratorMcpExposedToolVersion.create({
+          data: {
+            toolId,
+            versionNumber: currentVersion + 1,
+            exposedName,
+            description: toolDescription,
+            isExposed: true,
+            changeKind: currentVersion === 0 ? 'create' : 'update',
+            createdAt: now,
+          },
+        });
+      }
+    }
+
+    let createdBundle: { id: number; name: string; slug: string } | null = null;
+    if (createBundle !== false && createdOrUpdatedTools.length) {
+      const packageAlias = compactMcpPackageAlias(normalizedPackageName);
+      const resolvedBundleName = String(bundleName || `${normalizedPackageName} Bundle`).trim() || `${normalizedPackageName} Bundle`;
+      const resolvedBundleSlug = slugifyValue(bundleSlug || `${packageAlias}_bundle`) || `${packageAlias}_bundle`;
+      const resolvedBundleDescription = typeof bundleDescription === 'string' && bundleDescription.trim()
+        ? bundleDescription.trim()
+        : `Imported bundle for npm MCP package "${normalizedPackageName}".`;
+      const existingBundle = await prisma.orchestratorMcpBundle.findUnique({
+        where: { slug: resolvedBundleSlug },
+        select: { id: true },
+      });
+
+      let bundleId: number;
+      const previousVersion = existingBundle
+        ? Number((await prisma.orchestratorMcpBundleVersion.aggregate({
+            where: { bundleId: existingBundle.id },
+            _max: { versionNumber: true },
+          }))._max.versionNumber || 0)
+        : 0;
+
+      if (existingBundle) {
+        if (!scope.isAdmin) requireManageableResource(scope, 'mcp_bundle', Number(existingBundle.id));
+        await prisma.orchestratorMcpBundle.update({
+          where: { id: existingBundle.id },
+          data: {
+            name: resolvedBundleName,
+            description: resolvedBundleDescription,
+            isExposed: exposeBundle !== false,
+            updatedAt: now,
+          },
+        });
+        bundleId = existingBundle.id;
+      } else {
+        const bundle = await prisma.orchestratorMcpBundle.create({
+          data: {
+            name: resolvedBundleName,
+            slug: resolvedBundleSlug,
+            description: resolvedBundleDescription,
+            isExposed: exposeBundle !== false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        if (!scope.isAdmin && req.user) {
+          assignResourceOwner('mcp_bundle', Number(bundle.id), req.user);
+        }
+        bundleId = bundle.id;
+      }
+
+      await prisma.orchestratorMcpBundleTool.deleteMany({ where: { bundleId } });
+      await prisma.orchestratorMcpBundleTool.createMany({
+        data: createdOrUpdatedTools.map((tool) => ({
+          bundleId,
+          toolId: tool.id,
+          createdAt: now,
+          updatedAt: now,
+        })),
+        skipDuplicates: true,
+      });
+      await prisma.orchestratorMcpBundleVersion.create({
+        data: {
+          bundleId,
+          versionNumber: previousVersion + 1,
+          name: resolvedBundleName,
+          slug: resolvedBundleSlug,
+          description: resolvedBundleDescription,
+          toolIds: JSON.stringify(createdOrUpdatedTools.map((tool) => tool.id)),
+          changeKind: previousVersion === 0 ? 'create' : 'update',
+          createdAt: now,
+        },
+      });
+      createdBundle = { id: bundleId, name: resolvedBundleName, slug: resolvedBundleSlug };
+    }
+
+    await refreshPersistentMirror();
+
+    res.json({
+      success: true,
+      packageName: normalizedPackageName,
+      command,
+      args,
+      discoveredCount: discoveredTools.length,
+      tools: createdOrUpdatedTools,
+      bundle: createdBundle,
+    });
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to import MCP package' });
+  }
+});
+
+app.get('/api/tools/:id/mcp-schema', requireUser, async (req, res) => {
+  try {
+    const toolId = Number(req.params.id);
+    if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleToolId(scope, toolId);
+    const tool = db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId) as any;
+    if (!tool) return res.status(404).json({ error: 'Tool not found' });
+    const inputSchema = await getToolInputSchemaForRecord(tool);
+    res.json({
+      tool: {
+        id: tool.id,
+        name: tool.name,
+        description: tool.description || '',
+        type: tool.type,
+      },
+      inputSchema,
+    });
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to inspect MCP schema' });
+  }
+});
+
+app.post('/api/tools/:id/test-run', requireUser, async (req, res) => {
+  try {
+    const toolId = Number(req.params.id);
+    if (!Number.isFinite(toolId)) return res.status(400).json({ error: 'Invalid tool id' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleToolId(scope, toolId);
+    const tool = db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId) as any;
+    if (!tool) return res.status(404).json({ error: 'Tool not found' });
+    const args = req.body?.args && typeof req.body.args === 'object' ? req.body.args : {};
+    const result = await executeTool(tool.name, args, undefined, tool);
+    res.json({
+      success: true,
+      tool: {
+        id: tool.id,
+        name: tool.name,
+        type: tool.type,
+      },
+      result,
+    });
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to execute tool test' });
+  }
+});
+
+app.delete('/api/tools/:id', requireUser, async (req, res) => {
   console.log(`Deleting tool ${req.params.id}`);
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const force = String(req.query.force || '') === 'true';
     const idNum = Number(req.params.id);
     if (!Number.isFinite(idNum)) return res.status(400).json({ error: 'Invalid tool id' });
-    const tool = db.prepare('SELECT id, name FROM tools WHERE id = ?').get(idNum) as any;
+    requireVisibleToolId(scope, idNum);
+    if (!scope.isAdmin) requireManageableResource(scope, 'tool', idNum);
+    const tool = db.prepare('SELECT id, name, type, config FROM tools WHERE id = ?').get(idNum) as any;
     if (!tool) return res.status(404).json({ error: 'Tool not found' });
-    const dependencies = getToolDependencies(idNum);
+    let packageNameToMaybeRemove = '';
+    if (String(tool.type || '') === 'mcp_stdio_proxy') {
+      try {
+        const cfg = tool?.config ? JSON.parse(String(tool.config)) : {};
+        packageNameToMaybeRemove = extractPackageNameFromToolConfig(cfg);
+      } catch {}
+    }
+    const dependencies = getToolDependencies(idNum, scope);
     const hasDependencies = Boolean(
       dependencies.agents_count ||
       dependencies.mcp_agents_count
@@ -2035,7 +4777,10 @@ app.delete('/api/tools/:id', async (req, res) => {
     await prisma.orchestratorToolVersion.deleteMany({ where: { toolId: idNum } });
     await prisma.orchestratorTool.delete({ where: { id: idNum } });
     await refreshPersistentMirror();
-    db.prepare('DELETE FROM tool_executions WHERE tool_id = ?').run(idNum);
+    deleteResourceAccess('tool', idNum);
+    if (packageNameToMaybeRemove) {
+      await removeGlobalNpmPackageIfUnused(packageNameToMaybeRemove);
+    }
     console.log(`Tool ${req.params.id} deleted successfully`);
     res.json({ success: true, forced: force, deleted_tool_id: idNum });
   } catch (e: any) {
@@ -2044,31 +4789,148 @@ app.delete('/api/tools/:id', async (req, res) => {
   }
 });
 
-app.post('/api/tools/autobuild', async (req, res) => {
-  const { goal, agent_ids, provider = 'google', model = 'gemini-1.5-flash' } = req.body || {};
+app.get('/api/resource-access/:resourceType/:resourceId', requireUser, async (req, res) => {
+  try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const resourceType = String(req.params.resourceType || '').trim();
+    const resourceId = Number(req.params.resourceId);
+    if (!Number.isFinite(resourceId) || resourceId <= 0) {
+      return res.status(400).json({ error: 'Invalid resource id' });
+    }
+    if (resourceType === 'tool') {
+      requireVisibleToolId(scope, resourceId);
+    } else if (resourceType === 'mcp_bundle') {
+      requireVisibleBundleId(scope, resourceId);
+    } else if (resourceType === 'voice_config') {
+      requireVisibleVoiceConfigId(scope, resourceId);
+    } else {
+      return res.status(400).json({ error: 'Unsupported resource type' });
+    }
+    res.json(getResourceAccess(resourceType, resourceId));
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to load resource access' });
+  }
+});
 
-  if (!goal || typeof goal !== 'string') {
+app.put('/api/resource-access/:resourceType/:resourceId', requireUser, async (req, res) => {
+  try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const resourceType = String(req.params.resourceType || '').trim();
+    const resourceId = Number(req.params.resourceId);
+    if (!Number.isFinite(resourceId) || resourceId <= 0) {
+      return res.status(400).json({ error: 'Invalid resource id' });
+    }
+    if (resourceType === 'tool') {
+      requireVisibleToolId(scope, resourceId);
+    } else if (resourceType === 'mcp_bundle') {
+      requireVisibleBundleId(scope, resourceId);
+    } else if (resourceType === 'voice_config') {
+      requireVisibleVoiceConfigId(scope, resourceId);
+    } else {
+      return res.status(400).json({ error: 'Unsupported resource type' });
+    }
+    if (!scope.isAdmin) requireManageableResource(scope, resourceType, resourceId);
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    setResourceAccess(resourceType, resourceId, req.user, req.body || {});
+    res.json(getResourceAccess(resourceType, resourceId));
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to update resource access' });
+  }
+});
+
+app.post('/api/tools/autobuild', requireUser, async (req, res) => {
+  const { goal, agent_ids, provider = 'google', model = 'gemini-1.5-flash', stream = false } = req.body || {};
+  const normalizedGoal = String(goal || '').trim();
+  if (!normalizedGoal) {
     return res.status(400).json({ error: 'Goal is required.' });
   }
+  if (normalizedGoal.length > 4000) {
+    return res.status(400).json({ error: 'Goal is too long (max 4000 characters).' });
+  }
+
+  if (stream) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+  }
+  const sendEvent = (type: string, data: any) => {
+    if (!stream) return;
+    try {
+      res.write(`data: ${JSON.stringify({ type, timestamp: new Date().toISOString(), ...data })}\n\n`);
+    } catch (error) {
+      console.error('Tool auto-build stream write failed:', error);
+    }
+  };
 
   try {
+    sendEvent('status', { message: 'Validating scope and available resources...', step: 1 });
+    const scope = await resolveOrchestratorAccessScope(req);
+    const requestedAgentIds = Array.isArray(agent_ids)
+      ? agent_ids.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id) && id > 0)
+      : [];
+    for (const id of requestedAgentIds) requireVisibleAgentId(scope, id);
+
     const config = await getProviderConfig(provider);
     const apiKey = config.apiKey;
     if (!apiKey) {
-      return res.status(500).json({ error: `API Key not configured for provider: ${provider}` });
+      const message = `API Key not configured for provider: ${provider}`;
+      if (stream) {
+        sendEvent('error', { message });
+        return res.end();
+      }
+      return res.status(500).json({ error: message });
     }
 
-    const availableAgents = Array.isArray(agent_ids) && agent_ids.length
-      ? db.prepare('SELECT id, name, role, goal, backstory, model, provider FROM agents WHERE id IN (' + agent_ids.map(() => '?').join(',') + ')').all(...agent_ids)
-      : db.prepare('SELECT id, name, role, goal, backstory, model, provider FROM agents').all();
+    const scopedAgentIds = getScopedAgentIds(scope);
+    const scopedToolIds = getScopedToolIds(scope);
 
-    const availableTools = db.prepare('SELECT id, name, description, type, config FROM tools').all();
+    const prisma = getPrisma();
+    const [availableAgentsRaw, availableToolsRaw] = await Promise.all([
+      prisma.orchestratorAgent.findMany({
+        where: requestedAgentIds.length
+          ? { id: { in: requestedAgentIds } }
+          : (scopedAgentIds ? { id: { in: scopedAgentIds } } : undefined),
+        select: { id: true, name: true, role: true, goal: true, backstory: true, model: true, provider: true },
+      }),
+      prisma.orchestratorTool.findMany({
+        where: scopedToolIds ? { id: { in: scopedToolIds } } : undefined,
+        select: { id: true, name: true, description: true, category: true, type: true, config: true },
+      }),
+    ]);
 
+    if (requestedAgentIds.length && !availableAgentsRaw.length) {
+      const message = 'No visible agents matched the selected assignment list.';
+      if (stream) {
+        sendEvent('error', { message });
+        return res.end();
+      }
+      return res.status(400).json({ error: message });
+    }
+
+    const availableAgents = availableAgentsRaw.map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      role: agent.role,
+      goal: compactPromptText(String(agent.goal || ''), 220),
+      backstory: compactPromptText(String(agent.backstory || ''), 160),
+      model: agent.model,
+      provider: agent.provider,
+    }));
+    const availableTools = availableToolsRaw.map((tool) => ({
+      id: tool.id,
+      name: tool.name,
+      description: compactPromptText(String(tool.description || ''), 180),
+      category: tool.category,
+      type: tool.type,
+    }));
+
+    sendEvent('status', { message: 'Designing tools with AI architect...', step: 2 });
     const prompt = `
     You are an expert Tool Builder for AI agents.
     Your goal is to design the right tools so the agents can accomplish the user's objective.
 
-    User Objective: "${goal}"
+    User Objective: "${normalizedGoal}"
 
     Available Agents (use these IDs for assignment):
     ${JSON.stringify(availableAgents)}
@@ -2080,8 +4942,8 @@ app.post('/api/tools/autobuild', async (req, res) => {
     1. Propose tools that best enable the agents to accomplish the objective.
     2. Reuse existing tools if they already fit (by referencing existing_tool_id).
     3. Each tool can be assigned to multiple agents via assign_to_agent_ids.
-    4. Tool types supported: python, http, mcp, search, calculator, custom.
-    5. For python tools, config should include { "code": "python code" } and the code should read from a variable named args (dict).
+    4. Tool types supported: javascript, http, mcp, custom.
+    5. For javascript tools, config should include { "code": "JavaScript code" } and read inputs from the variable args.
     6. For http tools, config should include { "method": "GET|POST|PUT|DELETE", "url": "...", "headers": {...}, "body": "string or JSON" }.
     7. For mcp tools, config should include { "serverUrl": "...", "apiKey": "optional" }.
 
@@ -2092,7 +4954,7 @@ app.post('/api/tools/autobuild', async (req, res) => {
           "name": "Tool Name",
           "description": "What it does",
           "category": "Short family or platform label like FB, Google, Research, CRM, Database",
-          "type": "python|http|mcp|search|calculator|custom",
+          "type": "javascript|http|mcp|custom",
           "config": { },
           "assign_to_agent_ids": [1,2],
           "existing_tool_id": 123
@@ -2110,14 +4972,6 @@ app.post('/api/tools/autobuild', async (req, res) => {
         config: { responseMimeType: 'application/json' }
       }));
       text = response.text;
-    } else if (config.providerType === 'openai' || config.providerType === 'openai-compatible') {
-      const openai = new OpenAI({ apiKey, baseURL: config.apiBase });
-      const response = await withRetry(() => openai.chat.completions.create({
-        model: model,
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: "json_object" }
-      }));
-      text = response.choices[0].message.content || '';
     } else if (config.providerType === 'anthropic') {
       const anthropic = new Anthropic({ apiKey, baseURL: config.apiBase });
       const response = await withRetry(() => anthropic.messages.create({
@@ -2127,7 +4981,14 @@ app.post('/api/tools/autobuild', async (req, res) => {
       }));
       if (response.content[0].type === 'text') text = response.content[0].text;
     } else {
-      throw new Error(`Provider ${config.providerType} not supported for tool auto-build.`);
+      // Default to OpenAI-compatible chat JSON mode for custom/third-party providers.
+      const openai = new OpenAI({ apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
+      const response = await withRetry(() => openai.chat.completions.create({
+        model: model,
+        messages: [{ role: 'user', content: prompt }],
+        response_format: { type: "json_object" }
+      }));
+      text = response.choices[0].message.content || '';
     }
 
     let design: any;
@@ -2142,23 +5003,31 @@ app.post('/api/tools/autobuild', async (req, res) => {
       throw new Error("Invalid design: 'tools' array is missing");
     }
 
-    const supportedTypes = new Set(['python', 'http', 'mcp', 'search', 'calculator', 'custom']);
+    const MAX_AUTOBUILD_TOOLS = 12;
+    const requestedTools = design.tools as any[];
+    const toolDefinitions = requestedTools.slice(0, MAX_AUTOBUILD_TOOLS);
+    sendEvent('status', { message: `Applying tool plan (${toolDefinitions.length}/${requestedTools.length})...`, step: 3 });
+    if (requestedTools.length > MAX_AUTOBUILD_TOOLS) {
+      sendEvent('status', { message: `Tool plan capped at ${MAX_AUTOBUILD_TOOLS} items for safety.` });
+    }
+
+    const supportedTypes = new Set(['javascript', 'http', 'mcp', 'custom']);
     const availableAgentIdSet = new Set((availableAgents as any[]).map((a: any) => Number(a.id)));
     const normalizeToolType = (toolDef: any) => {
       const raw = String(toolDef?.type || '').trim().toLowerCase();
-      if (['python', 'code', 'coding', 'script', 'python_script'].includes(raw)) return 'python';
+      if (['python', 'javascript', 'code', 'coding', 'script', 'python_script', 'js', 'node'].includes(raw)) return 'javascript';
       if (['http', 'http_request', 'api', 'rest', 'rest_api', 'webhook'].includes(raw)) return 'http';
       if (supportedTypes.has(raw)) return raw;
-      if (toolDef?.config?.code) return 'python';
+      if (toolDef?.config?.code) return 'javascript';
       if (toolDef?.config?.url || toolDef?.config?.endpoint) return 'http';
       return 'custom';
     };
     const normalizeToolConfig = (toolDef: any, normalizedType: string) => {
       const cfg = (toolDef && typeof toolDef.config === 'object' && toolDef.config !== null) ? { ...toolDef.config } : {};
-      if (normalizedType === 'python') {
+      if (normalizedType === 'javascript') {
         const code = typeof cfg.code === 'string' && cfg.code.trim()
           ? cfg.code
-          : 'result = args if isinstance(args, dict) else {"input": args}\nprint(result)';
+          : 'const payload = (args && typeof args === "object") ? args : { input: args }; result = payload;';
         return { code };
       }
       if (normalizedType === 'http') {
@@ -2174,15 +5043,14 @@ app.post('/api/tools/autobuild', async (req, res) => {
       return cfg;
     };
 
-    const prisma = getPrisma();
     const createdToolIds: number[] = [];
-    const existingToolById = new Set((availableTools as any[]).map((t: any) => Number(t.id)));
+    const existingToolById = new Set((availableToolsRaw as any[]).map((t: any) => Number(t.id)));
 
-    for (const toolDef of design.tools) {
+    for (const toolDef of toolDefinitions) {
       const normalizedType = normalizeToolType(toolDef);
       const normalizedConfig = normalizeToolConfig(toolDef, normalizedType);
       const normalizedName = String(toolDef?.name || '').trim() || `Auto ${normalizedType} tool`;
-      const normalizedDescription = String(toolDef?.description || '').trim() || `Auto-generated ${normalizedType} tool for: ${goal}`;
+      const normalizedDescription = String(toolDef?.description || '').trim() || `Auto-generated ${normalizedType} tool for: ${normalizedGoal}`;
       const normalizedCategory = inferToolCategory(
         normalizedName,
         normalizedDescription,
@@ -2238,27 +5106,47 @@ app.post('/api/tools/autobuild', async (req, res) => {
     }
 
     await refreshPersistentMirror();
-    const newToolIds = createdToolIds;
-    res.json({ tool_ids: newToolIds, design });
+    const result = {
+      tool_ids: createdToolIds,
+      design,
+      processed_tools: toolDefinitions.length,
+      capped_tools: requestedTools.length > MAX_AUTOBUILD_TOOLS ? requestedTools.length - MAX_AUTOBUILD_TOOLS : 0,
+    };
+    if (stream) {
+      sendEvent('done', result);
+      return res.end();
+    }
+    res.json(result);
   } catch (e: any) {
     console.error("Tool auto-build failed:", e);
-    res.status(500).json({ error: "Failed to auto-build tools: " + e.message });
+    const statusCode = Number(e?.status || e?.statusCode || 500);
+    const safeStatus = Number.isFinite(statusCode) && statusCode >= 400 && statusCode < 600 ? statusCode : 500;
+    const message = String(e?.message || 'Failed to auto-build tools');
+    if (stream) {
+      sendEvent('error', { message: safeStatus >= 500 ? `Failed to auto-build tools: ${message}` : message });
+      return res.end();
+    }
+    res.status(safeStatus).json({ error: safeStatus >= 500 ? `Failed to auto-build tools: ${message}` : message });
   }
 });
 
 // --- Agents ---
-app.get('/api/agents', async (req, res) => {
+app.get('/api/agents', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const scopedProjectIds = getScopedProjectIds(scope);
+    if (scopedProjectIds && !scopedProjectIds.length) return res.json([]);
     const prisma = getPrisma();
     const [agents, agentTools, tools, agentMcpTools, agentMcpBundles, bundles, exposures] = await Promise.all([
-      prisma.orchestratorAgent.findMany({ orderBy: { id: 'asc' } }),
-      prisma.orchestratorAgentTool.findMany({ orderBy: [{ agentId: 'asc' }, { toolId: 'asc' }] }),
+      prisma.orchestratorAgent.findMany({ where: scopedProjectIds ? { projectId: { in: scopedProjectIds } } : undefined, orderBy: { id: 'asc' } }),
+      prisma.orchestratorAgentTool.findMany({ where: getScopedAgentIds(scope) ? { agentId: { in: getScopedAgentIds(scope)! } } : undefined, orderBy: [{ agentId: 'asc' }, { toolId: 'asc' }] }),
       prisma.orchestratorTool.findMany({ orderBy: { name: 'asc' } }),
-      prisma.orchestratorAgentMcpTool.findMany({ orderBy: [{ agentId: 'asc' }, { toolId: 'asc' }] }),
-      prisma.orchestratorAgentMcpBundle.findMany({ orderBy: [{ agentId: 'asc' }, { bundleId: 'asc' }] }),
+      prisma.orchestratorAgentMcpTool.findMany({ where: getScopedAgentIds(scope) ? { agentId: { in: getScopedAgentIds(scope)! } } : undefined, orderBy: [{ agentId: 'asc' }, { toolId: 'asc' }] }),
+      prisma.orchestratorAgentMcpBundle.findMany({ where: getScopedAgentIds(scope) ? { agentId: { in: getScopedAgentIds(scope)! } } : undefined, orderBy: [{ agentId: 'asc' }, { bundleId: 'asc' }] }),
       prisma.orchestratorMcpBundle.findMany({ orderBy: { name: 'asc' } }),
       prisma.orchestratorMcpExposedTool.findMany(),
     ]);
+    if (!agents.length) return res.json([]);
     const toolById = new Map(tools.map((tool) => [tool.id, tool]));
     const exposureByToolId = new Map(exposures.map((row) => [row.toolId, row]));
     const bundleById = new Map(bundles.map((bundle) => [bundle.id, bundle]));
@@ -2305,24 +5193,66 @@ app.get('/api/agents', async (req, res) => {
       });
     }
 
-    const agentsWithDetails = await Promise.all(agents.map(async (agent) => {
-      const stats = db.prepare(`
-          SELECT 
-              SUM(prompt_tokens) as prompt_tokens, 
-              SUM(completion_tokens) as completion_tokens, 
-              SUM(total_cost) as total_cost 
-          FROM agent_executions 
-          WHERE agent_id = ?
-      `).get(agent.id) as any;
-      const runningExecutions = db.prepare("SELECT COUNT(*) as count FROM agent_executions WHERE agent_id = ? AND status = 'running'").get(agent.id) as any;
-      const queuedJobs = db.prepare(`
-        SELECT COUNT(*) as count
-        FROM job_queue
-        WHERE type = 'run_agent'
-          AND status = 'pending'
-          AND CAST(json_extract(payload, '$.agentId') AS INTEGER) = ?
-      `).get(agent.id) as any;
-      const config = await getProviderConfig(agent.provider);
+    const agentIds = agents.map((agent) => Number(agent.id)).filter((id) => Number.isFinite(id) && id > 0);
+    const agentIdSet = new Set<number>(agentIds);
+    const [executionSums, runningExecutionCounts, pendingJobs, providerConfigs] = await Promise.all([
+      prisma.orchestratorAgentExecution.groupBy({
+        by: ['agentId'],
+        where: { agentId: { in: agentIds } },
+        _sum: { promptTokens: true, completionTokens: true, totalCost: true },
+      }),
+      prisma.orchestratorAgentExecution.groupBy({
+        by: ['agentId'],
+        where: { agentId: { in: agentIds }, status: 'running' },
+        _count: { _all: true },
+      }),
+      prisma.orchestratorJobQueue.findMany({
+        where: { type: 'run_agent', status: 'pending' },
+        select: { payload: true },
+      }),
+      Promise.all(
+        Array.from(new Set(agents.map((agent) => String(agent.provider || 'google')))).map(async (providerKey) => ({
+          providerKey,
+          config: await getProviderConfig(providerKey),
+        })),
+      ),
+    ]);
+
+    const statsByAgentId = new Map<number, { promptTokens: number; completionTokens: number; totalCost: number }>();
+    for (const row of executionSums) {
+      statsByAgentId.set(Number(row.agentId), {
+        promptTokens: Number(row._sum.promptTokens || 0),
+        completionTokens: Number(row._sum.completionTokens || 0),
+        totalCost: Number(row._sum.totalCost || 0),
+      });
+    }
+
+    const runningByAgentId = new Map<number, number>();
+    for (const row of runningExecutionCounts) {
+      runningByAgentId.set(Number(row.agentId), Number(row._count._all || 0));
+    }
+
+    const queuedByAgentId = new Map<number, number>();
+    for (const row of pendingJobs as Array<{ payload: string | null }>) {
+      let payload: any = {};
+      try { payload = row.payload ? JSON.parse(row.payload) : {}; } catch {}
+      const payloadAgentId = Number(
+        payload?.agentId ??
+        payload?.agent_id ??
+        payload?.agent?.id ??
+        NaN
+      );
+      if (!agentIdSet.has(payloadAgentId)) continue;
+      queuedByAgentId.set(payloadAgentId, Number(queuedByAgentId.get(payloadAgentId) || 0) + 1);
+    }
+
+    const providerConfigByKey = new Map(providerConfigs.map(({ providerKey, config }) => [providerKey, config]));
+
+    const agentsWithDetails = agents.map((agent) => {
+      const stats = statsByAgentId.get(agent.id) || { promptTokens: 0, completionTokens: 0, totalCost: 0 };
+      const runningExecutions = Number(runningByAgentId.get(agent.id) || 0);
+      const queuedJobs = Number(queuedByAgentId.get(agent.id) || 0);
+      const config = providerConfigByKey.get(String(agent.provider || 'google')) || { source: 'missing', sourceName: undefined };
       const mcpTools = agentMcpToolsMap.get(agent.id) || [];
       const mcpBundles = agentMcpBundlesMap.get(agent.id) || [];
       return {
@@ -2344,16 +5274,17 @@ app.get('/api/agents', async (req, res) => {
         retry_policy: agent.retryPolicy,
         timeout_ms: agent.timeoutMs,
         is_exposed: agent.isExposed,
+        learning_enabled: isLearningEnabled('agent', agent.id),
         project_id: agent.projectId,
         created_at: agent.createdAt,
         updated_at: agent.updatedAt,
         tools: agentToolsMap.get(agent.id) || [],
         stats: {
-          prompt_tokens: stats.prompt_tokens || 0,
-          completion_tokens: stats.completion_tokens || 0,
-          total_cost: stats.total_cost || 0,
+          prompt_tokens: Number(stats.promptTokens || 0),
+          completion_tokens: Number(stats.completionTokens || 0),
+          total_cost: Number(stats.totalCost || 0),
         },
-        running_count: (runningExecutions.count || 0) + (queuedJobs.count || 0),
+        running_count: Number(runningExecutions || 0) + Number(queuedJobs || 0),
         credential_source: config.source,
         credential_source_name: config.sourceName,
         mcp_tool_ids: mcpTools.map((x: any) => Number(x.tool_id)),
@@ -2361,14 +5292,14 @@ app.get('/api/agents', async (req, res) => {
         mcp_tools: mcpTools,
         mcp_bundles: mcpBundles,
       };
-    }));
+    });
     res.json(agentsWithDetails);
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.post('/api/agents', async (req, res) => {
+app.post('/api/agents', requireUser, async (req, res) => {
   const {
     name,
     role,
@@ -2389,6 +5320,7 @@ app.post('/api/agents', async (req, res) => {
     mcp_bundle_ids,
     toolIds,
     is_exposed,
+    learning_enabled,
     project_id,
   } = req.body;
   const normalizedName = String(name || '').trim();
@@ -2401,6 +5333,13 @@ app.post('/api/agents', async (req, res) => {
     ? String(system_prompt).trim()
     : buildSystemPrompt({ name: normalizedName, role: normalizedRole, goal: normalizedGoal, backstory: normalizedBackstory });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleProjectId(scope, Number(project_id));
+    for (const toolId of Array.isArray(toolIds) ? toolIds : []) requireVisibleToolId(scope, Number(toolId));
+    for (const toolId of Array.isArray(mcp_tool_ids) ? mcp_tool_ids : []) requireVisibleToolId(scope, Number(toolId));
+    for (const bundleId of Array.isArray(mcp_bundle_ids) ? mcp_bundle_ids : []) {
+      if (!scope.isAdmin && !(scope.allowedBundleIds?.has(Number(bundleId)))) return res.status(403).json({ error: 'Forbidden' });
+    }
     const prisma = getPrisma();
     const created = await prisma.orchestratorAgent.create({
       data: {
@@ -2423,6 +5362,7 @@ app.post('/api/agents', async (req, res) => {
         projectId: project_id || null,
       },
     });
+    setLearningEnabled('agent', created.id, learning_enabled !== false);
 
     if (toolIds && Array.isArray(toolIds)) {
       const data = toolIds.map((toolId: any) => ({
@@ -2433,21 +5373,47 @@ app.post('/api/agents', async (req, res) => {
     }
     if (Array.isArray(mcp_tool_ids)) {
       const validToolIds = mcp_tool_ids.map((x: any) => Number(x)).filter((x: number) => Number.isFinite(x));
-      const exposed = await prisma.orchestratorMcpExposedTool.findMany({
-        where: { toolId: { in: validToolIds } },
-        select: { toolId: true },
-      });
-      const data = exposed.map((row) => ({ agentId: created.id, toolId: row.toolId }));
-      if (data.length) await prisma.orchestratorAgentMcpTool.createMany({ data, skipDuplicates: true });
+      let exposedToolIds = (
+        await prisma.orchestratorMcpExposedTool.findMany({
+          where: { toolId: { in: validToolIds } },
+          select: { toolId: true },
+        })
+      ).map((row) => Number(row.toolId));
+      if (!exposedToolIds.length && validToolIds.length) {
+        exposedToolIds = (db.prepare('SELECT tool_id FROM mcp_exposed_tools WHERE tool_id IN (' + validToolIds.map(() => '?').join(',') + ')').all(...validToolIds) as any[])
+          .map((row) => Number(row.tool_id))
+          .filter((id) => Number.isFinite(id));
+      }
+      const data = exposedToolIds.map((toolId) => ({ agentId: created.id, toolId }));
+      if (data.length) {
+        try {
+          await prisma.orchestratorAgentMcpTool.createMany({ data, skipDuplicates: true });
+        } catch (error: any) {
+          console.warn('Agent MCP tool link sync fell back to SQLite:', error?.message || error);
+        }
+      }
     }
     if (Array.isArray(mcp_bundle_ids)) {
       const validBundleIds = mcp_bundle_ids.map((x: any) => Number(x)).filter((x: number) => Number.isFinite(x));
-      const bundles = await prisma.orchestratorMcpBundle.findMany({
-        where: { id: { in: validBundleIds } },
-        select: { id: true },
-      });
-      const data = bundles.map((row) => ({ agentId: created.id, bundleId: row.id }));
-      if (data.length) await prisma.orchestratorAgentMcpBundle.createMany({ data, skipDuplicates: true });
+      let bundleIds = (
+        await prisma.orchestratorMcpBundle.findMany({
+          where: { id: { in: validBundleIds } },
+          select: { id: true },
+        })
+      ).map((row) => Number(row.id));
+      if (!bundleIds.length && validBundleIds.length) {
+        bundleIds = (db.prepare('SELECT id FROM mcp_bundles WHERE id IN (' + validBundleIds.map(() => '?').join(',') + ')').all(...validBundleIds) as any[])
+          .map((row) => Number(row.id))
+          .filter((id) => Number.isFinite(id));
+      }
+      const data = bundleIds.map((bundleId) => ({ agentId: created.id, bundleId }));
+      if (data.length) {
+        try {
+          await prisma.orchestratorAgentMcpBundle.createMany({ data, skipDuplicates: true });
+        } catch (error: any) {
+          console.warn('Agent MCP bundle link sync fell back to SQLite:', error?.message || error);
+        }
+      }
     }
     await refreshPersistentMirror();
     res.json({ id: created.id });
@@ -2456,7 +5422,7 @@ app.post('/api/agents', async (req, res) => {
   }
 });
 
-app.put('/api/agents/:id', async (req, res) => {
+app.put('/api/agents/:id', requireUser, async (req, res) => {
   const {
     name,
     role,
@@ -2477,6 +5443,7 @@ app.put('/api/agents/:id', async (req, res) => {
     mcp_bundle_ids,
     toolIds,
     is_exposed,
+    learning_enabled,
     project_id,
   } = req.body;
   const normalizedName = String(name || '').trim();
@@ -2489,8 +5456,16 @@ app.put('/api/agents/:id', async (req, res) => {
     ? String(system_prompt).trim()
     : buildSystemPrompt({ name: normalizedName, role: normalizedRole, goal: normalizedGoal, backstory: normalizedBackstory });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const prisma = getPrisma();
     const agentId = Number(req.params.id);
+    requireVisibleAgentId(scope, agentId);
+    requireVisibleProjectId(scope, Number(project_id));
+    for (const toolId of Array.isArray(toolIds) ? toolIds : []) requireVisibleToolId(scope, Number(toolId));
+    for (const toolId of Array.isArray(mcp_tool_ids) ? mcp_tool_ids : []) requireVisibleToolId(scope, Number(toolId));
+    for (const bundleId of Array.isArray(mcp_bundle_ids) ? mcp_bundle_ids : []) {
+      if (!scope.isAdmin && !(scope.allowedBundleIds?.has(Number(bundleId)))) return res.status(403).json({ error: 'Forbidden' });
+    }
     await prisma.orchestratorAgent.update({
       where: { id: agentId },
       data: {
@@ -2514,6 +5489,7 @@ app.put('/api/agents/:id', async (req, res) => {
         updatedAt: new Date(),
       },
     });
+    setLearningEnabled('agent', agentId, learning_enabled !== false);
 
     await prisma.orchestratorAgentTool.deleteMany({ where: { agentId } });
     if (toolIds && Array.isArray(toolIds)) {
@@ -2550,10 +5526,12 @@ app.put('/api/agents/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/agents/:id', async (req, res) => {
+app.delete('/api/agents/:id', requireUser, async (req, res) => {
   console.log(`Deleting agent ${req.params.id}`);
   try {
     const agentId = Number(req.params.id);
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleAgentId(scope, agentId);
     const prisma = getPrisma();
     await prisma.orchestratorAgentTool.deleteMany({ where: { agentId } });
     await prisma.orchestratorAgentMcpTool.deleteMany({ where: { agentId } });
@@ -2569,12 +5547,6 @@ app.delete('/api/agents/:id', async (req, res) => {
     await prisma.orchestratorToolExecution.deleteMany({ where: { agentId } });
     await prisma.orchestratorAgentSession.deleteMany({ where: { agentId } });
     await refreshPersistentMirror();
-    // Mirror to SQLite
-    try {
-      db.prepare('DELETE FROM agent_executions WHERE agent_id = ?').run(agentId);
-      db.prepare('DELETE FROM tool_executions WHERE agent_id = ?').run(agentId);
-      db.prepare('DELETE FROM agent_sessions WHERE agent_id = ?').run(agentId);
-    } catch {}
     console.log(`Agent ${agentId} deleted successfully`);
     res.json({ success: true });
   } catch (e: any) {
@@ -2584,14 +5556,17 @@ app.delete('/api/agents/:id', async (req, res) => {
 });
 
 // --- Projects ---
-app.get('/api/projects', async (req, res) => {
+app.get('/api/projects', requireUser, async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const scopedProjectIds = getScopedProjectIds(scope);
+    if (scopedProjectIds && !scopedProjectIds.length) return res.json([]);
     const prisma = getPrisma();
     const [projects, crews, agents] = await Promise.all([
-      prisma.orchestratorProject.findMany({ orderBy: { id: 'asc' } }),
-      prisma.orchestratorCrew.findMany({ select: { id: true, projectId: true } }),
-      prisma.orchestratorAgent.findMany({ select: { id: true, projectId: true } }),
+      prisma.orchestratorProject.findMany({ where: scopedProjectIds ? { id: { in: scopedProjectIds } } : undefined, orderBy: { id: 'asc' } }),
+      prisma.orchestratorCrew.findMany({ where: scopedProjectIds ? { projectId: { in: scopedProjectIds } } : undefined, select: { id: true, projectId: true } }),
+      prisma.orchestratorAgent.findMany({ where: scopedProjectIds ? { projectId: { in: scopedProjectIds } } : undefined, select: { id: true, projectId: true } }),
     ]);
 
     const crewIdsByProject = new Map<number, number[]>();
@@ -2611,42 +5586,42 @@ app.get('/api/projects', async (req, res) => {
     const projectsWithStats = projects.map((p) => {
       const crewIds = crewIdsByProject.get(p.id) || [];
       const agentIds = agentIdsByProject.get(p.id) || [];
-      let crewCost = 0;
-      if (crewIds.length > 0) {
-        const placeholders = crewIds.map(() => '?').join(',');
-        const result = db.prepare(`SELECT SUM(total_cost) as cost FROM crew_executions WHERE crew_id IN (${placeholders})`).get(...crewIds) as any;
-        crewCost = result.cost || 0;
-      }
-      let agentCost = 0;
-      if (agentIds.length > 0) {
-        const placeholders = agentIds.map(() => '?').join(',');
-        const result = db.prepare(`SELECT SUM(total_cost) as cost FROM agent_executions WHERE agent_id IN (${placeholders})`).get(...agentIds) as any;
-        agentCost = result.cost || 0;
-      }
+      return { project: p, crewIds, agentIds };
+    });
+
+    const projectCostStats = await Promise.all(projectsWithStats.map(async ({ project, crewIds, agentIds }) => {
+      const costs = await getRuntimeExecutionCostTotals({ crewIds, agentIds });
       return {
-        id: p.id,
-        name: p.name,
-        description: p.description,
-        created_at: p.createdAt,
+        id: project.id,
+        name: project.name,
+        description: project.description,
+        platform_project_id: (project as any).platformProjectId ?? null,
+        created_at: project.createdAt,
         crews_count: crewIds.length,
         agents_count: agentIds.length,
-        total_cost: crewCost + agentCost,
+        total_cost: costs.crewCost + costs.agentCost,
       };
-    });
-    res.json(projectsWithStats);
+    }));
+
+    res.json(projectCostStats);
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.get('/api/projects/platform-links', async (req, res) => {
+app.get('/api/projects/platform-links', requireUser, async (req, res) => {
   try {
-    const links = await getPrisma().orchestratorProjectLink.findMany({
-      select: { projectId: true, platformProjectId: true },
+    const scope = await resolveOrchestratorAccessScope(req);
+    const scopedProjectIds = getScopedProjectIds(scope);
+    const projects = await getPrisma().orchestratorProject.findMany({
+      where: scopedProjectIds ? { id: { in: scopedProjectIds } } : undefined,
+      select: { id: true, platformProjectId: true },
     });
     const map: Record<number, string> = {};
-    for (const row of links) {
-      map[row.projectId] = row.platformProjectId;
+    for (const row of projects) {
+      if (row.platformProjectId) {
+        map[row.id] = row.platformProjectId;
+      }
     }
     res.json({ links: map });
   } catch (e: any) {
@@ -2654,12 +5629,34 @@ app.get('/api/projects/platform-links', async (req, res) => {
   }
 });
 
-app.post('/api/projects', async (req, res) => {
+app.post('/api/projects', requireUser, async (req, res) => {
   const { name, description } = req.body;
   try {
-    const created = await getPrisma().orchestratorProject.create({
-      data: { name, description: description || null },
-    });
+    const scope = await resolveOrchestratorAccessScope(req);
+    const prisma = getPrisma();
+    let created: any;
+    if (!scope.isAdmin) {
+      // For regular users, auto-create a platform project in their org and link it.
+      const platformProject = await prisma.project.create({
+        data: {
+          orgId: req.user!.orgId,
+          name: String(name || '').trim() || 'Untitled Project',
+          description: description || null,
+        },
+      });
+      created = await prisma.orchestratorProject.create({
+        data: {
+          name: String(name || '').trim() || platformProject.name,
+          description: description || null,
+          platformProjectId: platformProject.id,
+        },
+      });
+      assignResourceOwner('project', Number(created.id), req.user!);
+    } else {
+      created = await prisma.orchestratorProject.create({
+        data: { name, description: description || null },
+      });
+    }
     await refreshPersistentMirror();
     res.json({ id: created.id });
   } catch (e: any) {
@@ -2667,8 +5664,10 @@ app.post('/api/projects', async (req, res) => {
   }
 });
 
-app.get('/api/projects/:id', async (req, res) => {
+app.get('/api/projects/:id', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleProjectId(scope, Number(req.params.id));
     const project = await getPrisma().orchestratorProject.findUnique({
       where: { id: Number(req.params.id) },
     });
@@ -2684,10 +5683,12 @@ app.get('/api/projects/:id', async (req, res) => {
   }
 });
 
-app.get('/api/projects/:id/traces', async (req, res) => {
+app.get('/api/projects/:id/traces', requireUser, async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     if (!Number.isFinite(projectId)) return res.status(400).json({ error: 'Invalid project id' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleProjectId(scope, projectId);
 
     const executions = await getPrisma().orchestratorAgentExecution.findMany({
       where: {
@@ -2722,10 +5723,12 @@ app.get('/api/projects/:id/traces', async (req, res) => {
   }
 });
 
-app.get('/api/projects/:id/tool-traces', async (req, res) => {
+app.get('/api/projects/:id/tool-traces', requireUser, async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     if (!Number.isFinite(projectId)) return res.status(400).json({ error: 'Invalid project id' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleProjectId(scope, projectId);
 
     const rows = await getPrisma().orchestratorToolExecution.findMany({
       where: {
@@ -2759,19 +5762,26 @@ app.get('/api/projects/:id/tool-traces', async (req, res) => {
 });
 
 // --- Workflows ---
-app.get('/api/workflows', async (req, res) => {
+app.get('/api/workflows', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const prisma = getPrisma();
     const projectId = Number(req.query.project_id);
+    if (Number.isFinite(projectId)) requireVisibleProjectId(scope, projectId);
+    const scopedProjectIds = getScopedProjectIds(scope);
+    const workflowWhere = Number.isFinite(projectId)
+      ? { projectId }
+      : (scopedProjectIds ? { projectId: { in: scopedProjectIds } } : undefined);
     const [workflows, workflowRuns] = await Promise.all([
       prisma.orchestratorWorkflow.findMany({
-        where: Number.isFinite(projectId) ? { projectId } : undefined,
+        where: workflowWhere,
         orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
         include: {
           project: { select: { name: true } },
         },
       }),
       prisma.orchestratorWorkflowRun.findMany({
+        where: workflowWhere ? { workflow: workflowWhere as any } : undefined,
         select: { workflowId: true, status: true, createdAt: true, id: true },
         orderBy: [{ workflowId: 'asc' }, { id: 'desc' }],
       }),
@@ -2790,6 +5800,7 @@ app.get('/api/workflows', async (req, res) => {
         name: workflow.name,
         description: workflow.description,
         status: workflow.status,
+        learning_enabled: isLearningEnabled('workflow', workflow.id),
         trigger_type: workflow.triggerType,
         graph: workflow.graph,
         version: workflow.version,
@@ -2808,20 +5819,23 @@ app.get('/api/workflows', async (req, res) => {
   }
 });
 
-app.get('/api/workflows/:id', async (req, res) => {
+app.get('/api/workflows/:id', requireUser, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const [workflow, runs] = await Promise.all([
       getPrisma().orchestratorWorkflow.findUnique({ where: { id } }),
       getPrisma().orchestratorWorkflowRun.findMany({ where: { workflowId: id }, orderBy: { id: 'desc' }, take: 20 }),
     ]);
     if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
+    requireVisibleProjectId(scope, workflow.projectId);
     res.json({
       id: workflow.id,
       name: workflow.name,
       description: workflow.description,
       status: workflow.status,
+      learning_enabled: isLearningEnabled('workflow', workflow.id),
       trigger_type: workflow.triggerType,
       graph: workflow.graph,
       version: workflow.version,
@@ -2835,10 +5849,12 @@ app.get('/api/workflows/:id', async (req, res) => {
   }
 });
 
-app.post('/api/workflows', async (req, res) => {
+app.post('/api/workflows', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const prisma = getPrisma();
-    const { name, description, status, trigger_type, graph, project_id } = req.body || {};
+    const { name, description, status, trigger_type, graph, project_id, learning_enabled } = req.body || {};
+    requireVisibleProjectId(scope, Number(project_id));
     const normalizedGraph = normalizeWorkflowGraph(parseWorkflowGraph(graph || { nodes: [], edges: [] }));
     const serializedGraph = JSON.stringify(normalizedGraph);
     const now = new Date().toISOString();
@@ -2868,6 +5884,7 @@ app.post('/api/workflows', async (req, res) => {
         createdAt: new Date(now),
       },
     });
+    setLearningEnabled('workflow', workflow.id, learning_enabled !== false);
     await refreshPersistentMirror();
     res.json({ id: workflow.id });
   } catch (e: any) {
@@ -2875,14 +5892,17 @@ app.post('/api/workflows', async (req, res) => {
   }
 });
 
-app.put('/api/workflows/:id', async (req, res) => {
+app.put('/api/workflows/:id', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
     const prisma = getPrisma();
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
-    const existing = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id) as any;
+    const existing = await prisma.orchestratorWorkflow.findUnique({ where: { id } });
     if (!existing) return res.status(404).json({ error: 'Workflow not found' });
-    const { name, description, status, trigger_type, graph, project_id } = req.body || {};
+    requireVisibleProjectId(scope, existing.projectId ?? null);
+    const { name, description, status, trigger_type, graph, project_id, learning_enabled } = req.body || {};
+    if (project_id != null && project_id !== '') requireVisibleProjectId(scope, Number(project_id));
     const normalizedGraph = normalizeWorkflowGraph(parseWorkflowGraph(graph || existing.graph || { nodes: [], edges: [] }));
     const serializedGraph = JSON.stringify(normalizedGraph);
     const nextVersion = Number(existing.version || 1) + 1;
@@ -2894,11 +5914,11 @@ app.put('/api/workflows/:id', async (req, res) => {
         name: workflowName,
         description: typeof description === 'string' ? description : existing.description,
         status: String(status || existing.status || 'draft'),
-        triggerType: String(trigger_type || existing.trigger_type || 'manual'),
+        triggerType: String(trigger_type || existing.triggerType || 'manual'),
         graph: serializedGraph,
         version: nextVersion,
         updatedAt: new Date(now),
-        projectId: Number.isFinite(Number(project_id)) ? Number(project_id) : existing.project_id ?? null,
+        projectId: Number.isFinite(Number(project_id)) ? Number(project_id) : existing.projectId ?? null,
       },
     });
     await prisma.orchestratorWorkflowVersion.create({
@@ -2908,12 +5928,13 @@ app.put('/api/workflows/:id', async (req, res) => {
         name: workflowName,
         description: typeof description === 'string' ? description : existing.description,
         status: String(status || existing.status || 'draft'),
-        triggerType: String(trigger_type || existing.trigger_type || 'manual'),
+        triggerType: String(trigger_type || existing.triggerType || 'manual'),
         graph: serializedGraph,
         changeKind: 'update',
         createdAt: new Date(now),
       },
     });
+    setLearningEnabled('workflow', id, learning_enabled !== false);
     await refreshPersistentMirror();
     res.json({ success: true, version: nextVersion });
   } catch (e: any) {
@@ -2921,10 +5942,17 @@ app.put('/api/workflows/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/workflows/:id', async (req, res) => {
+app.delete('/api/workflows/:id', requireUser, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const existing = await getPrisma().orchestratorWorkflow.findUnique({
+      where: { id },
+      select: { projectId: true },
+    });
+    if (!existing) return res.status(404).json({ error: 'Workflow not found' });
+    requireVisibleProjectId(scope, existing.projectId ?? null);
     const prisma = getPrisma();
     await prisma.orchestratorWorkflowVersion.deleteMany({ where: { workflowId: id } });
     await prisma.orchestratorWorkflow.delete({ where: { id } });
@@ -2935,10 +5963,17 @@ app.delete('/api/workflows/:id', async (req, res) => {
   }
 });
 
-app.get('/api/workflows/:id/versions', async (req, res) => {
+app.get('/api/workflows/:id/versions', requireUser, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const existing = await getPrisma().orchestratorWorkflow.findUnique({
+      where: { id },
+      select: { projectId: true },
+    });
+    if (!existing) return res.status(404).json({ error: 'Workflow not found' });
+    requireVisibleProjectId(scope, existing.projectId ?? null);
     const versions = await getPrisma().orchestratorWorkflowVersion.findMany({
       where: { workflowId: id },
       orderBy: [{ versionNumber: 'desc' }, { id: 'desc' }],
@@ -3005,22 +6040,34 @@ app.post('/api/workflows/:id/restore/:versionId', async (req, res) => {
   }
 });
 
-app.get('/api/workflows/:id/runs', (req, res) => {
+app.get('/api/workflows/:id/runs', requireUser, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
-  getPrisma().orchestratorWorkflowRun.findMany({ where: { workflowId: id }, orderBy: { id: 'desc' } })
-    .then((runs) => res.json({ runs }))
-    .catch((e: any) => res.status(500).json({ error: e.message }));
+  try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const workflow = await getPrisma().orchestratorWorkflow.findUnique({
+      where: { id },
+      select: { projectId: true },
+    });
+    if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
+    requireVisibleProjectId(scope, workflow.projectId ?? null);
+    const runs = await getPrisma().orchestratorWorkflowRun.findMany({ where: { workflowId: id }, orderBy: { id: 'desc' } });
+    res.json({ runs });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.get('/api/workflow-runs/:id', async (req, res) => {
+app.get('/api/workflow-runs/:id', requireUser, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow run id' });
+  const scope = await resolveOrchestratorAccessScope(req);
   const run = await getPrisma().orchestratorWorkflowRun.findUnique({
     where: { id },
-    include: { workflow: { select: { name: true } } },
+    include: { workflow: { select: { name: true, projectId: true } } },
   });
   if (!run) return res.status(404).json({ error: 'Workflow run not found' });
+  requireVisibleProjectId(scope, run.workflow?.projectId ?? null);
   res.json({
     id: run.id,
     workflow_id: run.workflowId,
@@ -3036,9 +6083,16 @@ app.get('/api/workflow-runs/:id', async (req, res) => {
   });
 });
 
-app.get('/api/workflow-runs/:id/stream', async (req, res) => {
+app.get('/api/workflow-runs/:id/stream', requireUser, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow run id' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  const runMeta = await getPrisma().orchestratorWorkflowRun.findUnique({
+    where: { id },
+    include: { workflow: { select: { projectId: true } } },
+  });
+  if (!runMeta) return res.status(404).json({ error: 'Workflow run not found' });
+  requireVisibleProjectId(scope, runMeta.workflow?.projectId ?? null);
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
@@ -3049,7 +6103,6 @@ app.get('/api/workflow-runs/:id/stream', async (req, res) => {
     const run = await getPrisma().orchestratorWorkflowRun.findUnique({ where: { id } });
     if (!run) {
       res.write(`event: error\ndata: ${JSON.stringify({ error: 'Workflow run not found' })}\n\n`);
-      clearInterval(timer);
       res.end();
       return;
     }
@@ -3069,32 +6122,67 @@ app.get('/api/workflow-runs/:id/stream', async (req, res) => {
     })}\n\n`);
     if (run.status !== 'running' && run.status !== 'pending') {
       res.write(`event: done\ndata: ${JSON.stringify({ status: run.status, run_id: id })}\n\n`);
-      clearInterval(timer);
       res.end();
     }
   };
 
-  const timer = setInterval(() => { void sendSnapshot(); }, 1200);
   await sendSnapshot();
-  req.on('close', () => clearInterval(timer));
+  const unsubscribe = subscribeWorkflowRun(id, () => {
+    void sendSnapshot();
+  });
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`event: ping\ndata: {}\n\n`);
+    } catch {}
+  }, 15_000);
+  req.on('close', () => {
+    unsubscribe();
+    clearInterval(heartbeat);
+  });
 });
 
-app.post('/api/workflows/:id/execute', async (req, res) => {
+app.post('/api/workflow-runs/:id/feedback', requireUser, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow run id' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    const run = await getPrisma().orchestratorWorkflowRun.findUnique({
+      where: { id },
+      include: { workflow: { select: { projectId: true } } },
+    });
+    if (!run) return res.status(404).json({ error: 'Workflow run not found' });
+    requireVisibleProjectId(scope, run.workflow?.projectId ?? null);
+    const userId = String((req as any)?.user?.id || '').trim();
+    if (!userId) return res.status(401).json({ error: 'Authentication required' });
+    const feedback = recordWorkflowRunFeedback(run, userId, (req.body || {}) as FeedbackPayload);
+    res.json({ success: true, feedback });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to save workflow feedback' });
+  }
+});
+
+app.post('/api/workflows/:id/execute', requireUser, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
-    const workflow = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id) as any;
+    const scope = await resolveOrchestratorAccessScope(req);
+    const workflow = await getPrisma().orchestratorWorkflow.findUnique({ where: { id } });
     if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
+    requireVisibleProjectId(scope, workflow.projectId ?? null);
+    const userId = String((req as any)?.user?.id || '').trim() || null;
     const input = req.body?.input ?? {};
-    const triggerType = String(req.body?.trigger_type || workflow.trigger_type || 'manual');
+    const triggerType = String(req.body?.trigger_type || workflow.triggerType || 'manual');
     const runId = await createWorkflowRun(id, triggerType, input, workflow.graph);
-    const shouldWait = req.query.wait === 'true' || req.body?.wait === true;
+    const shouldWait = shouldWaitForExecution(req);
     if (!shouldWait) {
-      const jobId = await enqueueJob('run_workflow', { workflowId: id, runId });
-      return res.status(202).json({ run_id: runId, job_id: jobId, status: 'pending' });
+      const jobId = await enqueueJob('run_workflow', { workflowId: id, runId, userId }, {
+        priority: readJobPriority(req.body?.priority, JOB_PRIORITY.HIGH),
+        tenantKey: readTenantKey(req.user?.orgId || userId || 'global'),
+      });
+      return acceptedExecutionResponse(res, { run_id: runId, job_id: jobId });
     }
     await persistWorkflowRun(runId, 'running', null, []);
-    const result = await runWorkflowExecution(runId);
+    const result = await runWorkflowExecution(runId, userId);
     res.json(result);
   } catch (e: any) {
     res.status(500).json({ error: e.message || 'Failed to execute workflow' });
@@ -3105,9 +6193,9 @@ app.post('/api/workflows/:id/webhook', async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid workflow id' });
-    const workflow = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id) as any;
+    const workflow = await getPrisma().orchestratorWorkflow.findUnique({ where: { id } });
     if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
-    const configuredTrigger = String(workflow.trigger_type || 'manual').toLowerCase();
+    const configuredTrigger = String(workflow.triggerType || 'manual').toLowerCase();
     if (configuredTrigger !== 'webhook') {
       return res.status(409).json({ error: 'Workflow is not configured for webhook triggers' });
     }
@@ -3121,13 +6209,16 @@ app.post('/api/workflows/:id/webhook', async (req, res) => {
       message: typeof req.body?.message === 'string' ? req.body.message : undefined,
     };
     const runId = await createWorkflowRun(id, 'webhook', input, workflow.graph);
-    const shouldWait = req.query.wait === 'true' || req.body?.wait === true;
+    const shouldWait = shouldWaitForExecution(req);
     if (!shouldWait) {
-      const jobId = await enqueueJob('run_workflow', { workflowId: id, runId });
-      return res.status(202).json({ run_id: runId, job_id: jobId, status: 'pending' });
+      const jobId = await enqueueJob('run_workflow', { workflowId: id, runId, userId: null }, {
+        priority: readJobPriority(req.body?.priority, JOB_PRIORITY.HIGH),
+        tenantKey: readTenantKey('public:webhook'),
+      });
+      return acceptedExecutionResponse(res, { run_id: runId, job_id: jobId });
     }
     await persistWorkflowRun(runId, 'running', null, []);
-    const result = await runWorkflowExecution(runId);
+    const result = await runWorkflowExecution(runId, null);
     res.json(result);
   } catch (e: any) {
     res.status(500).json({ error: e.message || 'Failed to execute workflow webhook' });
@@ -3194,25 +6285,33 @@ app.get('/api/stats', async (req, res) => {
     }
 });
 
-app.get('/api/analytics/failures', async (req, res) => {
+app.get('/api/analytics/failures', requireUser, async (req, res) => {
   try {
     const prisma = getPrisma();
+    const scope = await resolveOrchestratorAccessScope(req);
+    const visibleAgentIds = scope.isAdmin ? [] : Array.from(scope.allowedAgentIds ?? []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
     const topFailingTools = await prisma.orchestratorToolExecution.groupBy({
       by: ['toolName'],
-      where: { status: 'failed' },
+      where: (visibleAgentIds.length ? {
+        status: 'failed',
+        agentId: { in: visibleAgentIds },
+      } : {
+        status: 'failed',
+      }) as any,
       _count: { _all: true },
       orderBy: { _count: { toolName: 'desc' } },
       take: 8
     });
 
     const timeoutHotspotsRaw = await prisma.orchestratorAgentExecution.findMany({
-      where: {
+      where: ({
+        ...(visibleAgentIds.length ? { agentId: { in: visibleAgentIds } } : {}),
         status: 'failed',
         OR: [
           { output: { contains: 'timeout', mode: 'insensitive' } },
           { input: { contains: 'timeout', mode: 'insensitive' } }
         ]
-      },
+      }) as any,
       include: {
         agent: { select: { name: true } }
       }
@@ -3231,12 +6330,13 @@ app.get('/api/analytics/failures', async (req, res) => {
       .slice(0, 8);
 
     const tokenSpikesRaw = await prisma.orchestratorAgentExecution.findMany({
+      where: (visibleAgentIds.length ? { agentId: { in: visibleAgentIds } } : undefined) as any,
       include: {
         agent: { select: { name: true } }
       },
       orderBy: { promptTokens: 'desc' },
       take: 24 // Take more then sort by combined
-    });
+    }) as any[];
 
     const tokenSpikes = tokenSpikesRaw.map(ae => ({
       id: ae.id,
@@ -3259,9 +6359,11 @@ app.get('/api/analytics/failures', async (req, res) => {
 });
 
 // --- Direct Agent Execution (Exposed) ---
-app.get('/api/agents/:id/executions', async (req, res) => {
+app.get('/api/agents/:id/executions', requireUser, async (req, res) => {
     try {
+        const scope = await resolveOrchestratorAccessScope(req);
         const agentId = Number(req.params.id);
+        requireVisibleAgentId(scope, agentId);
         const executions = await getPrisma().orchestratorAgentExecution.findMany({
             where: { agentId },
             orderBy: { createdAt: 'desc' }
@@ -3283,8 +6385,10 @@ app.get('/api/agents/:id/executions', async (req, res) => {
     }
 });
 
-app.get('/api/agents/:id/sessions', async (req, res) => {
+app.get('/api/agents/:id/sessions', requireUser, async (req, res) => {
     const agentId = Number(req.params.id);
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleAgentId(scope, agentId);
     const prisma = getPrisma();
     const sessions = await prisma.orchestratorAgentSession.findMany({
       where: { agentId },
@@ -3325,8 +6429,10 @@ app.get('/api/agents/:id/sessions', async (req, res) => {
     res.json(mapped);
 });
 
-app.get('/api/agents/:id/sessions/:sessionId/messages', async (req, res) => {
+app.get('/api/agents/:id/sessions/:sessionId/messages', requireUser, async (req, res) => {
     const agentId = Number(req.params.id);
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleAgentId(scope, agentId);
     const sessionId = String(req.params.sessionId || '');
     if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
 
@@ -3340,17 +6446,105 @@ app.get('/api/agents/:id/sessions/:sessionId/messages', async (req, res) => {
     res.json({ session_id: sessionId, messages });
 });
 
-app.get('/api/executions/agents', async (req, res) => {
+app.get('/api/attachments/:id/content', requireUser, async (req, res) => {
+  const attachmentId = String(req.params.id || '').trim();
+  if (!attachmentId) return res.status(400).json({ error: 'Attachment id is required' });
+
+  const row = getAttachmentById(attachmentId);
+  if (!row) return res.status(404).json({ error: 'Attachment not found' });
+
+  const scope = await resolveOrchestratorAccessScope(req);
+  if (row.crew_id) {
+    requireVisibleCrewId(scope, Number(row.crew_id));
+  } else if (row.agent_id) {
+    requireVisibleAgentId(scope, Number(row.agent_id));
+  } else {
+    return res.status(403).json({ error: 'Attachment access is not available for this resource' });
+  }
+
+  if (!row.local_path) {
+    return res.redirect(String(row.file_url || ''));
+  }
+
+  res.setHeader('Content-Type', String(row.mime_type || 'application/octet-stream'));
+  res.setHeader('Content-Disposition', `inline; filename="${String(row.original_name || 'attachment')}"`);
+  return res.sendFile(String(row.local_path));
+});
+
+app.get('/api/public/attachments/:token', async (req, res) => {
+  const token = String(req.params.token || '').trim();
+  if (!token) return res.status(400).json({ error: 'Attachment token is required' });
+  const link = getAttachmentPublicLink(token);
+  if (!link) return res.status(404).json({ error: 'Attachment link not found' });
+  const expiresAtMs = Date.parse(String(link.expires_at || ''));
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+    return res.status(410).json({ error: 'Attachment link expired' });
+  }
+  const row = getAttachmentById(String(link.attachment_id || ''));
+  if (!row) return res.status(404).json({ error: 'Attachment not found' });
+
+  res.setHeader('Cache-Control', 'private, max-age=60');
+  if (row.local_path) {
+    res.setHeader('Content-Type', String(row.mime_type || 'application/octet-stream'));
+    res.setHeader('Content-Disposition', `inline; filename="${String(row.original_name || 'attachment')}"`);
+    return res.sendFile(String(row.local_path));
+  }
+  if (row.file_url) {
+    return res.redirect(String(row.file_url));
+  }
+  return res.status(404).json({ error: 'Attachment content is unavailable' });
+});
+
+app.post('/api/agents/:id/attachments', requireUser, async (req, res, next) => {
+  try {
+    const agentId = Number(req.params.id);
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleAgentId(scope, agentId);
+    const multer = (await import('multer')).default;
+    const upload = multer({
+      dest: '/tmp/',
+      limits: {
+        files: 6,
+        fileSize: 25 * 1024 * 1024,
+      },
+    });
+
+    upload.array('files', 6)(req, res, async (err) => {
+      if (err) return next(err);
+      try {
+        const files = Array.isArray((req as any).files) ? (req as any).files : [];
+        if (!files.length) return res.status(400).json({ error: 'No files uploaded' });
+        const attachments = await Promise.all(files.map((file: any) => persistUploadedAttachment({
+          file,
+          scopeType: 'agent_chat_upload',
+          agentId,
+          uploaderUserId: req.user?.id ?? null,
+          uploaderOrgId: req.user?.orgId ?? null,
+        })));
+        res.json({ attachments });
+      } catch (error) {
+        next(error);
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/executions/agents', requireUser, async (req, res) => {
     try {
         const prisma = getPrisma();
+        const scope = await resolveOrchestratorAccessScope(req);
+        const visibleAgentIds = scope.isAdmin ? [] : Array.from(scope.allowedAgentIds ?? []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
         const executions = await prisma.orchestratorAgentExecution.findMany({
+            where: (scope.isAdmin ? undefined : (visibleAgentIds.length ? { agentId: { in: visibleAgentIds } } : { id: -1 })) as any,
             include: {
                 agent: {
                     select: { name: true }
                 }
             },
             orderBy: { createdAt: 'desc' },
-            take: 10
+            take: 120
         });
 
         // Map to expected format
@@ -3364,6 +6558,65 @@ app.get('/api/executions/agents', async (req, res) => {
     } catch (e: any) {
         res.status(500).json({ error: e.message });
     }
+});
+
+app.get('/api/agent-executions', requireUser, async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const scope = await resolveOrchestratorAccessScope(req);
+    const visibleAgentIds = scope.isAdmin
+      ? []
+      : Array.from(scope.allowedAgentIds ?? [])
+          .map((id) => Number(id))
+          .filter((id) => Number.isFinite(id) && id > 0);
+
+    const page = Math.max(1, Number(req.query.page || 1));
+    const pageSize = Math.min(100, Math.max(5, Number(req.query.pageSize || 20)));
+    const status = String(req.query.status || '').trim().toLowerCase();
+    const executionKind = String(req.query.execution_kind || '').trim().toLowerCase();
+    const q = String(req.query.q || '').trim();
+    const allowedExecutionKinds = new Set(['standard', 'delegated_parent', 'delegated_child', 'delegated_synthesis']);
+
+    const where: any = {
+      ...(scope.isAdmin ? {} : (visibleAgentIds.length ? { agentId: { in: visibleAgentIds } } : { id: -1 })),
+      ...(status ? { status } : {}),
+      ...(allowedExecutionKinds.has(executionKind) ? { executionKind } : {}),
+    };
+    if (q) {
+      where.OR = [
+        { task: { contains: q, mode: 'insensitive' } },
+        { output: { contains: q, mode: 'insensitive' } },
+        { input: { contains: q, mode: 'insensitive' } },
+        { agent: { name: { contains: q, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [total, rows] = await Promise.all([
+      prisma.orchestratorAgentExecution.count({ where }),
+      prisma.orchestratorAgentExecution.findMany({
+        where,
+        include: {
+          agent: { select: { name: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+    ]);
+
+    res.json({
+      items: rows.map((row: any) => ({
+        ...row,
+        created_at: row.createdAt,
+        agent_name: row.agent?.name || 'Unknown Agent',
+      })),
+      total,
+      page,
+      pageSize,
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message || 'Failed to load agent executions' });
+  }
 });
 
 app.post('/api/agents/:id/run', localRunLimiter, async (req, res) => {
@@ -3380,7 +6633,14 @@ app.post('/api/agents/:id/run', localRunLimiter, async (req, res) => {
           session_id,
           user_id,
           initiatedBy: 'direct_agent_api',
+        }, {
+          priority: readJobPriority(req.body?.priority, JOB_PRIORITY.HIGH),
+          tenantKey: readTenantKey((req as any)?.user?.orgId || user_id || 'global'),
         });
+
+        if (!shouldWaitForExecution(req)) {
+          return acceptedExecutionResponse(res, { job_id: jobId });
+        }
 
         const result = await waitForJob(jobId, 120000);
         res.json(result);
@@ -3443,9 +6703,9 @@ app.post('/api/agents/:id/delegate', localRunLimiter, async (req, res) => {
     });
     void workflow.catch(() => undefined);
 
-    const shouldWait = req.query.wait === 'true' || wait === true;
+    const shouldWait = shouldWaitForExecution(req) || wait === true;
     if (!shouldWait) {
-      return res.status(202).json({ parent_execution_id: parentExecutionId, status: 'running' });
+      return acceptedExecutionResponse(res, { parent_execution_id: parentExecutionId, status: 'running' });
     }
 
     const timeoutMs = typeof waitMs === 'number' && waitMs > 0 ? waitMs : 120000;
@@ -3465,14 +6725,18 @@ app.post('/api/agents/:id/delegate', localRunLimiter, async (req, res) => {
       await sleep(intervalMs);
     }
 
-    res.status(202).json({ parent_execution_id: parentExecutionId, status: 'running' });
+    acceptedExecutionResponse(res, { parent_execution_id: parentExecutionId, status: 'running' });
 });
 
-app.post('/api/agents/:id/chat', localRunLimiter, async (req, res) => {
+app.post('/api/agents/:id/chat', requireUser, localRunLimiter, async (req, res) => {
     const agentId = Number(req.params.id);
-    const { message, session_id, user_id } = req.body || {};
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleAgentId(scope, agentId);
+    const { message, session_id, user_id, attachments } = req.body || {};
+    const normalizedAttachments = normalizeIncomingAttachments(attachments);
     const task = typeof message === 'string' ? message.trim() : '';
-    if (!task) return res.status(400).json({ error: 'message is required' });
+    const effectiveTask = task || (normalizedAttachments.length ? 'Please use the attached file(s) as part of this request.' : '');
+    if (!effectiveTask) return res.status(400).json({ error: 'message is required' });
 
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any;
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
@@ -3480,10 +6744,15 @@ app.post('/api/agents/:id/chat', localRunLimiter, async (req, res) => {
     try {
       const jobId = await enqueueJob('run_agent', {
         agentId: agent.id,
-        task,
+        task: effectiveTask,
         session_id,
         user_id,
+        userMessage: effectiveTask,
+        attachments: normalizedAttachments,
         initiatedBy: 'agent_chat_ui',
+      }, {
+        priority: readJobPriority(req.body?.priority, JOB_PRIORITY.CRITICAL),
+        tenantKey: readTenantKey((req as any)?.user?.orgId || user_id || 'global'),
       });
       const result = await waitForJob(jobId, 120000);
       res.json({
@@ -3499,11 +6768,15 @@ app.post('/api/agents/:id/chat', localRunLimiter, async (req, res) => {
     }
 });
 
-app.post('/api/agents/:id/chat/stream', localRunLimiter, async (req, res) => {
+app.post('/api/agents/:id/chat/stream', requireUser, localRunLimiter, async (req, res) => {
     const agentId = Number(req.params.id);
-    const { message, session_id, user_id } = req.body || {};
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleAgentId(scope, agentId);
+    const { message, session_id, user_id, attachments } = req.body || {};
+    const normalizedAttachments = normalizeIncomingAttachments(attachments);
     const task = typeof message === 'string' ? message.trim() : '';
-    if (!task) return res.status(400).json({ error: 'message is required' });
+    const effectiveTask = task || (normalizedAttachments.length ? 'Please use the attached file(s) as part of this request.' : '');
+    if (!effectiveTask) return res.status(400).json({ error: 'message is required' });
 
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any;
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
@@ -3536,13 +6809,15 @@ app.post('/api/agents/:id/chat/stream', localRunLimiter, async (req, res) => {
 
       const result = await runAgent(
         agent,
-        { description: task, expected_output: 'The best possible answer.' },
+        { description: effectiveTask, expected_output: 'The best possible answer.' },
         '',
         (log) => sendSse('log', log),
         {
           initiatedBy: 'agent_chat_ui_stream',
           sessionId: session.id,
           userId: session.user_id ?? user_id,
+          userMessage: effectiveTask,
+          attachments: normalizedAttachments,
         }
       );
 
@@ -3559,6 +6834,362 @@ app.post('/api/agents/:id/chat/stream', localRunLimiter, async (req, res) => {
       clearInterval(ping);
       if (!closed) res.end();
     }
+});
+
+app.get('/api/voice/agents', requireUser, async (req, res) => {
+  const scope = await resolveOrchestratorAccessScope(req);
+  const scopedAgentIds = getScopedAgentIds(scope);
+  if (scopedAgentIds && !scopedAgentIds.length) return res.json([]);
+  const agents = db.prepare(`
+    SELECT id, name, role, provider, model, status
+    FROM agents
+    ${scopedAgentIds ? `WHERE id IN (${scopedAgentIds.map(() => '?').join(',')})` : ''}
+    ORDER BY id ASC
+  `).all(...(scopedAgentIds || [])) as any[];
+  res.json(agents.map((agent) => ({
+    ...agent,
+    voice_profile: getAgentVoiceProfile(Number(agent.id)),
+  })));
+});
+
+app.get('/api/voice/configs', requireUser, async (req, res) => {
+  const scope = await resolveOrchestratorAccessScope(req);
+  const scopedVoiceConfigIds = getScopedVoiceConfigIds(scope);
+  const presets = listVoiceConfigPresets();
+  res.json(scopedVoiceConfigIds ? presets.filter((preset) => scopedVoiceConfigIds.includes(Number(preset.id))) : presets);
+});
+
+app.post('/api/voice/configs', requireUser, async (req, res) => {
+  try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const preset = saveVoiceConfigPreset(null, req.body || {});
+    if (!scope.isAdmin && req.user) {
+      assignResourceOwner('voice_config', Number(preset.id), req.user);
+    }
+    res.status(201).json(preset);
+  } catch (e: any) {
+    const message = String(e?.message || 'Failed to save voice preset');
+    if (message.toLowerCase().includes('unique')) {
+      return res.status(409).json({ error: 'A voice preset with that name already exists' });
+    }
+    res.status(400).json({ error: message });
+  }
+});
+
+app.put('/api/voice/configs/:id', requireUser, async (req, res) => {
+  const presetId = Number(req.params.id);
+  if (!Number.isFinite(presetId) || presetId <= 0) return res.status(400).json({ error: 'Invalid voice preset id' });
+  try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleVoiceConfigId(scope, presetId);
+    if (!scope.isAdmin) requireManageableResource(scope, 'voice_config', presetId);
+    const preset = saveVoiceConfigPreset(presetId, req.body || {});
+    res.json(preset);
+  } catch (e: any) {
+    const message = String(e?.message || 'Failed to update voice preset');
+    if (message.toLowerCase().includes('unique')) {
+      return res.status(409).json({ error: 'A voice preset with that name already exists' });
+    }
+    res.status(400).json({ error: message });
+  }
+});
+
+app.delete('/api/voice/configs/:id', requireUser, async (req, res) => {
+  const presetId = Number(req.params.id);
+  if (!Number.isFinite(presetId) || presetId <= 0) return res.status(400).json({ error: 'Invalid voice preset id' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  requireVisibleVoiceConfigId(scope, presetId);
+  if (!scope.isAdmin) requireManageableResource(scope, 'voice_config', presetId);
+  db.prepare('DELETE FROM voice_config_presets WHERE id = ?').run(presetId);
+  deleteResourceAccess('voice_config', presetId);
+  res.json({ ok: true });
+});
+
+app.get('/api/voice/targets', requireUser, async (req, res) => {
+  const scope = await resolveOrchestratorAccessScope(req);
+  const scopedAgentIds = getScopedAgentIds(scope);
+  const scopedCrewIds = getScopedCrewIds(scope);
+  const agents = db.prepare(`
+    SELECT id, name, role, provider, model, status
+    FROM agents
+    ${scopedAgentIds ? `WHERE id IN (${scopedAgentIds.map(() => '?').join(',')})` : ''}
+    ORDER BY id ASC
+  `).all(...(scopedAgentIds || [])) as any[];
+  const crews = db.prepare(`
+    SELECT id, name, process, coordinator_agent_id, is_exposed
+    FROM crews
+    ${scopedCrewIds ? `WHERE id IN (${scopedCrewIds.map(() => '?').join(',')})` : ''}
+    ORDER BY id ASC
+  `).all(...(scopedCrewIds || [])) as any[];
+  res.json({
+    agents: agents.map((agent) => ({
+      id: Number(agent.id),
+      type: 'agent',
+      name: agent.name,
+      subtitle: agent.role || 'Agent',
+      provider: agent.provider || null,
+      model: agent.model || null,
+      status: agent.status || null,
+      voice_profile: getAgentVoiceProfile(Number(agent.id)),
+    })),
+    crews: crews.map((crew) => ({
+      id: Number(crew.id),
+      type: 'crew',
+      name: crew.name,
+      subtitle: `${crew.process || 'sequential'} crew`,
+      process: crew.process || 'sequential',
+      is_exposed: Boolean(crew.is_exposed),
+      coordinator_agent_id: crew.coordinator_agent_id ? Number(crew.coordinator_agent_id) : null,
+      voice_profile: getCrewVoiceProfile(Number(crew.id)),
+    })),
+  });
+});
+
+app.get('/api/voice/exposed', (req, res) => {
+  const origin = `${req.protocol}://${req.get('host')}`;
+  const exposedAgents = db.prepare('SELECT id, name, role, provider, model, status, is_exposed FROM agents WHERE is_exposed = 1 ORDER BY id ASC').all() as any[];
+  const exposedCrews = db.prepare('SELECT id, name, process, coordinator_agent_id, is_exposed FROM crews WHERE is_exposed = 1 ORDER BY id ASC').all() as any[];
+  res.json({
+    agents: exposedAgents.map((agent) => ({
+      id: Number(agent.id),
+      type: 'agent',
+      name: agent.name,
+      subtitle: agent.role || 'Agent',
+      provider: agent.provider || null,
+      model: agent.model || null,
+      status: agent.status || null,
+      is_exposed: true,
+      voice_profile: getAgentVoiceProfile(Number(agent.id)) || {
+        agent_id: Number(agent.id),
+        voice_provider: 'elevenlabs',
+        voice_id: DEFAULT_VOICE_ID,
+        tts_model_id: DEFAULT_TTS_MODEL,
+        stt_model_id: DEFAULT_STT_MODEL,
+        output_format: DEFAULT_TTS_FORMAT,
+        sample_rate: DEFAULT_STT_SAMPLE_RATE,
+        language_code: 'en',
+        auto_tts: true,
+        meta: normalizeVoiceRuntimeMeta({}),
+      },
+      voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=agent&targetId=${Number(agent.id)}`,
+      voice_http_hint: `${origin}/api/voice/exposed/agent/${Number(agent.id)}`,
+    })),
+    crews: exposedCrews.map((crew) => ({
+      id: Number(crew.id),
+      type: 'crew',
+      name: crew.name,
+      subtitle: `${crew.process || 'sequential'} crew`,
+      process: crew.process || 'sequential',
+      is_exposed: true,
+      coordinator_agent_id: crew.coordinator_agent_id ? Number(crew.coordinator_agent_id) : null,
+      voice_profile: getCrewVoiceProfile(Number(crew.id)) || {
+        crew_id: Number(crew.id),
+        voice_provider: 'elevenlabs',
+        voice_id: DEFAULT_VOICE_ID,
+        tts_model_id: DEFAULT_TTS_MODEL,
+        stt_model_id: DEFAULT_STT_MODEL,
+        output_format: DEFAULT_TTS_FORMAT,
+        sample_rate: DEFAULT_STT_SAMPLE_RATE,
+        language_code: 'en',
+        auto_tts: true,
+        meta: normalizeVoiceRuntimeMeta({}),
+      },
+      voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=crew&targetId=${Number(crew.id)}`,
+      voice_http_hint: `${origin}/api/voice/exposed/crew/${Number(crew.id)}`,
+    })),
+  });
+});
+
+app.get('/api/voice/exposed/:type/:id', (req, res) => {
+  const origin = `${req.protocol}://${req.get('host')}`;
+  const type = req.params.type === 'crew' ? 'crew' : 'agent';
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'Invalid target id' });
+
+  if (type === 'crew') {
+    const crew = db.prepare('SELECT id, name, process, coordinator_agent_id, is_exposed FROM crews WHERE id = ? AND is_exposed = 1').get(id) as any;
+    if (!crew) return res.status(404).json({ error: 'Exposed voice crew not found' });
+    return res.json({
+      id: Number(crew.id),
+      type: 'crew',
+      name: crew.name,
+      process: crew.process || 'sequential',
+      is_exposed: true,
+      coordinator_agent_id: crew.coordinator_agent_id ? Number(crew.coordinator_agent_id) : null,
+      voice_profile: getCrewVoiceProfile(Number(crew.id)) || {
+        crew_id: Number(crew.id),
+        voice_provider: 'elevenlabs',
+        voice_id: DEFAULT_VOICE_ID,
+        tts_model_id: DEFAULT_TTS_MODEL,
+        stt_model_id: DEFAULT_STT_MODEL,
+        output_format: DEFAULT_TTS_FORMAT,
+        sample_rate: DEFAULT_STT_SAMPLE_RATE,
+        language_code: 'en',
+        auto_tts: true,
+        meta: normalizeVoiceRuntimeMeta({}),
+      },
+      voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=crew&targetId=${Number(crew.id)}`,
+    });
+  }
+
+  const agent = db.prepare('SELECT id, name, role, provider, model, status, is_exposed FROM agents WHERE id = ? AND is_exposed = 1').get(id) as any;
+  if (!agent) return res.status(404).json({ error: 'Exposed voice agent not found' });
+  res.json({
+    id: Number(agent.id),
+    type: 'agent',
+    name: agent.name,
+    role: agent.role || 'Agent',
+    provider: agent.provider || null,
+    model: agent.model || null,
+    status: agent.status || null,
+    is_exposed: true,
+    voice_profile: getAgentVoiceProfile(Number(agent.id)) || {
+      agent_id: Number(agent.id),
+      voice_provider: 'elevenlabs',
+      voice_id: DEFAULT_VOICE_ID,
+      tts_model_id: DEFAULT_TTS_MODEL,
+      stt_model_id: DEFAULT_STT_MODEL,
+      output_format: DEFAULT_TTS_FORMAT,
+      sample_rate: DEFAULT_STT_SAMPLE_RATE,
+      language_code: 'en',
+      auto_tts: true,
+      meta: normalizeVoiceRuntimeMeta({}),
+    },
+    voice_ws_url: `${origin.replace(/^http/, 'ws')}/ws/voice?targetType=agent&targetId=${Number(agent.id)}`,
+  });
+});
+
+app.get('/api/voice/crews/:id/profile', requireUser, async (req, res) => {
+  const crewId = Number(req.params.id);
+  if (!Number.isFinite(crewId)) return res.status(400).json({ error: 'Invalid crew id' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  requireVisibleCrewId(scope, crewId);
+  res.json(getCrewVoiceProfile(crewId) || {
+    crew_id: crewId,
+    voice_provider: 'elevenlabs',
+    voice_id: DEFAULT_VOICE_ID,
+    tts_model_id: DEFAULT_TTS_MODEL,
+    stt_model_id: DEFAULT_STT_MODEL,
+    output_format: DEFAULT_TTS_FORMAT,
+    sample_rate: DEFAULT_STT_SAMPLE_RATE,
+    language_code: 'en',
+    auto_tts: true,
+    meta: normalizeVoiceRuntimeMeta({}),
+  });
+});
+
+app.put('/api/voice/crews/:id/profile', requireUser, async (req, res) => {
+  const crewId = Number(req.params.id);
+  if (!Number.isFinite(crewId)) return res.status(400).json({ error: 'Invalid crew id' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  requireVisibleCrewId(scope, crewId);
+  saveCrewVoiceProfile(crewId, req.body || {});
+  res.json(getCrewVoiceProfile(crewId));
+});
+
+app.get('/api/voice/agents/:id/profile', requireUser, async (req, res) => {
+  const agentId = Number(req.params.id);
+  if (!Number.isFinite(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  requireVisibleAgentId(scope, agentId);
+  res.json(getAgentVoiceProfile(agentId) || {
+    agent_id: agentId,
+    voice_provider: 'elevenlabs',
+    voice_id: DEFAULT_VOICE_ID,
+    tts_model_id: DEFAULT_TTS_MODEL,
+    stt_model_id: DEFAULT_STT_MODEL,
+    output_format: DEFAULT_TTS_FORMAT,
+    sample_rate: DEFAULT_STT_SAMPLE_RATE,
+    language_code: 'en',
+    auto_tts: true,
+    meta: normalizeVoiceRuntimeMeta({}),
+  });
+});
+
+app.put('/api/voice/agents/:id/profile', requireUser, async (req, res) => {
+  const agentId = Number(req.params.id);
+  if (!Number.isFinite(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  requireVisibleAgentId(scope, agentId);
+  saveAgentVoiceProfile(agentId, req.body || {});
+  res.json(getAgentVoiceProfile(agentId));
+});
+
+app.post('/api/voice/sessions/:id/attachments', requireUser, async (req, res, next) => {
+  try {
+    const sessionId = String(req.params.id || '');
+    const session = getVoiceSession(sessionId);
+    if (!session) return res.status(404).json({ error: 'Voice session not found' });
+
+    const scope = await resolveOrchestratorAccessScope(req);
+    const sessionMeta = safeJsonParse(session.meta, {} as any);
+    const targetType = String(sessionMeta?.target_type || 'agent');
+    const targetId = Number(sessionMeta?.target_id || 0);
+    if (targetType === 'crew' && Number.isFinite(targetId) && targetId > 0) {
+      requireVisibleCrewId(scope, targetId);
+    } else {
+      requireVisibleAgentId(scope, Number(session.agent_id || 0));
+    }
+
+    const multer = (await import('multer')).default;
+    const upload = multer({
+      dest: '/tmp/',
+      limits: {
+        files: 6,
+        fileSize: 25 * 1024 * 1024,
+      },
+    });
+
+    upload.array('files', 6)(req, res, async (err) => {
+      if (err) return next(err);
+      try {
+        const files = Array.isArray((req as any).files) ? (req as any).files : [];
+        if (!files.length) return res.status(400).json({ error: 'No files uploaded' });
+        const attachments = await Promise.all(files.map((file: any) => persistUploadedAttachment({
+          file,
+          scopeType: 'voice_session',
+          scopeId: sessionId,
+          agentId: Number(session.agent_id || 0) || null,
+          crewId: targetType === 'crew' && Number.isFinite(targetId) && targetId > 0 ? targetId : null,
+          uploaderUserId: req.user?.id ?? null,
+          uploaderOrgId: req.user?.orgId ?? null,
+        })));
+        appendVoiceSessionEvent(sessionId, 'attachments.updated', { attachments });
+        res.json({ attachments });
+      } catch (error) {
+        next(error);
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/voice/sessions/:id', requireUser, async (req, res) => {
+  const sessionId = String(req.params.id || '');
+  const session = getVoiceSession(sessionId);
+  if (!session) return res.status(404).json({ error: 'Voice session not found' });
+  const scope = await resolveOrchestratorAccessScope(req);
+  const sessionMeta = safeJsonParse(session.meta, {} as any);
+  const targetType = String(sessionMeta?.target_type || 'agent');
+  const targetId = Number(sessionMeta?.target_id || 0);
+  if (targetType === 'crew' && Number.isFinite(targetId) && targetId > 0) {
+    requireVisibleCrewId(scope, targetId);
+  } else {
+    requireVisibleAgentId(scope, Number(session.agent_id || 0));
+  }
+  const events = db.prepare('SELECT id, type, payload, created_at FROM voice_session_events WHERE session_id = ? ORDER BY id ASC').all(sessionId) as any[];
+  res.json({
+    ...session,
+    meta: safeJsonParse(session.meta, {}),
+    attachments: getAttachmentsForScope('voice_session', sessionId),
+    events: events.map((row) => ({
+      id: row.id,
+      type: row.type,
+      created_at: row.created_at,
+      payload: safeJsonParse(row.payload, {}),
+    })),
+  });
 });
 
 // --- MCP (Model Context Protocol) Support ---
@@ -3651,9 +7282,25 @@ function buildMcpServer(options?: { toolExposedName?: string; bundleSlug?: strin
             description: `[CREW] ${crew.description || 'A collaborative AI crew.'} Process: ${crew.process}.`,
             inputSchema: crewInput
         }, async ({ kickoff_message, task }) => {
-            const stmt = db.prepare('INSERT INTO crew_executions (crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?)');
-            const info = stmt.run(crew.id, 'running', JSON.stringify([]), kickoff_message || task || '', null);
-            const executionId = info.lastInsertRowid as number;
+            const execution = await createCrewExecutionRecord({
+                db,
+                prisma: getPrisma(),
+                crewId: Number(crew.id),
+                initialInput: kickoff_message || task || '',
+                retryOf: null,
+                status: 'pending',
+            });
+            const executionId = execution.id as number;
+            await appendCrewExecutionLog({
+                db,
+                prisma: getPrisma(),
+                executionId,
+                type: 'thought',
+                payload: {
+                    agent: 'system',
+                    message: 'MCP-triggered crew run queued. Waiting for a worker to claim execution.',
+                },
+            });
 
             await enqueueJob('run_crew', {
                 crewId: crew.id,
@@ -3665,9 +7312,15 @@ function buildMcpServer(options?: { toolExposedName?: string; bundleSlug?: strin
             const startTime = Date.now();
             while (Date.now() - startTime < 60000) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
-                const exec = db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any;
-                if (exec.status === 'completed' || exec.status === 'failed' || exec.status === 'canceled') {
-                    const logs = readCrewExecutionLogs(executionId);
+                const exec = await getCrewExecution({
+                  prisma: getPrisma(),
+                  executionId,
+                });
+                if (exec?.status === 'completed' || exec?.status === 'failed' || exec?.status === 'canceled') {
+                    const logs = await readCrewExecutionLogsFromStore({
+                      prisma: getPrisma(),
+                      executionId,
+                    });
                     const finalResult = extractCrewFinalResult(logs);
                     const message =
                         exec.status === 'failed'
@@ -3765,8 +7418,21 @@ async function handleStreamableMcp(req: express.Request, res: express.Response, 
     }
 }
 
+function isBrowserHtmlNavigation(req: express.Request): boolean {
+    if (req.method !== 'GET') return false;
+    const mcpSessionId = String(req.headers['mcp-session-id'] || '').trim();
+    if (mcpSessionId) return false;
+    const accept = String(req.headers.accept || '').toLowerCase();
+    return accept.includes('text/html');
+}
+
 // Streamable HTTP (recommended) MCP server
-app.all('/mcp', async (req, res) => handleStreamableMcp(req, res));
+app.all('/mcp', async (req, res, next) => {
+    if (isBrowserHtmlNavigation(req)) {
+        return next();
+    }
+    return handleStreamableMcp(req, res);
+});
 app.all('/mcp/tool/:exposedName', async (req, res) => handleStreamableMcp(req, res, { toolExposedName: String(req.params.exposedName || '') }));
 app.all('/mcp/bundle/:slug', async (req, res) => handleStreamableMcp(req, res, { bundleSlug: String(req.params.slug || '') }));
 
@@ -3832,6 +7498,36 @@ app.get('/mcp/manifest', (req, res) => {
         JOIN tools t ON t.id = e.tool_id
         ORDER BY e.exposed_name ASC
     `).all() as any[];
+    const bundles = db.prepare(`
+        SELECT b.id, b.name, b.slug, b.description, b.is_exposed
+        FROM mcp_bundles b
+        WHERE COALESCE(b.is_exposed, 1) = 1
+        ORDER BY b.name COLLATE NOCASE ASC
+    `).all() as any[];
+    const bundleTools = db.prepare(`
+        SELECT
+          b.id AS bundle_id,
+          b.slug AS bundle_slug,
+          b.name AS bundle_name,
+          t.id AS tool_id,
+          t.name AS tool_name,
+          COALESCE(e.exposed_name, t.name) AS exposed_name,
+          COALESCE(e.description, t.description) AS description
+        FROM mcp_bundles b
+        JOIN mcp_bundle_tools bt ON bt.bundle_id = b.id
+        JOIN tools t ON t.id = bt.tool_id
+        LEFT JOIN mcp_exposed_tools e ON e.tool_id = t.id
+        WHERE COALESCE(b.is_exposed, 1) = 1
+        ORDER BY b.name COLLATE NOCASE ASC, t.name COLLATE NOCASE ASC
+    `).all() as any[];
+    const bundleToolsBySlug = new Map<string, any[]>();
+    for (const row of bundleTools) {
+      const slug = String(row.bundle_slug || '');
+      if (!slug) continue;
+      if (!bundleToolsBySlug.has(slug)) bundleToolsBySlug.set(slug, []);
+      bundleToolsBySlug.get(slug)!.push(row);
+    }
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
     
     const agentTools = exposedAgents.map(agent => ({
         name: agent.name.toLowerCase().replace(/\s+/g, '_'),
@@ -3863,7 +7559,7 @@ app.get('/mcp/manifest', (req, res) => {
     }));
 
     const toolTools = exposedTools.map(t => ({
-        name: `tool_${t.exposed_name}`,
+        name: buildExposedMcpToolAlias(String(t.exposed_name || t.name || '')),
         description: `[TOOL] ${t.description || t.name}`,
         inputSchema: {
             type: "object",
@@ -3872,18 +7568,127 @@ app.get('/mcp/manifest', (req, res) => {
         }
     }));
 
+    const bundleEntries = bundles.map((bundle) => ({
+        name: `bundle_${normalizeMcpName(bundle.slug || bundle.name)}`,
+        description: `[BUNDLE] ${bundle.description || bundle.name}. Contains ${(bundleToolsBySlug.get(bundle.slug) || []).length} tool(s). Provide tool_name to execute a tool within this bundle or omit it to inspect the bundle inventory.`,
+        inputSchema: {
+            type: "object",
+            properties: {
+                tool_name: {
+                    type: "string",
+                    description: "Optional tool name or exposed MCP name inside this bundle to invoke."
+                },
+                args: {
+                    type: "object",
+                    description: "Arguments for the selected bundled tool.",
+                    additionalProperties: true
+                }
+            },
+            additionalProperties: true
+        }
+    }));
+
     res.json({
         schema_version: "1.0",
         name: "Orchestrator Agents & Crews",
         description: "Exposed agents, crews, and tools from the AI Orchestrator",
-        tools: [...agentTools, ...crewTools, ...toolTools]
+        tools: [...agentTools, ...crewTools, ...toolTools, ...bundleEntries],
+        bundles: bundles.map((bundle) => ({
+          name: bundle.name,
+          slug: bundle.slug,
+          description: bundle.description || '',
+          streamable_http_url: `${baseUrl}/mcp/bundle/${encodeURIComponent(bundle.slug)}`,
+          sse_url: `${baseUrl}/mcp/bundle/${encodeURIComponent(bundle.slug)}/sse`,
+          tools: (bundleToolsBySlug.get(bundle.slug) || []).map((tool) => ({
+            tool_name: tool.tool_name,
+            exposed_name: tool.exposed_name,
+            description: tool.description || '',
+          })),
+        })),
     });
 });
 
 app.post('/mcp/call/:toolName', localRunLimiter, async (req, res) => {
     if (!requireMcpAuth(req, res)) return;
     const toolName = req.params.toolName;
-    const { task, kickoff_message, session_id, user_id, args } = req.body || {};
+    const { task, kickoff_message, session_id, user_id, args, tool_name } = req.body || {};
+
+    if (toolName.startsWith('bundle_')) {
+        const slug = toolName.replace(/^bundle_/, '');
+        const bundle = db.prepare(`
+            SELECT id, name, slug, description, is_exposed
+            FROM mcp_bundles
+            WHERE slug = ? AND COALESCE(is_exposed, 1) = 1
+            LIMIT 1
+        `).get(slug) as any;
+        if (!bundle) return res.status(404).json({ error: "Tool (Bundle) not found" });
+
+        const bundleTools = db.prepare(`
+            SELECT
+              t.*,
+              COALESCE(e.exposed_name, t.name) AS effective_name,
+              COALESCE(e.description, t.description) AS effective_description
+            FROM mcp_bundle_tools bt
+            JOIN tools t ON t.id = bt.tool_id
+            LEFT JOIN mcp_exposed_tools e ON e.tool_id = t.id
+            WHERE bt.bundle_id = ?
+            ORDER BY t.name COLLATE NOCASE ASC
+        `).all(bundle.id) as any[];
+        if (!bundleTools.length) {
+          return res.status(404).json({ error: "Bundle has no tools" });
+        }
+
+        const requestedToolName = String(
+          tool_name ??
+          args?.tool_name ??
+          args?.tool ??
+          ''
+        ).trim();
+        if (!requestedToolName) {
+          return res.json({
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                bundle: {
+                  name: bundle.name,
+                  slug: bundle.slug,
+                  description: bundle.description || '',
+                },
+                tools: bundleTools.map((tool) => ({
+                  name: tool.name,
+                  exposed_name: tool.effective_name,
+                  description: tool.effective_description || '',
+                })),
+                usage: {
+                  message: "Call this bundle again with tool_name and optional args to execute a bundled tool."
+                }
+              }, null, 2)
+            }]
+          });
+        }
+
+        const selectedTool = bundleTools.find((tool) => {
+          const rawName = normalizeMcpName(String(tool.name || ''));
+          const exposedName = normalizeMcpName(String(tool.effective_name || tool.name || ''));
+          const requested = normalizeMcpName(requestedToolName.replace(/^tool_/, ''));
+          return requested === rawName || requested === exposedName;
+        });
+        if (!selectedTool) {
+          return res.status(404).json({ error: "Bundled tool not found" });
+        }
+        try {
+          const toolArgs = args && typeof args === 'object' ? { ...args } : {};
+          delete (toolArgs as any).tool_name;
+          delete (toolArgs as any).tool;
+          const result = await executeTool(selectedTool.name, toolArgs, undefined, selectedTool);
+          return res.json({
+            content: [{ type: "text", text: result }],
+            bundle: { slug: bundle.slug, tool_name: selectedTool.name, exposed_name: selectedTool.effective_name }
+          });
+        } catch (e: any) {
+          return res.status(500).json({ error: e.message || 'Bundled tool execution failed' });
+        }
+    }
 
     if (toolName.startsWith('tool_')) {
         const exposedName = toolName.replace('tool_', '');
@@ -3910,9 +7715,25 @@ app.post('/mcp/call/:toolName', localRunLimiter, async (req, res) => {
 
         if (!crew) return res.status(404).json({ error: "Tool (Crew) not found" });
 
-        const stmt = db.prepare('INSERT INTO crew_executions (crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?)');
-        const info = stmt.run(crew.id, 'running', JSON.stringify([]), kickoff_message || task || '', null);
-        const executionId = info.lastInsertRowid;
+        const execution = await createCrewExecutionRecord({
+          db,
+          prisma: getPrisma(),
+          crewId: Number(crew.id),
+          initialInput: kickoff_message || task || '',
+          retryOf: null,
+          status: 'pending',
+        });
+        const executionId = execution.id;
+        await appendCrewExecutionLog({
+          db,
+          prisma: getPrisma(),
+          executionId: Number(executionId),
+          type: 'thought',
+          payload: {
+            agent: 'system',
+            message: 'MCP-triggered crew run queued. Waiting for a worker to claim execution.',
+          },
+        });
 
         // Start background process (same as kickoff endpoint)
         await enqueueJob('run_crew', {
@@ -3926,9 +7747,15 @@ app.post('/mcp/call/:toolName', localRunLimiter, async (req, res) => {
         const startTime = Date.now();
         while (Date.now() - startTime < 60000) {
             await new Promise(resolve => setTimeout(resolve, 2000));
-            const exec = db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any;
-            if (exec.status === 'completed' || exec.status === 'failed' || exec.status === 'canceled') {
-                const logs = readCrewExecutionLogs(executionId);
+            const exec = await getCrewExecution({
+              prisma: getPrisma(),
+              executionId,
+            });
+            if (exec?.status === 'completed' || exec?.status === 'failed' || exec?.status === 'canceled') {
+                const logs = await readCrewExecutionLogsFromStore({
+                  prisma: getPrisma(),
+                  executionId,
+                });
                 const finalResult = extractCrewFinalResult(logs);
                 
                 const message =
@@ -3974,9 +7801,22 @@ app.post('/mcp/call/:toolName', localRunLimiter, async (req, res) => {
 });
 
 // --- Agents ---
-app.post('/api/agents/autobuild', async (req, res) => {
+app.post('/api/agents/autobuild', requireUser, async (req, res) => {
     try {
         const { goal, project_id, provider = 'google', model = 'gemini-1.5-flash', stream = false, agent_role_preference = 'auto' } = req.body;
+        const normalizedGoal = String(goal || '').trim();
+        if (!normalizedGoal) {
+            return res.status(400).json({ error: 'goal is required' });
+        }
+        if (normalizedGoal.length > 4000) {
+            return res.status(400).json({ error: 'goal is too long (max 4000 characters)' });
+        }
+        const purifiedProjectId = project_id && !isNaN(Number(project_id)) ? Number(project_id) : null;
+        const scope = await resolveOrchestratorAccessScope(req);
+        if (!scope.isAdmin && !purifiedProjectId) {
+            return res.status(400).json({ error: 'project_id is required for non-admin users' });
+        }
+        if (purifiedProjectId) requireVisibleProjectId(scope, purifiedProjectId);
 
         if (stream) {
             res.setHeader('Content-Type', 'text/event-stream');
@@ -3988,7 +7828,7 @@ app.post('/api/agents/autobuild', async (req, res) => {
         const sendEvent = (type: string, data: any) => {
             if (!stream) return;
             try {
-                res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
+                res.write(`data: ${JSON.stringify({ type, timestamp: new Date().toISOString(), ...data })}\n\n`);
             } catch (e) {
                 console.error("Failed to write to stream", e);
             }
@@ -4014,7 +7854,7 @@ app.post('/api/agents/autobuild', async (req, res) => {
         You are an expert AI Agent Architect.
         Your goal is to design a single, highly specialized AI agent to accomplish a specific objective.
 
-        User's Objective: "${goal}"
+        User's Objective: "${normalizedGoal}"
         Role Preference: "${agent_role_preference}"
 
         Instructions:
@@ -4038,46 +7878,122 @@ app.post('/api/agents/autobuild', async (req, res) => {
         }
         `;
 
-        let text = '';
-        if (config.providerType === 'google') {
-            const ai = new GoogleGenAI({ apiKey });
-            const response = await withRetry(() => ai.models.generateContent({
-                model: model,
-                contents: prompt,
-                config: { responseMimeType: 'application/json' }
-            }));
-            text = response.text;
-        } else if (config.providerType === 'openai') {
-            const openai = new OpenAI({ apiKey, baseURL: config.apiBase });
+        const generateDesignText = async (inputPrompt: string): Promise<string> => {
+            if (config.providerType === 'google') {
+                const ai = new GoogleGenAI({ apiKey });
+                const response = await withRetry(() => ai.models.generateContent({
+                    model: model,
+                    contents: inputPrompt,
+                    config: { responseMimeType: 'application/json' }
+                }));
+                return response.text || '';
+            }
+            if (config.providerType === 'anthropic') {
+                const anthropic = new Anthropic({ apiKey, baseURL: config.apiBase });
+                const response = await withRetry(() => anthropic.messages.create({
+                    model: model,
+                    max_tokens: 4096,
+                    messages: [{ role: 'user', content: inputPrompt }]
+                }));
+                if (response.content[0].type === 'text') {
+                    return response.content[0].text || '';
+                }
+                return '';
+            }
+            // Default to OpenAI-compatible chat JSON mode for custom/third-party providers.
+            const openai = new OpenAI({ apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
             const response = await withRetry(() => openai.chat.completions.create({
                 model: model,
-                messages: [{ role: 'user', content: prompt }],
+                messages: [{ role: 'user', content: inputPrompt }],
                 response_format: { type: "json_object" }
             }));
-            text = response.choices[0].message.content || '';
-        } else if (config.providerType === 'anthropic') {
-            const anthropic = new Anthropic({ apiKey, baseURL: config.apiBase });
-            const response = await withRetry(() => anthropic.messages.create({
-                model: model,
-                max_tokens: 4096,
-                messages: [{ role: 'user', content: prompt }]
-            }));
-            if (response.content[0].type === 'text') {
-                text = response.content[0].text;
-            }
-        }
+            return response.choices[0].message.content || '';
+        };
 
-        let design;
+        const tryParseJsonObject = (rawText: string): any => {
+            const raw = String(rawText || '').trim();
+            if (!raw) throw new Error('Model returned empty output');
+            const unwrapped = raw.replace(/```json\n?|\n?```/g, "").trim();
+
+            try {
+                return JSON.parse(unwrapped);
+            } catch {
+                // Attempt to extract the first top-level JSON object from mixed output.
+                const start = unwrapped.indexOf('{');
+                if (start < 0) throw new Error('No JSON object found in model output');
+                let depth = 0;
+                let inString = false;
+                let escapeNext = false;
+                let end = -1;
+                for (let i = start; i < unwrapped.length; i += 1) {
+                    const ch = unwrapped[i];
+                    if (escapeNext) {
+                        escapeNext = false;
+                        continue;
+                    }
+                    if (ch === '\\') {
+                        escapeNext = true;
+                        continue;
+                    }
+                    if (ch === '"') {
+                        inString = !inString;
+                        continue;
+                    }
+                    if (inString) continue;
+                    if (ch === '{') depth += 1;
+                    if (ch === '}') {
+                        depth -= 1;
+                        if (depth === 0) {
+                            end = i;
+                            break;
+                        }
+                    }
+                }
+                if (end >= start) {
+                    return JSON.parse(unwrapped.slice(start, end + 1));
+                }
+                throw new Error('Incomplete JSON object in model output');
+            }
+        };
+
+        const ensureValidDesignShape = (design: any): any => {
+            if (!design || typeof design !== 'object') throw new Error('Invalid design payload');
+            const normalizedAgentRole = String(design.agent_role || '').trim().toLowerCase();
+            return {
+                name: String(design.name || '').trim() || 'Autobuilt Agent',
+                role: String(design.role || '').trim() || 'AI Specialist',
+                agent_role: normalizedAgentRole === 'supervisor' ? 'supervisor' : 'specialist',
+                goal: String(design.goal || '').trim() || normalizedGoal,
+                backstory: String(design.backstory || '').trim() || 'An AI agent designed automatically from the provided objective.',
+                system_prompt: String(design.system_prompt || '').trim() || 'Follow the stated goal, reason clearly, and return concise, reliable outputs.',
+            };
+        };
+
+        let design: any;
+        const initialText = await generateDesignText(prompt);
         try {
-            design = JSON.parse(text);
-        } catch (e) {
-            const jsonString = text.replace(/```json\n?|\n?```/g, "").trim();
-            design = JSON.parse(jsonString);
+            design = ensureValidDesignShape(tryParseJsonObject(initialText));
+        } catch (parseError: any) {
+            sendEvent('status', { message: 'Retrying design parsing with strict JSON mode...', step: 2 });
+            const repairPrompt = `
+Return ONLY a valid JSON object (no markdown, no commentary).
+
+Required keys:
+- name
+- role
+- agent_role ("specialist" or "supervisor")
+- goal
+- backstory
+- system_prompt
+
+Use this as source content and repair it into valid JSON:
+${initialText}
+`;
+            const repairedText = await generateDesignText(repairPrompt);
+            design = ensureValidDesignShape(tryParseJsonObject(repairedText));
         }
 
         sendEvent('status', { message: 'Deploying agent...', step: 3, design });
-
-        const purifiedProjectId = project_id && !isNaN(Number(project_id)) ? Number(project_id) : null;
 
         const created = await getPrisma().orchestratorAgent.create({
             data: {
@@ -4177,10 +8093,10 @@ app.post('/api/crews/autobuild', async (req, res) => {
         4. PRIORITIZE using existing agents if they are a good fit.
         5. If existing agents are sufficient, use them. If not, create new specialized agents.
         6. Define a name and description for this crew.
-        7. Define a process (sequential or hierarchical).
-        7a. If Process Preference is "sequential" or "hierarchical", strongly prefer that unless it would make the design clearly incoherent.
+        7. Define a process (sequential, parallel, or hierarchical).
+        7a. If Process Preference is "sequential", "parallel", or "hierarchical", strongly prefer that unless it would make the design clearly incoherent.
         7b. If Process Preference is "auto", choose the best process yourself.
-        8. If the process is hierarchical, explicitly choose a coordinator/supervisor agent and return its temp id as coordinator_temp_id.
+        8. If the process is hierarchical or parallel, explicitly choose a coordinator/supervisor agent and return its temp id as coordinator_temp_id.
         9. Break down the objective into a series of specific tasks. Assign each task to an agent (either existing or new).
         10. For new agents, include an agent_role of either "supervisor" or "specialist". Hierarchical crews should usually have exactly one supervisor.
 
@@ -4188,7 +8104,7 @@ app.post('/api/crews/autobuild', async (req, res) => {
         {
             "crew_name": "Name of the crew",
             "crew_description": "Description of what this crew does",
-            "process": "sequential",
+            "process": "sequential|parallel|hierarchical",
             "coordinator_temp_id": "agent_1",
             "agents": [
                 {
@@ -4220,14 +8136,6 @@ app.post('/api/crews/autobuild', async (req, res) => {
                 config: { responseMimeType: 'application/json' }
             }));
             text = response.text;
-        } else if (config.providerType === 'openai') {
-            const openai = new OpenAI({ apiKey, baseURL: config.apiBase });
-            const response = await withRetry(() => openai.chat.completions.create({
-                model: model,
-                messages: [{ role: 'user', content: prompt }],
-                response_format: { type: "json_object" }
-            }));
-            text = response.choices[0].message.content || '';
         } else if (config.providerType === 'anthropic') {
             const anthropic = new Anthropic({ apiKey, baseURL: config.apiBase });
             const response = await withRetry(() => anthropic.messages.create({
@@ -4239,7 +8147,14 @@ app.post('/api/crews/autobuild', async (req, res) => {
                 text = response.content[0].text;
             }
         } else {
-             throw new Error(`Provider ${config.providerType} not fully supported for auto-build yet.`);
+            // Default to OpenAI-compatible chat JSON mode for custom/third-party providers.
+            const openai = new OpenAI({ apiKey, baseURL: config.apiBase, defaultHeaders: { 'User-Agent': 'curl/8.7.1' } });
+            const response = await withRetry(() => openai.chat.completions.create({
+                model: model,
+                messages: [{ role: 'user', content: prompt }],
+                response_format: { type: "json_object" }
+            }));
+            text = response.choices[0].message.content || '';
         }
 
         let design;
@@ -4253,7 +8168,7 @@ app.post('/api/crews/autobuild', async (req, res) => {
         if (!design.agents || !Array.isArray(design.agents)) throw new Error("Invalid design: 'agents' array is missing");
         if (!design.tasks || !Array.isArray(design.tasks)) throw new Error("Invalid design: 'tasks' array is missing");
 
-        const normalizedProcess = design.process === 'hierarchical' ? 'hierarchical' : 'sequential';
+        const normalizedProcess = normalizeCrewProcess(design.process);
         const normalizedAgents = design.agents.map((agentDef: any, idx: number) => ({
             ...agentDef,
             temp_id: String(agentDef?.temp_id || `agent_${idx + 1}`),
@@ -4280,18 +8195,19 @@ app.post('/api/crews/autobuild', async (req, res) => {
         sendEvent('status', { message: 'Deploying crew and agents...', step: 3, design });
 
         const purifiedProjectId = project_id && !isNaN(Number(project_id)) ? Number(project_id) : null;
-        const requestedCoordinatorTempId = normalizedProcess === 'hierarchical'
-          ? (validTempIds.has(String(design?.coordinator_temp_id || '')) ? String(design.coordinator_temp_id) : null)
-          : null;
-        const supervisorAgentTempId = normalizedProcess === 'hierarchical'
-          ? (
-              normalizedAgents.find((agentDef: any) => String(agentDef?.agent_role || '').toLowerCase() === 'supervisor')?.temp_id ||
-              null
-            )
-          : null;
-        const proposedCoordinatorTempId = normalizedProcess === 'hierarchical'
-          ? (requestedCoordinatorTempId || supervisorAgentTempId || normalizedTasks[0]?.assigned_to_temp_id || normalizedAgents[0]?.temp_id || null)
-          : null;
+	        const needsCoordinator = normalizedProcess === 'hierarchical' || normalizedProcess === 'parallel';
+	        const requestedCoordinatorTempId = needsCoordinator
+	          ? (validTempIds.has(String(design?.coordinator_temp_id || '')) ? String(design.coordinator_temp_id) : null)
+	          : null;
+	        const supervisorAgentTempId = needsCoordinator
+	          ? (
+	              normalizedAgents.find((agentDef: any) => String(agentDef?.agent_role || '').toLowerCase() === 'supervisor')?.temp_id ||
+	              null
+	            )
+	          : null;
+	        const proposedCoordinatorTempId = needsCoordinator
+	          ? (requestedCoordinatorTempId || supervisorAgentTempId || normalizedTasks[0]?.assigned_to_temp_id || normalizedAgents[0]?.temp_id || null)
+	          : null;
 
         const createdCrew = await prisma.orchestratorCrew.create({
           data: {
@@ -4351,10 +8267,10 @@ app.post('/api/crews/autobuild', async (req, res) => {
           await prisma.orchestratorTask.createMany({ data: taskRows });
         }
 
-        if (normalizedProcess === 'hierarchical' && proposedCoordinatorTempId) {
-            const coordinatorId = agentIdMap.get(proposedCoordinatorTempId) || null;
-            if (coordinatorId) {
-              await prisma.orchestratorCrew.update({
+	        if (needsCoordinator && proposedCoordinatorTempId) {
+	            const coordinatorId = agentIdMap.get(proposedCoordinatorTempId) || null;
+	            if (coordinatorId) {
+	              await prisma.orchestratorCrew.update({
                 where: { id: crewId },
                 data: { coordinatorAgentId: coordinatorId, updatedAt: new Date() },
               });
@@ -4383,13 +8299,16 @@ app.post('/api/crews/autobuild', async (req, res) => {
     }
 });
 
-app.get('/api/crews', async (req, res) => {
+app.get('/api/crews', requireUser, async (req, res) => {
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    const scopedProjectIds = getScopedProjectIds(scope);
+    if (scopedProjectIds && !scopedProjectIds.length) return res.json([]);
     const prisma = getPrisma();
     const [crews, crewAgents, agents] = await Promise.all([
-      prisma.orchestratorCrew.findMany({ orderBy: { id: 'asc' } }),
-      prisma.orchestratorCrewAgent.findMany({ orderBy: [{ crewId: 'asc' }, { agentId: 'asc' }] }),
-      prisma.orchestratorAgent.findMany({ orderBy: { id: 'asc' } }),
+      prisma.orchestratorCrew.findMany({ where: scopedProjectIds ? { projectId: { in: scopedProjectIds } } : undefined, orderBy: { id: 'asc' } }),
+      prisma.orchestratorCrewAgent.findMany({ where: getScopedCrewIds(scope) ? { crewId: { in: getScopedCrewIds(scope)! } } : undefined, orderBy: [{ crewId: 'asc' }, { agentId: 'asc' }] }),
+      prisma.orchestratorAgent.findMany({ where: getScopedAgentIds(scope) ? { id: { in: getScopedAgentIds(scope)! } } : undefined, orderBy: { id: 'asc' } }),
     ]);
     const agentById = new Map(agents.map((agent) => [agent.id, agent]));
     const agentsByCrewId = new Map<number, any[]>();
@@ -4430,6 +8349,7 @@ app.get('/api/crews', async (req, res) => {
         coordinator_agent_id: crew.coordinatorAgentId,
         project_id: crew.projectId,
         is_exposed: crew.isExposed,
+        learning_enabled: isLearningEnabled('crew', crew.id),
         description: crew.description,
         max_runtime_ms: crew.maxRuntimeMs,
         max_cost_usd: crew.maxCostUsd,
@@ -4437,6 +8357,7 @@ app.get('/api/crews', async (req, res) => {
         created_at: crew.createdAt,
         updated_at: crew.updatedAt,
         agents: agentsByCrewId.get(crew.id) || [],
+        voice_profile: getCrewVoiceProfile(Number(crew.id)),
         coordinator_agent: coordinatorAgent ? {
           id: coordinatorAgent.id,
           name: coordinatorAgent.name,
@@ -4488,7 +8409,7 @@ app.get('/api/crew-templates', (_req, res) => {
   res.json(templates);
 });
 
-app.post('/api/crews/from-template', async (req, res) => {
+app.post('/api/crews/from-template', requireUser, async (req, res) => {
   const { template_id, project_id } = req.body || {};
   if (!template_id || typeof template_id !== 'string') return res.status(400).json({ error: 'template_id is required' });
   const templatesRes: any[] = [
@@ -4533,6 +8454,8 @@ app.post('/api/crews/from-template', async (req, res) => {
   if (!allAgents.length) return res.status(400).json({ error: 'Create at least one agent before using templates' });
 
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleProjectId(scope, Number(project_id));
     const prisma = getPrisma();
     const coordinatorHintRole = tpl.process === 'hierarchical' ? String(tpl.tasks?.[0]?.role_hint || '') : '';
     const coordinatorFromHints = coordinatorHintRole
@@ -4577,9 +8500,9 @@ app.post('/api/crews/from-template', async (req, res) => {
   }
 });
 
-app.post('/api/crews', async (req, res) => {
-  const { name, description, process, agentIds, project_id, is_exposed, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id } = req.body;
-  const normalizedProcess = process === 'hierarchical' ? 'hierarchical' : 'sequential';
+app.post('/api/crews', requireUser, async (req, res) => {
+  const { name, description, process, agentIds, project_id, is_exposed, learning_enabled, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id } = req.body;
+  const normalizedProcess = normalizeCrewProcess(process);
   const normalizedAgentIds = Array.isArray(agentIds)
     ? Array.from(new Set(agentIds.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id))))
     : [];
@@ -4595,6 +8518,9 @@ app.post('/api/crews', async (req, res) => {
   }
 
   try {
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleProjectId(scope, Number(project_id));
+    for (const agentId of normalizedAgentIds) requireVisibleAgentId(scope, agentId);
     const prisma = getPrisma();
     const crew = await prisma.orchestratorCrew.create({
       data: {
@@ -4611,6 +8537,7 @@ app.post('/api/crews', async (req, res) => {
           : (normalizedCoordinatorId ?? null),
       },
     });
+    setLearningEnabled('crew', crew.id, learning_enabled !== false);
     const crewId = crew.id;
 
     await prisma.orchestratorCrewAgent.createMany({
@@ -4626,13 +8553,18 @@ app.post('/api/crews', async (req, res) => {
       await prisma.orchestratorTask.createMany({
         data: orderedAgents.map((agent: any, i: number) => {
           const isCoordinatorStep = normalizedProcess === 'hierarchical' && i === 0;
+          const isParallelStep = normalizedProcess === 'parallel';
           return {
             description: isCoordinatorStep
               ? 'Plan and coordinate the objective. Break work into delegated sub-goals and provide explicit handoff instructions for downstream agents.'
-              : `Execute step ${i + 1} as ${agent.role || 'specialist'} and provide a structured handoff for the next agent.`,
+              : isParallelStep
+                ? `Execute parallel workstream ${i + 1} as ${agent.role || 'specialist'} and return an independently complete contribution for synthesis.`
+                : `Execute step ${i + 1} as ${agent.role || 'specialist'} and provide a structured handoff for the next agent.`,
             expectedOutput: isCoordinatorStep
               ? 'A coordination plan with delegated objectives and success criteria.'
-              : 'Concrete output for this step, plus concise handoff notes for downstream synthesis.',
+              : isParallelStep
+                ? 'Standalone specialist output suitable for final synthesis with other parallel contributors.'
+                : 'Concrete output for this step, plus concise handoff notes for downstream synthesis.',
             agentId: agent.id,
             crewId,
           };
@@ -4646,9 +8578,9 @@ app.post('/api/crews', async (req, res) => {
   }
 });
 
-app.put('/api/crews/:id', async (req, res) => {
-    const { name, description, process, agentIds, project_id, is_exposed, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id } = req.body;
-    const normalizedProcess = process === 'hierarchical' ? 'hierarchical' : 'sequential';
+app.put('/api/crews/:id', requireUser, async (req, res) => {
+  const { name, description, process, agentIds, project_id, is_exposed, learning_enabled, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id } = req.body;
+    const normalizedProcess = normalizeCrewProcess(process);
     const normalizedAgentIds = Array.isArray(agentIds)
       ? Array.from(new Set(agentIds.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id))))
       : [];
@@ -4664,9 +8596,13 @@ app.put('/api/crews/:id', async (req, res) => {
     }
 
     try {
+      const scope = await resolveOrchestratorAccessScope(req);
       const prisma = getPrisma();
       const crewId = Number(req.params.id);
-      await prisma.orchestratorCrew.update({
+      requireVisibleCrewId(scope, crewId);
+      requireVisibleProjectId(scope, Number(project_id));
+      for (const agentId of normalizedAgentIds) requireVisibleAgentId(scope, agentId);
+    await prisma.orchestratorCrew.update({
         where: { id: crewId },
         data: {
           name,
@@ -4696,15 +8632,15 @@ app.put('/api/crews/:id', async (req, res) => {
     }
 });
 
-app.delete('/api/crews/:id', async (req, res) => {
+app.delete('/api/crews/:id', requireUser, async (req, res) => {
     console.log(`Deleting crew ${req.params.id}`);
     try {
         const crewId = Number(req.params.id);
+        const scope = await resolveOrchestratorAccessScope(req);
+        requireVisibleCrewId(scope, crewId);
         const prisma = getPrisma();
-        await prisma.orchestratorCrewExecution.deleteMany({ where: { crewId } });
+        await prisma.orchestratorCrew.delete({ where: { id: crewId } });
         await refreshPersistentMirror();
-        // Mirror to SQLite
-        try { db.prepare('DELETE FROM crew_executions WHERE crew_id = ?').run(crewId); } catch {}
         console.log(`Crew ${crewId} deleted successfully`);
         res.json({ success: true });
     } catch (e: any) {
@@ -4816,7 +8752,12 @@ async function runPythonTool(code: string, args: any): Promise<string> {
       clearTimeout(timeout);
       if (finished) return;
       finished = true;
-      resolve(`[Python Error] ${err.message}`);
+      const msg = String(err?.message || '');
+      if (/ENOENT/i.test(msg)) {
+        resolve('[Python Error] python3 was not found in this runtime. Use an internal utility tool like "get_current_datetime" or install Python in the container.');
+        return;
+      }
+      resolve(`[Python Error] ${msg}`);
     });
 
     proc.on('close', (code) => {
@@ -4835,7 +8776,134 @@ async function runPythonTool(code: string, args: any): Promise<string> {
   });
 }
 
+function normalizeJavascriptPackages(input: any): string[] {
+  const values: string[] = [];
+  if (Array.isArray(input)) {
+    for (const item of input) values.push(String(item || '').trim());
+  } else if (typeof input === 'string') {
+    for (const part of input.split(',')) values.push(part.trim());
+  }
+  const validPackage = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i;
+  const deduped = Array.from(new Set(values.filter(Boolean)));
+  return deduped.filter((name) => validPackage.test(name));
+}
+
+async function installJavascriptPackages(packages: string[]): Promise<void> {
+  if (!packages.length) return;
+  await new Promise<void>((resolve, reject) => {
+    let output = '';
+    let finished = false;
+    const proc = spawn('npm', ['install', '--no-save', '--omit=dev', ...packages], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        NPM_CONFIG_AUDIT: 'false',
+        NPM_CONFIG_FUND: 'false',
+      },
+    });
+    const timeout = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      try { proc.kill('SIGKILL'); } catch {}
+      reject(new Error('npm install timed out after 120s'));
+    }, 120000);
+    proc.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    proc.stderr.on('data', (chunk) => { output += chunk.toString(); });
+    proc.on('error', (err) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      reject(new Error(`Failed to run npm install: ${String((err as any)?.message || err)}`));
+    });
+    proc.on('close', (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(output.trim() || `npm install exited with code ${code}`));
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+async function ensureJavascriptPackagesInstalled(packages: string[]): Promise<void> {
+  const normalized = normalizeJavascriptPackages(packages);
+  if (!normalized.length) return;
+  const missing = normalized.filter((pkg) => {
+    try {
+      runtimeRequire.resolve(pkg);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  if (!missing.length) return;
+  const lockKey = missing.slice().sort().join('|');
+  let inFlight = jsPackageInstallInFlight.get(lockKey);
+  if (!inFlight) {
+    inFlight = installJavascriptPackages(missing).finally(() => {
+      jsPackageInstallInFlight.delete(lockKey);
+    });
+    jsPackageInstallInFlight.set(lockKey, inFlight);
+  }
+  await inFlight;
+}
+
+async function runJavascriptTool(code: string, args: any, packages: string[] = []): Promise<string> {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as any;
+  const source = `'use strict';\nlet result;\n${String(code || '')}\nreturn result;`;
+  try {
+    await ensureJavascriptPackagesInstalled(packages);
+    const fn = new AsyncFunction('args', 'fetch', 'require', 'console', source);
+    const timeoutMs = 15000;
+    const output = await Promise.race([
+      fn(args ?? {}, fetch, runtimeRequire, console),
+      sleep(timeoutMs).then(() => {
+        throw new Error(`JavaScript tool timed out after ${timeoutMs}ms`);
+      }),
+    ]);
+    if (output == null) return '';
+    if (typeof output === 'string') return output;
+    try {
+      return JSON.stringify(output);
+    } catch {
+      return String(output);
+    }
+  } catch (error: any) {
+    return `[JavaScript Error] ${String(error?.message || error)}`;
+  }
+}
+
+function getCurrentDateTimeTool(args: any) {
+  const now = new Date();
+  const timezone = String(args?.timezone || 'UTC').trim() || 'UTC';
+  const locale = String(args?.locale || 'en-US').trim() || 'en-US';
+  const includeUnix = args?.include_unix !== false;
+
+  const formatted = new Intl.DateTimeFormat(locale, {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(now);
+
+  return JSON.stringify({
+    iso_utc: now.toISOString(),
+    formatted,
+    timezone,
+    locale,
+    unix_ms: includeUnix ? now.getTime() : undefined,
+  });
+}
+
 async function runHttpTool(config: any, args: any): Promise<string> {
+  args = enrichArgsWithAttachments(args);
   const method = String(config?.method || 'GET').toUpperCase();
   let url = String(config?.url || '');
   if (!url) throw new Error('HTTP tool URL is required.');
@@ -4904,6 +8972,19 @@ async function runHttpTool(config: any, args: any): Promise<string> {
   if (!['GET', 'HEAD'].includes(method) && formDataConfig && Object.keys(formDataConfig).length > 0 && config?.bodyMode === 'form-data') {
     const form = new FormData();
     for (const [k, v] of Object.entries(formDataConfig)) {
+      const attachment = await resolveAttachmentUploadValue(v, args || {});
+      if (attachment) {
+        if (attachment.local_path) {
+          const fileBuffer = await readFile(attachment.local_path);
+          const blob = new Blob([fileBuffer], { type: attachment.mime_type || 'application/octet-stream' });
+          form.append(k, blob, attachment.name || 'attachment.bin');
+          continue;
+        }
+        if (attachment.url) {
+          form.append(k, attachment.url);
+          continue;
+        }
+      }
       const value = typeof v === 'string' ? applyTemplate(v, args || {}) : String(v ?? '');
       form.append(k, value);
     }
@@ -5011,7 +9092,71 @@ async function runKnowledgeSearch(config: any, args: any): Promise<string> {
   }
 }
 
-async function executeTool(toolName: string, args: any, mcpClients?: Map<string, Client>, toolRecord?: any): Promise<string> {
+function evaluateArithmeticExpression(input: string): number {
+  const expr = String(input || '').trim();
+  if (!expr) throw new Error('Expression is required');
+  // Allow only arithmetic-safe characters.
+  if (!/^[\d+\-*/().\s]+$/.test(expr)) {
+    throw new Error('Expression contains invalid characters');
+  }
+  // Reject accidental operators that create invalid JavaScript forms.
+  if (/[*/]{2,}|[+\-]{3,}/.test(expr)) {
+    throw new Error('Expression contains invalid operator sequence');
+  }
+  const result = Function(`"use strict"; return (${expr});`)();
+  if (typeof result !== 'number' || !Number.isFinite(result)) {
+    throw new Error('Expression did not evaluate to a finite number');
+  }
+  return result;
+}
+
+async function runSearchTool(args: any): Promise<string> {
+  const rawQuery = args?.query ?? args?.q ?? args?.text ?? '';
+  const query = String(rawQuery || '').trim();
+  if (!query) return '[Search Error] query is required.';
+  const endpoint = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+  const response = await fetch(endpoint, {
+    headers: { 'User-Agent': 'AgentOrch/1.0 (+search-tool)' },
+  });
+  if (!response.ok) {
+    return `[Search Error] DuckDuckGo request failed with status ${response.status}.`;
+  }
+  const payload = await response.json().catch(() => ({} as any));
+  const abstractText = String(payload?.AbstractText || '').trim();
+  const relatedTopics = Array.isArray(payload?.RelatedTopics) ? payload.RelatedTopics : [];
+  const relatedSnippets = relatedTopics
+    .flatMap((topic: any) => {
+      if (topic?.Text) return [String(topic.Text)];
+      if (Array.isArray(topic?.Topics)) {
+        return topic.Topics.map((nested: any) => String(nested?.Text || '')).filter(Boolean);
+      }
+      return [];
+    })
+    .filter(Boolean)
+    .slice(0, 3);
+  if (!abstractText && !relatedSnippets.length) {
+    return `[Search Results] No direct summary found for "${query}".`;
+  }
+  return [
+    `[Search Results for "${query}"]`,
+    abstractText ? `Summary: ${abstractText}` : null,
+    relatedSnippets.length ? `Related:\n- ${relatedSnippets.join('\n- ')}` : null,
+  ].filter(Boolean).join('\n\n');
+}
+
+async function runCalculatorTool(args: any): Promise<string> {
+  const expression = String(args?.expression ?? args?.expr ?? args?.input ?? '').trim();
+  if (!expression) return '[Calculator Error] expression is required.';
+  try {
+    const value = evaluateArithmeticExpression(expression);
+    return JSON.stringify({ expression, result: value });
+  } catch (error: any) {
+    return `[Calculator Error] ${error?.message || 'Invalid expression'}`;
+  }
+}
+
+async function executeTool(toolName: string, args: any, mcpClients?: Map<string, Client>, toolRecord?: any, execContext?: ToolExecutionContext): Promise<string> {
+  args = enrichArgsWithAttachments(args);
   console.log(`Executing tool ${toolName} with args:`, args);
 
   if (mcpClients) {
@@ -5032,17 +9177,39 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
         }
       }
     }
+
+    // Some models choose the raw MCP tool name instead of the generated prefixed alias.
+    // Fall back to probing connected MCP clients directly before treating the tool as local/mock.
+    const fallbackErrors: string[] = [];
+    for (const [, client] of mcpClients.entries()) {
+      try {
+        const result = await client.callTool({
+          name: toolName,
+          arguments: args,
+        });
+        if (result.isError) {
+          const text = (result.content as any[]).map((c) => c.type === 'text' ? c.text : '').join('\n');
+          fallbackErrors.push(text || `MCP tool ${toolName} returned an error`);
+          continue;
+        }
+        return (result.content as any[]).map((c) => c.type === 'text' ? c.text : JSON.stringify(c)).join('\n');
+      } catch (e: any) {
+        const message = String(e?.message || e || '');
+        fallbackErrors.push(message);
+      }
+    }
+
+    if (fallbackErrors.length > 0) {
+      const fatalError = fallbackErrors.find((message) => !/not found|unknown tool|method not found|-32601/i.test(message));
+      if (fatalError) {
+        return `[Error executing MCP tool] ${fatalError}`;
+      }
+    }
   }
 
   const tool = toolRecord || db.prepare('SELECT * FROM tools WHERE name = ?').get(toolName);
   if (!tool) {
-    if (toolName.toLowerCase().includes('search')) {
-      return `[Mock Search Result] Found information about "${JSON.stringify(args)}". The weather is sunny. The stock price is up.`;
-    }
-    if (toolName.toLowerCase().includes('calc')) {
-      return `[Mock Calculator] Result: 42`;
-    }
-    return `[Mock Tool Output] Executed ${toolName} successfully.`;
+    return `[Tool Error] Tool "${toolName}" was not found.`;
   }
 
   let config: any = {};
@@ -5053,9 +9220,14 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
   }
 
   if (tool.type === 'python') {
+    return '[Python Error] Python tools are deprecated in this runtime. Convert this tool to type "javascript" and keep code in config.code.';
+  }
+
+  if (tool.type === 'javascript') {
     const code = String(config?.code || '');
-    if (!code.trim()) return '[Python Error] No code provided in tool config.';
-    return runPythonTool(code, args);
+    if (!code.trim()) return '[JavaScript Error] No code provided in tool config.';
+    const packages = normalizeJavascriptPackages(config?.packages);
+    return runJavascriptTool(code, args, packages);
   }
 
   if (tool.type === 'http') {
@@ -5077,6 +9249,18 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
         const result = await internalTools.deployToolScript(args);
         return JSON.stringify(result, null, 2);
       }
+      if (fnName === 'generate_attachment_public_url') {
+        return await generateAttachmentPublicUrlTool(args);
+      }
+      if (fnName === 'curl_request') {
+        return await curlRequestTool(args);
+      }
+      if (fnName === 'get_current_datetime') {
+        return getCurrentDateTimeTool(args);
+      }
+      if (fnName === 'delegate_to_agent') {
+        return await delegateToAgentTool(args, execContext);
+      }
       return `[Internal Error] Unknown internal method: ${fnName}`;
     } catch (e: any) {
       return `[Internal Error] ${e.message}`;
@@ -5084,14 +9268,20 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
   }
 
   if (tool.type === 'mcp_stdio_proxy') {
-    const command = String(config?.command || '').trim();
+    const resolvedInvocation = await resolveMcpRawInvocationFromConfig(config);
+    const wrapped = buildWrappedStdioCommand(String(resolvedInvocation.command || ''), Array.isArray(resolvedInvocation.args) ? resolvedInvocation.args : []);
+    const command = String(wrapped.command || '').trim();
     const mcpToolName = String(config?.mcpToolName || '').trim();
-    const cmdArgs = Array.isArray(config?.args) ? config.args.map((x: any) => String(x)) : [];
+    const cmdArgs = Array.isArray(wrapped.args) ? wrapped.args.map((x: any) => String(x)) : [];
     if (!command || !mcpToolName) {
       return '[MCP Stdio Error] Missing command or mcpToolName in tool config.';
     }
     const timeoutMs = Number(config?.timeoutMs || 45000);
     const envFromConfig = config?.env && typeof config.env === 'object' ? (config.env as Record<string, string>) : {};
+    const knownConfigError = getKnownMcpPackageConfigError(String(config?.packageName || ''), envFromConfig);
+    if (knownConfigError) {
+      return `[MCP Stdio Error] ${knownConfigError}`;
+    }
     const env = { ...process.env, ...envFromConfig };
 
     const client = new Client({ name: 'agentic-orchestrator', version: '1.0.0' }, { capabilities: {} });
@@ -5114,12 +9304,8 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
     }
   }
 
-  if (tool.type === 'search') {
-    return `[Mock Search Result] Found information about "${JSON.stringify(args)}". The weather is sunny. The stock price is up.`;
-  }
-
-  if (tool.type === 'calculator') {
-    return `[Mock Calculator] Result: 42`;
+  if (tool.type === 'search' || tool.type === 'calculator') {
+    return '[Tool Error] Legacy "search" and "calculator" tool types are disabled. Recreate this tool as type "javascript" or "http".';
   }
 
   if (tool.type === 'knowledge_search') {
@@ -5130,8 +9316,8 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
 }
 
 async function getProviderConfig(providerIdentifier: string): Promise<{ apiKey?: string, apiBase?: string, providerType: string, source: string, sourceName?: string }> {
-  // 1. Check if it's a specific provider name in llm_providers
-  const specificProvider = db.prepare('SELECT * FROM llm_providers WHERE name = ?').get(providerIdentifier) as any;
+  // 1. Check if it's a specific provider name or id in llm_providers
+  const specificProvider = db.prepare('SELECT * FROM llm_providers WHERE name = ? OR id = ?').get(providerIdentifier, providerIdentifier) as any;
   if (specificProvider) {
       return { 
           apiKey: specificProvider.api_key, 
@@ -5151,6 +9337,22 @@ async function getProviderConfig(providerIdentifier: string): Promise<{ apiKey?:
           providerType: defaultProvider.provider,
           source: 'default_provider',
           sourceName: defaultProvider.name
+      };
+  }
+
+  // 2b. Fallback: if no explicit default exists, use any provider for that type.
+  // This keeps runtime execution working when teams add a provider but forget to
+  // mark one as default.
+  const anyProviderForType = db
+    .prepare('SELECT * FROM llm_providers WHERE provider = ? ORDER BY id ASC LIMIT 1')
+    .get(providerIdentifier) as any;
+  if (anyProviderForType) {
+      return {
+          apiKey: anyProviderForType.api_key,
+          apiBase: anyProviderForType.api_base,
+          providerType: anyProviderForType.provider,
+          source: 'provider_fallback',
+          sourceName: anyProviderForType.name
       };
   }
 
@@ -5242,22 +9444,26 @@ function getModelPricing(model: string): { input: number; output: number } {
 
 function getProviderBaselinePricing(providerType: string): { input: number; output: number } {
   const p = String(providerType || '').toLowerCase();
-  if (p === 'openai' || p === 'openai-compatible') return DEFAULT_PRICING['gpt-4o-mini'];
+  if (p === 'openai' || p === 'openai-compatible' || p === 'litellm') return DEFAULT_PRICING['gpt-4o-mini'];
   if (p === 'anthropic') return DEFAULT_PRICING['claude-3-5-haiku-20241022'];
   return DEFAULT_PRICING['gemini-1.5-flash'];
 }
 
 
-async function enqueueJob(type: string, payload: any) {
-  return await enqueueRuntimeJob(type, payload);
+async function enqueueJob(
+  type: string,
+  payload: any,
+  options?: { priority?: number; delayMs?: number; tenantKey?: string | null }
+) {
+  return await enqueueRuntimeJob(type, payload, options);
 }
 
 async function updateJobResult(jobId: number, status: 'completed' | 'failed' | 'canceled', result?: any, error?: string) {
   await updateRuntimeJobResult(jobId, status, result, error);
 }
 
-async function claimNextJob(): Promise<{ id: number; type: string; payload: any } | null> {
-  return await claimNextRuntimeJob();
+async function claimNextJob(workerId: string): Promise<{ id: number; type: string; payload: any } | null> {
+  return await claimNextRuntimeJob(workerId);
 }
 
 async function waitForJob(jobId: number, timeoutMs: number) {
@@ -5277,6 +9483,7 @@ async function runDelegatedAgentExecution(options: {
   synthesize?: boolean;
   sessionId?: string;
   userId?: string;
+  routingPolicy?: CrewRoutingPolicy | null;
 }) {
   const {
     supervisorAgent,
@@ -5287,6 +9494,7 @@ async function runDelegatedAgentExecution(options: {
     synthesize = true,
     sessionId,
     userId,
+    routingPolicy,
   } = options;
   const cancelToken = getCancelToken(agentCancelTokens, parentExecutionId);
   const childExecutionIds: number[] = [];
@@ -5339,10 +9547,16 @@ async function runDelegatedAgentExecution(options: {
         initiatedBy: 'delegated_agent_child',
         parentExecutionId,
         delegationTitle: delegation.title,
+        tenantKey: readTenantKey(userId || `delegated:${supervisorAgent.id}`),
       });
+      const numericJobId = Number(
+        (jobId && typeof jobId === 'object')
+          ? ((jobId as any).id ?? (jobId as any).jobId ?? (jobId as any).value ?? NaN)
+          : jobId
+      );
       await getPrisma().orchestratorAgentDelegation.update({
         where: { id: delegation.id },
-        data: { childJobId: jobId, status: 'queued', updatedAt: new Date() },
+        data: { childJobId: Number.isFinite(numericJobId) && numericJobId > 0 ? numericJobId : null, status: 'queued', updatedAt: new Date() },
       });
     }
 
@@ -5355,11 +9569,34 @@ async function runDelegatedAgentExecution(options: {
 
       pending = false;
       const rows = await getDelegationRows(parentExecutionId);
+      const childJobIds = Array.from(new Set(
+        rows
+          .filter((row) => row.role === 'delegate')
+          .map((row) => Number(row.child_job_id || 0))
+          .filter((id) => Number.isFinite(id) && id > 0)
+      ));
+      const batchedJobRows = childJobIds.length
+        ? await getPrisma().orchestratorJobQueue.findMany({
+            where: { id: { in: childJobIds } },
+            select: { id: true, status: true, result: true, error: true },
+          })
+        : [];
+      const jobById = new Map<number, { id: number; status: JobStatus; result: string | null; error: string | null }>(
+        batchedJobRows.map((row: any) => [
+          Number(row.id),
+          {
+            id: Number(row.id),
+            status: String(row.status || 'pending') as JobStatus,
+            result: row.result ?? null,
+            error: row.error ?? null,
+          },
+        ])
+      );
       for (const row of rows) {
         if (row.role !== 'delegate') continue;
         const jobId = Number(row.child_job_id || 0);
         if (!jobId) continue;
-        const job = await getJobRow(jobId);
+        const job = jobById.get(jobId);
         if (!job) {
           await getPrisma().orchestratorAgentDelegation.update({
             where: { id: Number(row.id) },
@@ -5396,17 +9633,23 @@ async function runDelegatedAgentExecution(options: {
     }
 
     const finalDelegations = await getDelegationRows(parentExecutionId);
-    const completedDelegates = finalDelegations.filter((row) => row.role === 'delegate' && row.status === 'completed');
-    const failedDelegates = finalDelegations.filter((row) => row.role === 'delegate' && row.status !== 'completed');
-    const summary = summarizeDelegationResults(finalDelegations.filter((row) => row.role === 'delegate'));
+    const delegateRows = finalDelegations.filter((row) => row.role === 'delegate');
+    const completedDelegates = delegateRows.filter((row) => row.status === 'completed');
+    const failedDelegates = delegateRows.filter((row) => row.status !== 'completed');
+    const summary = summarizeDelegationResults(delegateRows);
+    const delegationPolicy = resolveCrewRoutingPolicy('hierarchical', Math.max(1, delegateRows.length), routingPolicy || {});
+    const meetsQuorum = completedDelegates.length >= delegationPolicy.minSuccessfulUnits;
 
     let finalText = summary || 'No delegate output was produced.';
-    let finalStatus: 'completed' | 'failed' | 'canceled' = failedDelegates.length ? 'failed' : 'completed';
+    let finalStatus: 'completed' | 'failed' | 'canceled' =
+      (!delegationPolicy.allowPartialSuccess && failedDelegates.length)
+        ? 'failed'
+        : (meetsQuorum ? 'completed' : 'failed');
 
     if (cancelToken.canceled) {
       finalStatus = 'canceled';
       finalText = cancelToken.reason || 'Delegated execution canceled';
-    } else if (synthesize && completedDelegates.length) {
+    } else if (synthesize && completedDelegates.length && (delegationPolicy.synthesisOnPartial || failedDelegates.length === 0 || meetsQuorum)) {
       const synthesisAgent = db.prepare('SELECT * FROM agents WHERE id = ?').get(Number(synthesisAgentId || supervisorAgent.id)) as any;
       if (!synthesisAgent) {
         throw new Error(`Synthesis agent ${synthesisAgentId || supervisorAgent.id} not found`);
@@ -5441,7 +9684,10 @@ async function runDelegatedAgentExecution(options: {
         },
       });
       finalText = synthesisResult.text;
-      finalStatus = failedDelegates.length && !completedDelegates.length ? 'failed' : 'completed';
+      finalStatus =
+        (!delegationPolicy.allowPartialSuccess && failedDelegates.length)
+          ? 'failed'
+          : (completedDelegates.length >= delegationPolicy.minSuccessfulUnits ? 'completed' : 'failed');
     } else if (failedDelegates.length && !completedDelegates.length) {
       finalText = summary || failedDelegates.map((row) => `${row.title || row.agent_name}: ${row.error || row.status}`).join('\n');
     }
@@ -5459,7 +9705,12 @@ async function runDelegatedAgentExecution(options: {
     terminalOutput = message;
     await finalizeSupervisorExecution(parentExecutionId, terminalStatus, message, await collectExecutionUsage(childExecutionIds));
   } finally {
-    db.prepare("UPDATE agents SET status = 'idle' WHERE id = ?").run(supervisorAgent.id);
+    await syncAgentStatus({
+      db,
+      prisma: getPrisma(),
+      agentId: Number(supervisorAgent.id),
+      status: 'idle',
+    });
     agentCancelTokens.delete(parentExecutionId);
     delegatedExecutionPromises.delete(parentExecutionId);
   }
@@ -5468,43 +9719,67 @@ async function runDelegatedAgentExecution(options: {
 
 async function processJob(job: { id: number; type: string; payload: any }) {
   if (job.type === 'run_agent') {
-    const { agentId, task, session_id, user_id, initiatedBy, retryOfExecutionId, parentExecutionId, delegationTitle } = job.payload || {};
+    const { agentId, task, session_id, user_id, initiatedBy, retryOfExecutionId, parentExecutionId, delegationTitle, userMessage, attachments } = job.payload || {};
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any;
     if (!agent) throw new Error('Agent not found');
-    const taskObj = { description: task, expected_output: 'The best possible answer.' };
     const logs: any[] = [];
     const session = await ensureAgentSession(agent.id, session_id, user_id);
-    const result = await runAgent(agent, taskObj, "", (l) => logs.push(l), {
-      initiatedBy: initiatedBy || 'queued_agent_run',
-      sessionId: session.id,
-      userId: session.user_id ?? user_id,
-    }, {
-      retryOfExecutionId: retryOfExecutionId ?? null,
-      parentExecutionId: parentExecutionId ?? null,
-      delegationTitle: delegationTitle ?? null,
-      executionKind: parentExecutionId ? 'delegated_child' : 'standard',
-    });
+    const result = parentExecutionId
+      ? await executeDelegatedAgentRun({
+          targetAgent: agent,
+          task: String(task || ''),
+          parentExecutionId: Number(parentExecutionId),
+          delegationTitle: String(delegationTitle || agent.name || 'Delegated task'),
+          sessionId: session.id,
+          userId: session.user_id ?? user_id,
+          initiatedBy: initiatedBy || 'delegated_agent_child',
+          delegationDepth: 1,
+          logForwarder: (l) => logs.push(l),
+        })
+      : await runAgent(agent, { description: task, expected_output: 'The best possible answer.' }, "", (l) => logs.push(l), {
+          initiatedBy: initiatedBy || 'queued_agent_run',
+          sessionId: session.id,
+          userId: session.user_id ?? user_id,
+          userMessage: typeof userMessage === 'string' ? userMessage : String(task || ''),
+          attachments: normalizeIncomingAttachments(attachments),
+        }, {
+          retryOfExecutionId: retryOfExecutionId ?? null,
+          parentExecutionId: null,
+          delegationTitle: null,
+          executionKind: 'standard',
+        });
     return { exec_id: result.exec_id, result: result.text, usage: result.usage, logs, session_id: session.id, user_id: session.user_id ?? user_id ?? null };
   }
 
   if (job.type === 'run_crew') {
-    const { crewId, executionId, initialInput, initiatedBy, retryOfExecutionId } = job.payload || {};
+    const { crewId, executionId, initialInput, initiatedBy, retryOfExecutionId, userId, routingPolicy } = job.payload || {};
+    await syncCrewExecutionStatus({
+      db,
+      prisma: getPrisma(),
+      executionId: Number(executionId),
+      status: 'running',
+      logType: 'thought',
+      logPayload: {
+        agent: 'system',
+        message: 'Crew worker claimed the run and is starting execution.',
+      },
+    });
     await runCrewExecution(
       crewId,
       executionId,
       initialInput || "",
-      { initiatedBy: initiatedBy || 'queued_crew_run' },
-      { retryOfExecutionId: retryOfExecutionId ?? null }
+      { initiatedBy: initiatedBy || 'queued_crew_run', userId: userId || undefined },
+      { retryOfExecutionId: retryOfExecutionId ?? null, routingPolicy: routingPolicy || null }
     );
     return { executionId };
   }
 
   if (job.type === 'run_workflow') {
-    const { runId } = job.payload || {};
+    const { runId, userId } = job.payload || {};
     const numericRunId = Number(runId);
     if (!Number.isFinite(numericRunId)) throw new Error('Invalid workflow run id');
     await persistWorkflowRun(numericRunId, 'running', null, []);
-    return await runWorkflowExecution(numericRunId);
+    return await runWorkflowExecution(numericRunId, userId || null);
   }
 
   throw new Error(`Unknown job type: ${job.type}`);
@@ -5512,44 +9787,122 @@ async function processJob(job: { id: number; type: string; payload: any }) {
 
 function startJobWorker() {
   if (workerTimer) return;
-  workerTimer = setInterval(async () => {
-    while (workerRunning < JOB_CONCURRENCY) {
-      const next = await claimNextJob();
-      if (!next) break;
-      workerRunning += 1;
-      let finalized = false;
-      const finalize = async (status: 'completed' | 'failed', result?: any, error?: string) => {
-        if (finalized) return;
-        finalized = true;
-        await updateJobResult(next.id, status, result, error);
-        workerRunning -= 1;
-      };
-      const timeoutHandle = setTimeout(() => {
-        void finalize('failed', null, `Job timed out after ${JOB_TIMEOUT_MS}ms`);
-      }, JOB_TIMEOUT_MS);
-      processJob(next)
-        .then((result) => {
-          clearTimeout(timeoutHandle);
-          return finalize('completed', result);
-        })
-        .catch((e: any) => {
-          clearTimeout(timeoutHandle);
-          return finalize('failed', null, e?.message || 'Job failed');
-        });
-    }
-  }, 200);
+  workerTimer = startRuntimeJobWorker({
+    claimNextJob,
+    updateJobResult: updateRuntimeJobResult,
+    heartbeatJobLease: heartbeatRuntimeJobLease,
+    failExpiredJobLeases: failExpiredRuntimeJobLeases,
+    processJob,
+    createWorkerId: () => randomUUID(),
+    log: {
+      warn: (...args: any[]) => console.warn(...args),
+      error: (...args: any[]) => console.error(...args),
+    },
+    concurrency: JOB_CONCURRENCY,
+    timeoutMs: JOB_TIMEOUT_MS,
+  });
 }
 
 async function recoverStaleExecutionState() {
   const recovered = await recoverRuntimeState();
-  const recoveredCrewExecutions = db.prepare(
-    "UPDATE crew_executions SET status = 'failed' WHERE status = 'running'"
-  ).run();
-  if (recovered.jobs || recovered.agentExecutions || recovered.workflowRuns || recoveredCrewExecutions.changes) {
+  const recoveredCrewExecutions = await recoverCrewExecutionState({
+    db,
+    prisma: getPrisma(),
+    reason: 'Recovered after server restart',
+  });
+  if (recovered.jobs || recovered.agentExecutions || recovered.workflowRuns || recoveredCrewExecutions.count) {
     console.warn(
-      `Recovered stale state: jobs=${recovered.jobs}, agent_executions=${recovered.agentExecutions}, crew_executions=${recoveredCrewExecutions.changes}, workflow_runs=${recovered.workflowRuns}`
+      `Recovered stale state: jobs=${recovered.jobs}, agent_executions=${recovered.agentExecutions}, crew_executions=${recoveredCrewExecutions.count}, workflow_runs=${recovered.workflowRuns}`
     );
   }
+}
+
+async function tickAgentCronScheduler() {
+  const prisma = getPrisma();
+  const lockId = 928_443_107;
+  const lockRows = await prisma.$queryRawUnsafe<Array<{ ok: boolean }>>(
+    'SELECT pg_try_advisory_lock($1) AS ok',
+    lockId,
+  );
+  if (!lockRows?.[0]?.ok) return;
+
+  try {
+    const dueRows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(`
+      WITH due AS (
+        SELECT id
+        FROM orchestrator_agent_cron_jobs
+        WHERE enabled = TRUE
+          AND next_run_at IS NOT NULL
+          AND next_run_at <= NOW()
+        ORDER BY next_run_at ASC
+        LIMIT 25
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE orchestrator_agent_cron_jobs j
+      SET
+        last_run_at = NOW(),
+        last_status = 'queued',
+        last_error = NULL,
+        next_run_at = NULL,
+        updated_at = NOW()
+      FROM due
+      WHERE j.id = due.id
+      RETURNING j.*;
+    `);
+
+    for (const row of dueRows || []) {
+      try {
+        const nextRunAt = getNextCronOccurrenceUtc(String(row.cron_expr || ''), new Date());
+        await enqueueJob(
+          'run_agent',
+          {
+            agentId: Number(row.agent_id),
+            task: String(row.task || ''),
+            user_id: row.created_by_user_id || undefined,
+            initiatedBy: 'cron_scheduler',
+          },
+          {
+            priority: readJobPriority(row.priority, JOB_PRIORITY.NORMAL),
+            tenantKey: readTenantKey(row.tenant_key || 'global'),
+          },
+        );
+        await prisma.$executeRawUnsafe(
+          `
+            UPDATE orchestrator_agent_cron_jobs
+            SET next_run_at = $2, updated_at = NOW()
+            WHERE id = $1
+          `,
+          Number(row.id),
+          nextRunAt,
+        );
+      } catch (error: any) {
+        await prisma.$executeRawUnsafe(
+          `
+            UPDATE orchestrator_agent_cron_jobs
+            SET
+              last_status = 'failed',
+              last_error = $2,
+              next_run_at = NULL,
+              updated_at = NOW()
+            WHERE id = $1
+          `,
+          Number(row.id),
+          String(error?.message || 'Failed to enqueue cron job'),
+        );
+      }
+    }
+  } finally {
+    await prisma.$queryRawUnsafe('SELECT pg_advisory_unlock($1)', lockId);
+  }
+}
+
+function startAgentCronScheduler() {
+  if (cronSchedulerTimer) return;
+  const run = () => tickAgentCronScheduler().catch((error) => {
+    console.error('Cron scheduler tick failed:', error);
+  });
+  cronSchedulerTimer = setInterval(run, CRON_SCHEDULER_POLL_MS);
+  void run();
 }
 
 interface RunResult {
@@ -5562,8 +9915,21 @@ interface RunResult {
     };
 }
 
-type RunInvocation = { initiatedBy: string; sessionId?: string; userId?: string };
-type RunMeta = { retryOfExecutionId?: number | null; parentExecutionId?: number | null; executionKind?: string; delegationTitle?: string | null };
+type RunInvocation = {
+  initiatedBy: string;
+  sessionId?: string;
+  userId?: string;
+  userMessage?: string;
+  attachments?: AttachmentRef[];
+};
+type RunMeta = { retryOfExecutionId?: number | null; parentExecutionId?: number | null; executionKind?: string; delegationTitle?: string | null; delegationDepth?: number | null };
+type ToolExecutionContext = {
+  agent?: any;
+  executionId?: number | null;
+  invocation?: RunInvocation;
+  runMeta?: RunMeta;
+  logCallback?: (log: any) => void;
+};
 
 function formatExecutionError(error: any, fallback = 'Execution failed'): string {
   if (!error) return fallback;
@@ -5633,7 +9999,10 @@ async function runAgent(
   const sessionConversation = sessionId ? await loadSessionConversation(sessionId) : [];
   const sessionSummary = sessionId ? await loadSessionSummary(sessionId) : '';
   const memoryContext = buildMemoryContext(sessionSummary, sessionConversation);
-  const effectiveContext = [context, memoryContext].filter(Boolean).join('\n\n');
+  const invocationAttachments = normalizeIncomingAttachments(invocation?.attachments);
+  const attachmentContext = buildAttachmentContext(invocationAttachments);
+  const learningContext = buildLearningGuidance(agent.id, sessionUserId, String(task?.description || ''));
+  const effectiveContext = [context, memoryContext, attachmentContext, learningContext].filter(Boolean).join('\n\n');
   const toolsEnabled = agent.tools_enabled !== 0 && agent.tools_enabled !== false;
   const systemPrompt = (agent.system_prompt && String(agent.system_prompt).trim())
     ? String(agent.system_prompt).trim()
@@ -5721,7 +10090,12 @@ async function runAgent(
 	    span.setAttribute('task.description', task.description);
 
 	    // Set status to running
-	    db.prepare("UPDATE agents SET status = 'running' WHERE id = ?").run(agent.id);
+	    await syncAgentStatus({
+	      db,
+	      prisma: getPrisma(),
+	      agentId: Number(agent.id),
+	      status: 'running',
+	    });
 
 	    if (platformRunId) {
 	      try {
@@ -5815,14 +10189,26 @@ async function runAgent(
           } else if (accessPolicy.mcp_mode === 'allowlist') {
             const allowedMcpTools = new Set(accessPolicy.allowed_mcp_tool_ids);
             const allowedMcpBundles = new Set(accessPolicy.allowed_mcp_bundle_ids);
+            // Only filter exposed tools by allowlist, allow unexposed tools
             directMcpTools = directMcpTools.filter((t) => allowedMcpTools.has(Number(t.tool_id)));
-            mcpBundles = mcpBundles.filter((b) => allowedMcpBundles.has(Number(b.id)));
+            // Allow all bundles attached to the agent regardless of exposure status
+            // mcpBundles = mcpBundles.filter((b) => allowedMcpBundles.has(Number(b.id)));
+          }
+          
+          // Check exposure status from SQLite for each bundle
+          try {
+            for (const bundle of mcpBundles) {
+              const exposureRow = db.prepare('SELECT is_exposed FROM mcp_bundles WHERE id = ?').get(bundle.id);
+              bundle.is_exposed = exposureRow ? Boolean(exposureRow.is_exposed) : true;
+            }
+          } catch (e) {
+            console.warn('Failed to get bundle exposure status from SQLite:', e.message);
           }
 
           for (const mcpTool of directMcpTools) {
             scopedTools.push({
               id: null,
-              name: `mcp_tool_${mcpTool.exposed_name}`,
+              name: `mcp_${normalizeMcpName(String(mcpTool.exposed_name || mcpTool.tool_name || ''))}`,
               type: 'mcp',
               description: mcpTool.exposed_description || `MCP tool: ${mcpTool.tool_name}`,
               config: JSON.stringify({
@@ -5835,7 +10221,7 @@ async function runAgent(
           for (const bundle of mcpBundles) {
             scopedTools.push({
               id: null,
-              name: `mcp_bundle_${bundle.slug}`,
+              name: `bundle_${normalizeMcpName(String(bundle.slug || bundle.name || 'bundle'))}`,
               type: 'mcp',
               description: bundle.description || `MCP bundle: ${bundle.name}`,
               config: JSON.stringify({
@@ -5849,6 +10235,7 @@ async function runAgent(
 
         const toolByName = new Map<string, any>();
         const mcpToolByPrefix = new Map<string, any>();
+        const toolSchemaByName = new Map<string, any>();
         for (const tool of scopedTools) {
             toolByName.set(tool.name, tool);
         }
@@ -5923,7 +10310,13 @@ async function runAgent(
                     
                     const mcpTools = await withTimeout(client.listTools(), 8000, 'MCP listTools');
                     for (const mcpTool of mcpTools.tools) {
-                        mcpToolDescriptions += `- ${prefix}_${mcpTool.name}: ${compactPromptText(mcpTool.description || 'MCP tool', 110)}\n`;
+                        const aliasedName = `${prefix}_${mcpTool.name}`;
+                        const inputSchema = normalizeToolInputSchema(mcpTool.inputSchema);
+                        toolSchemaByName.set(aliasedName, inputSchema);
+                        mcpToolDescriptions += `${describeToolForPrompt({
+                          name: aliasedName,
+                          description: mcpTool.description || 'MCP tool',
+                        }, inputSchema)}\n`;
                     }
                     console.log(`✓ Connected to MCP tool ${tool.name}, found ${mcpTools.tools.length} tools`);
 
@@ -5940,12 +10333,43 @@ async function runAgent(
             }
         }
 
-        const scopedToolDescriptions = scopedTools
-          .filter(t => t.type !== 'mcp')
-          .map((t: any) => describeToolForPrompt(t))
-          .join('\n');
+        const nonMcpTools = scopedTools.filter((t) => t.type !== 'mcp');
+        const scopedToolDescriptions = (
+          await Promise.all(
+            nonMcpTools.map(async (t: any) => {
+              const schema = normalizeToolInputSchema(await getToolInputSchemaForRecord(t));
+              toolSchemaByName.set(String(t.name), schema);
+              return describeToolForPrompt(t, schema);
+            }),
+          )
+        ).join('\n');
+        if (toolSchemaByName.has('delegate_to_agent')) {
+          const roster = getDelegationCandidatesForAgent(agent);
+          const existingSchema = normalizeToolInputSchema(toolSchemaByName.get('delegate_to_agent'));
+          const targetNameProperty = existingSchema?.properties?.target_agent_name && typeof existingSchema.properties.target_agent_name === 'object'
+            ? { ...existingSchema.properties.target_agent_name }
+            : { type: 'string' };
+          if (roster.length) {
+            targetNameProperty.enum = roster.map((candidate: any) => String(candidate.name || ''));
+            targetNameProperty.description = [
+              String(targetNameProperty.description || '').trim(),
+              `Choose one of: ${roster.slice(0, 12).map((candidate: any) => candidate.name).join(', ')}`,
+            ].filter(Boolean).join(' ');
+          }
+          toolSchemaByName.set('delegate_to_agent', {
+            ...existingSchema,
+            properties: {
+              ...(existingSchema.properties || {}),
+              target_agent_name: targetNameProperty,
+            },
+          });
+        }
         const toolDescriptions = scopedToolDescriptions + (mcpToolDescriptions ? '\n' + mcpToolDescriptions : '');
         const toolContext = (toolsEnabled && scopedTools.length > 0) ? toolDescriptions : 'No tools are available for this agent.';
+        const delegationRosterContext =
+          toolsEnabled && scopedTools.some((tool) => String(tool?.name || '') === 'delegate_to_agent')
+            ? buildDelegationRosterContext(agent)
+            : '';
 
         const basePrompt = `
             Your current task is: ${task.description}
@@ -5956,6 +10380,12 @@ async function runAgent(
 
             You have access to the following tools:
             ${toolContext}
+
+            ${delegationRosterContext}
+
+            Before calling any tool, verify that every required argument is present. If a required field is missing, do not call the tool yet. Ask for the missing field or choose a different valid path.
+
+            If you use delegate_to_agent, give the child agent a focused subtask, include concrete context, and then use the delegated result to continue reasoning or provide the final answer.
 
             If you need to use a tool, respond with a JSON object in this format:
             { "tool": "tool_name", "args": { "arg_name": "value" }, "thought": "Why I am using this tool" }
@@ -6015,10 +10445,19 @@ async function runAgent(
                 llmSpan.setAttribute('llm.provider', providerType);
                 llmSpan.setAttribute('llm.model', model);
                 try {
-                    if (providerType === 'openai' || providerType === 'openai-compatible') {
+                    if (providerType === 'openai' || providerType === 'openai-compatible' || providerType === 'litellm') {
                         const openai = new OpenAI({ 
                             apiKey: currentApiKey,
-                            baseURL: config.apiBase // Optional base URL
+                            baseURL: config.apiBase,
+                            fetch: async (url: string | Request | URL, init?: RequestInit) => {
+                                const headers = new Headers(init?.headers);
+                                Array.from(headers.keys()).forEach(k => {
+                                    if (k.toLowerCase().startsWith('x-stainless')) headers.delete(k);
+                                });
+                                headers.set('User-Agent', 'curl/8.7.1');
+                                headers.set('x-litellm-api-key', currentApiKey!);
+                                return fetch(url, { ...init, headers });
+                            }
                         });
                         const completion = await withRetry(() => withTimeout(openai.chat.completions.create({
                             messages: [{ role: "system", content: systemPrompt }, { role: "user", content: iterationContext }],
@@ -6184,7 +10623,6 @@ async function runAgent(
 
             if (action.tool) {
                 logCallback({ type: 'thought', agent: agent.name, message: action.thought });
-                logCallback({ type: 'tool_call', agent: agent.name, tool: action.tool, args: action.args });
 
                 if (!toolsEnabled) {
                     const disabledMsg = 'Tools are disabled for this agent. Continue without tools.';
@@ -6195,6 +10633,27 @@ async function runAgent(
                 }
 
                 const normalizedArgs = action.args && typeof action.args === 'object' ? action.args : {};
+                const actionToolName = String(action.tool);
+                const inputSchema = toolSchemaByName.get(actionToolName) || null;
+                if (inputSchema) {
+                    const validation = validateArgsAgainstInputSchema(normalizedArgs, inputSchema);
+                    if (!validation.ok) {
+                        const details = [
+                          validation.missing.length ? `missing required arguments: ${validation.missing.join(', ')}` : '',
+                          validation.issues.length ? `schema issues: ${validation.issues.join('; ')}` : '',
+                        ].filter(Boolean).join(' | ');
+                        const missingMsg = `Tool "${actionToolName}" failed validation: ${details}. Ask for the missing values or repair the tool call before invoking it.`;
+                        logCallback({ type: 'warning', agent: agent.name, message: missingMsg });
+                        appendScratchpadEntry([
+                          '[Tool Validation]',
+                          missingMsg,
+                          `Args attempted: ${summarizeToolArgsForPrompt(normalizedArgs)}`,
+                        ].join('\n'));
+                        iterations++;
+                        continue;
+                    }
+                }
+                logCallback({ type: 'tool_call', agent: agent.name, tool: action.tool, args: action.args });
                 const signature = `${String(action.tool)}::${JSON.stringify(normalizedArgs, Object.keys(normalizedArgs).sort())}`;
                 const signatureCount = (toolSignatureCounts.get(signature) || 0) + 1;
                 toolSignatureCounts.set(signature, signatureCount);
@@ -6269,7 +10728,13 @@ async function runAgent(
                         toolSpan.setAttribute('tool.args', JSON.stringify(action.args));
                         toolSpan.setAttribute('tool.kind', toolKind);
                         try {
-                            const res = await executeTool(action.tool, action.args, mcpClients, toolRecord);
+                            const res = await executeTool(action.tool, action.args, mcpClients, toolRecord, {
+                              agent,
+                              executionId: execId,
+                              invocation,
+                              runMeta,
+                              logCallback,
+                            });
                             toolSpan.setStatus({ code: SpanStatusCode.OK });
                             return res;
                         } catch (e: any) {
@@ -6360,7 +10825,9 @@ async function runAgent(
                   `Tool: ${action.tool}`,
                   `Args: ${summarizeToolArgsForPrompt(action.args)}`,
                   `Result: ${summarizeToolResultForPrompt(toolResult)}`,
-                  'Continue toward the goal.',
+                  action.tool === 'delegate_to_agent'
+                    ? 'A delegated specialist result is now available. Use it to continue reasoning, decide the next step, or provide the final answer.'
+                    : 'Continue toward the goal.',
                 ].join('\n'));
             } else {
                 span.setStatus({ code: SpanStatusCode.OK });
@@ -6385,9 +10852,9 @@ async function runAgent(
 
         if (recentToolResults.length > 0) {
           const latest = recentToolResults[recentToolResults.length - 1];
-          finalOutput = `The agent stopped after ${maxIterations} reasoning steps without a formal final_answer. Latest tool output:\n\nTool: ${latest.tool}\nArgs: ${JSON.stringify(latest.args)}\nResult: ${latest.result}\n\nTip: refine the task prompt or tighten tool instructions to avoid repeated tool loops.`;
+          finalOutput = `The agent stopped because it hit its reasoning step limit of ${maxIterations} before producing a formal final_answer. You can raise this in Agents > Advanced Config > Reasoning Step Limit.\n\nLatest tool output:\n\nTool: ${latest.tool}\nArgs: ${JSON.stringify(latest.args)}\nResult: ${latest.result}\n\nTip: increase the step limit for longer tool chains, or tighten the prompt/tool instructions to avoid repeated loops.`;
         } else {
-          finalOutput = "The agent stopped after reaching the iteration limit without returning a final answer.";
+          finalOutput = `The agent stopped because it hit its reasoning step limit of ${maxIterations} without returning a final answer. You can raise this in Agents > Advanced Config > Reasoning Step Limit.`;
         }
         return { exec_id: execId, text: finalOutput, usage: totalUsage };
     } finally {
@@ -6414,7 +10881,12 @@ async function runAgent(
         if (sessionId) {
           const nowIso = new Date().toISOString();
           const messages = Array.isArray(sessionConversation) ? [...sessionConversation] : [];
-          messages.push({ role: 'user', content: String(task.description), ts: nowIso });
+          messages.push({
+            role: 'user',
+            content: String(invocation?.userMessage || task.description),
+            ts: nowIso,
+            ...(invocationAttachments.length ? { attachments: invocationAttachments } : {}),
+          });
           const assistantText = finalOutput || runError?.message || 'Error';
           messages.push({ role: 'assistant', content: String(assistantText), ts: nowIso });
           const effectiveWindow = Math.max(2, Number(memoryWindow) || 12);
@@ -6434,7 +10906,12 @@ async function runAgent(
             }
         }
         // Set status back to idle
-        db.prepare("UPDATE agents SET status = 'idle' WHERE id = ?").run(agent.id);
+        await syncAgentStatus({
+          db,
+          prisma: getPrisma(),
+          agentId: Number(agent.id),
+          status: 'idle',
+        });
         
         agentCancelTokens.delete(execId);
 
@@ -6502,17 +10979,19 @@ async function runCrewExecution(
   executionId: number | bigint,
   initialInput: string = "",
   invocation?: RunInvocation,
-  runMeta?: { retryOfExecutionId?: number | null }
+  runMeta?: { retryOfExecutionId?: number | null; routingPolicy?: any }
 ) {
     return tracer.startActiveSpan('runCrewExecution', async (span) => {
         span.setAttribute('crew.id', crewId.toString());
         span.setAttribute('execution.id', executionId.toString());
         const cancelToken = getCancelToken(crewCancelTokens, Number(executionId));
+        const prisma = getPrisma();
 
-        try {
-            const crewRow = db.prepare('SELECT process, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id FROM crews WHERE id = ?').get(crewId) as any;
-            const process = crewRow?.process || 'sequential';
-            let tasks = db.prepare('SELECT * FROM tasks WHERE crew_id = ? ORDER BY id ASC').all(crewId) as any[];
+	        try {
+	            const crewRow = db.prepare('SELECT process, max_runtime_ms, max_cost_usd, max_tool_calls, coordinator_agent_id FROM crews WHERE id = ?').get(crewId) as any;
+	            const process = crewRow?.process || 'sequential';
+	            const crewGuidance = buildCrewLearningGuidance(Number(crewId), invocation?.userId || null, initialInput);
+	            let tasks = db.prepare('SELECT * FROM tasks WHERE crew_id = ? ORDER BY id ASC').all(crewId) as any[];
             let generatedRuntimeTasks = 0;
             if (!tasks.length) {
                 const crewAgents = db.prepare(`
@@ -6531,23 +11010,51 @@ async function runCrewExecution(
                 }));
                 generatedRuntimeTasks = tasks.length;
             }
-            let context = initialInput ? `Initial Input Context:\n${initialInput}\n\n` : "";
+            let context = [
+              crewGuidance ? `${crewGuidance}\n\n` : '',
+              initialInput ? `Initial Input Context:\n${initialInput}\n\n` : '',
+            ].join('');
             let lastOutput = "";
             let plannerInputs: string[] | null = null;
             let plannerAgentForHierarchy: any | null = null;
             const taskOutputs: Array<{ agentName: string; agentRole: string; task: string; output: string }> = [];
+            const parallelFailures: Array<{ step: number; agentName: string; task: string; error: string }> = [];
             const startedAt = Date.now();
-            const maxRuntimeMs = normalizeNumber(crewRow?.max_runtime_ms);
-            const maxCostUsd = normalizeNumber(crewRow?.max_cost_usd);
-            const maxToolCalls = normalizeNumber(crewRow?.max_tool_calls);
+	            const maxRuntimeMs = normalizeNumber(crewRow?.max_runtime_ms);
+	            const maxCostUsd = normalizeNumber(crewRow?.max_cost_usd);
+	            const maxToolCalls = normalizeNumber(crewRow?.max_tool_calls);
+	            const isParallelProcess = process === 'parallel';
+	            const runtimeRoutingPolicy = resolveCrewRoutingPolicy(
+	              normalizeCrewProcess(process),
+	              Math.max(1, tasks.length || 1),
+	              runMeta?.routingPolicy || {}
+	            );
             
             // Helper to append logs safely
+            let pendingCrewLogWrite = Promise.resolve();
             const appendLog = (logItem: any) => {
                 const payload = { ...logItem };
-                db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
-                  .run(executionId, String(logItem.type || 'log'), JSON.stringify(payload));
+                pendingCrewLogWrite = pendingCrewLogWrite
+                  .then(() => appendCrewExecutionLog({
+                    db,
+                    prisma,
+                    executionId: Number(executionId),
+                    type: String(logItem.type || 'log'),
+                    payload,
+                  }))
+                  .catch((error) => {
+                    console.error('Failed to append crew execution log', error);
+                  });
             };
-            if (generatedRuntimeTasks > 0) {
+	            const flushCrewLogWrites = async () => {
+	              await pendingCrewLogWrite;
+	            };
+	            appendLog({
+	              type: 'crew_routing_policy',
+	              process,
+	              policy: runtimeRoutingPolicy,
+	            });
+	            if (generatedRuntimeTasks > 0) {
                 appendLog({
                   type: 'thought',
                   agent: 'system',
@@ -6585,6 +11092,7 @@ async function runCrewExecution(
                     if (!delegateAgent) return null;
                     const taskDescription = [
                       String(task.description || `Delegated task ${idx + 1}`),
+                      crewGuidance ? `Crew Guidance:\n${crewGuidance}` : '',
                       initialInput ? `Original Objective:\n${initialInput}` : '',
                       `Expected Output:\n${String(task.expected_output || 'Completed task output')}`,
                       `Crew Context (JSON):\n${JSON.stringify({
@@ -6621,6 +11129,7 @@ async function runCrewExecution(
                   synthesisAgentId: Number(coordinatorAgent.id),
                   synthesize: true,
                   source: 'crew_hierarchical',
+                  routingPolicy: runtimeRoutingPolicy,
                 });
 
                 appendLog({
@@ -6675,14 +11184,22 @@ async function runCrewExecution(
                   total_steps: delegationRows.filter((row) => row.role === 'delegate').length,
                 });
 
-                db.prepare('UPDATE crew_executions SET prompt_tokens = ?, completion_tokens = ?, total_cost = ? WHERE id = ?')
-                  .run(executionPromptTokens, executionCompletionTokens, executionCost, executionId);
-
                 const delegatedStatus = String(parentExec?.status || 'completed');
-                db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run(
-                  delegatedStatus === 'failed' ? 'failed' : delegatedStatus === 'canceled' ? 'canceled' : 'completed',
-                  executionId
-                );
+                await flushCrewLogWrites();
+                await syncCrewExecutionMetrics({
+                  db,
+                  prisma,
+                  executionId: Number(executionId),
+                  promptTokens: executionPromptTokens,
+                  completionTokens: executionCompletionTokens,
+                  totalCost: executionCost,
+                });
+                await syncCrewExecutionStatus({
+                  db,
+                  prisma,
+                  executionId: Number(executionId),
+                  status: delegatedStatus === 'failed' ? 'failed' : delegatedStatus === 'canceled' ? 'canceled' : 'completed',
+                });
                 span.setStatus({ code: SpanStatusCode.OK });
                 return;
             }
@@ -6709,7 +11226,7 @@ async function runCrewExecution(
 
                 if (plannerAgent) {
                     const planTask = {
-                        description: `Create a task-by-task plan for the following objective and tasks.\nObjective:\n${initialInput || 'N/A'}\n\nTasks:\n${tasks.map((t: any, i: number) => `${i + 1}. ${t.description}`).join('\n')}\n\nReturn JSON: {"plan":["input for task 1","input for task 2",...]} (length must match tasks).`,
+                        description: `${crewGuidance ? `${crewGuidance}\n\n` : ''}Create a task-by-task plan for the following objective and tasks.\nObjective:\n${initialInput || 'N/A'}\n\nTasks:\n${tasks.map((t: any, i: number) => `${i + 1}. ${t.description}`).join('\n')}\n\nReturn JSON: {"plan":["input for task 1","input for task 2",...]} (length must match tasks).`,
                         expected_output: 'JSON object with plan array.',
                     };
 
@@ -6726,126 +11243,272 @@ async function runCrewExecution(
                 }
             }
 
-            for (let i = 0; i < tasks.length; i++) {
-                if (maxRuntimeMs && (Date.now() - startedAt) > maxRuntimeMs) {
-                    cancelToken.canceled = true;
-                    cancelToken.reason = `Guardrail: max runtime ${maxRuntimeMs}ms exceeded`;
-                }
-                if (cancelToken.canceled) {
-                    db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run('canceled', executionId);
-                    appendLog({ type: 'canceled', message: cancelToken.reason || 'Execution canceled' });
-                    span.setStatus({ code: SpanStatusCode.OK, message: 'canceled' });
-                    return;
-                }
-                const task = tasks[i];
-                const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(task.agent_id) as any;
-                if (!agent) {
-                    throw new Error(`Agent not found for task ${task?.id ?? i + 1}`);
-                }
-                
-                appendLog({ type: 'start', agent: agent.name, task: task.description });
-
-                const recentOutputsText = taskOutputs
-                  .slice(-2)
-                  .map((entry, idx) => `#${taskOutputs.length - 1 + idx}\nAgent: ${entry.agentName} (${entry.agentRole})\nTask: ${entry.task}\nOutput:\n${entry.output}`)
-                  .join('\n\n');
-                const handoffContext =
-                  process === 'sequential'
-                    ? (lastOutput ? `Previous agent output:\n${lastOutput}\n` : context)
-                    : `${context}${lastOutput ? `\n[Handoff]\nPrevious agent output:\n${lastOutput}\n` : ''}${recentOutputsText ? `\nRecent Upstream Outputs:\n${recentOutputsText}\n` : ''}`;
-
-                const taskDescriptionParts: string[] = [String(task.description || '')];
-                const planned = plannerInputs && plannerInputs[i] ? String(plannerInputs[i]) : '';
-                if (i === 0 && initialInput) {
-                    taskDescriptionParts.push(`User Input:\n${initialInput}`);
-                }
-                if (planned) {
-                    taskDescriptionParts.push(`Planner Input:\n${planned}`);
-                } else if (lastOutput) {
-                    taskDescriptionParts.push(`Previous Agent Output:\n${lastOutput}`);
-                }
-                const handoffPacket = {
-                  objective: initialInput || '',
-                  process,
-                  step: i + 1,
-                  total_steps: tasks.length,
-                  assigned_agent: { id: agent.id, name: agent.name, role: agent.role },
-                  upstream: taskOutputs.slice(-3).map((entry) => ({
-                    agent: entry.agentName,
-                    role: entry.agentRole,
-                    task: entry.task,
-                    output: entry.output,
-                  })),
-                };
-                taskDescriptionParts.push(`Handoff Packet (JSON):\n${JSON.stringify(handoffPacket, null, 2)}`);
-                const taskWithInput = {
-                    ...task,
-                    description: taskDescriptionParts.filter(Boolean).join('\n\n'),
-                };
-
-                // runAgent is already instrumented, so it will create a child span
-                const guardrailLogCallback = (log: any) => {
-                  appendLog(log);
-                  if (log?.type === 'tool_call') {
-                    executionToolCalls += 1;
-                    if (maxToolCalls && executionToolCalls > maxToolCalls) {
+            if (isParallelProcess && tasks.length > 0) {
+                appendLog({
+                  type: 'thought',
+                  agent: 'system',
+                  message: `Launching ${tasks.length} tasks in parallel with concurrency ${CREW_PARALLEL_TASK_CONCURRENCY}.`,
+                });
+                let queueCursor = 0;
+                const runParallelWorker = async () => {
+                  while (queueCursor < tasks.length) {
+                    const taskIndex = queueCursor;
+                    queueCursor += 1;
+                    const task = tasks[taskIndex];
+                    if (maxRuntimeMs && (Date.now() - startedAt) > maxRuntimeMs) {
                       cancelToken.canceled = true;
-                      cancelToken.reason = `Guardrail: max tool calls ${maxToolCalls} exceeded`;
+                      cancelToken.reason = `Guardrail: max runtime ${maxRuntimeMs}ms exceeded`;
+                    }
+                    if (cancelToken.canceled) return;
+                    const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(task.agent_id) as any;
+                    if (!agent) {
+                      parallelFailures.push({
+                        step: taskIndex + 1,
+                        agentName: `Agent ${task?.agent_id ?? 'unknown'}`,
+                        task: String(task?.description || ''),
+                        error: `Agent not found for task ${task?.id ?? taskIndex + 1}`,
+                      });
+                      appendLog({ type: 'error', message: `Agent not found for task ${task?.id ?? taskIndex + 1}` });
+                      continue;
+                    }
+                    appendLog({ type: 'start', agent: agent.name, task: task.description, mode: 'parallel' });
+                    const taskDescriptionParts: string[] = [String(task.description || '')];
+                    if (crewGuidance) taskDescriptionParts.push(`Crew Guidance:\n${crewGuidance}`);
+                    if (initialInput) taskDescriptionParts.push(`User Input:\n${initialInput}`);
+                    taskDescriptionParts.push('Parallel Mode: focus on your specialization and return a standalone output for final synthesis.');
+                    const taskWithInput = { ...task, description: taskDescriptionParts.filter(Boolean).join('\n\n') };
+                    const guardrailLogCallback = (log: any) => {
+                      appendLog(log);
+                      if (log?.type === 'tool_call') {
+                        executionToolCalls += 1;
+                        if (maxToolCalls && executionToolCalls > maxToolCalls) {
+                          cancelToken.canceled = true;
+                          cancelToken.reason = `Guardrail: max tool calls ${maxToolCalls} exceeded`;
+                        }
+                      }
+                    };
+                    try {
+                      const result = await runAgent(
+                        agent,
+                        taskWithInput,
+                        context,
+                        guardrailLogCallback,
+                        invocation ?? { initiatedBy: 'crew_kickoff' },
+                        { retryOfExecutionId: runMeta?.retryOfExecutionId ?? null }
+                      );
+                      taskOutputs.push({
+                        agentName: String(agent.name || `Agent ${agent.id}`),
+                        agentRole: String(agent.role || 'specialist'),
+                        task: String(task.description || ''),
+                        output: String(result.text || ''),
+                      });
+                      executionPromptTokens += result.usage.prompt_tokens;
+                      executionCompletionTokens += result.usage.completion_tokens;
+                      executionCost += result.usage.cost;
+                      appendLog({ type: 'finish', agent: agent.name, result: result.text, usage: result.usage, mode: 'parallel' });
+                      if (maxCostUsd && executionCost > maxCostUsd) {
+                        cancelToken.canceled = true;
+                        cancelToken.reason = `Guardrail: max cost $${maxCostUsd} exceeded`;
+                      }
+                    } catch (error: any) {
+                      const message = formatExecutionError(error, 'Parallel task failed');
+                      parallelFailures.push({
+                        step: taskIndex + 1,
+                        agentName: String(agent.name || `Agent ${agent.id}`),
+                        task: String(task.description || ''),
+                        error: message,
+                      });
+                      appendLog({ type: 'error', agent: agent.name, task: task.description, message, mode: 'parallel' });
+                      if (runtimeRoutingPolicy.failFastOnUnitError) {
+                        cancelToken.canceled = true;
+                        cancelToken.reason = `Parallel fail-fast triggered by ${agent.name}`;
+                        return;
+                      }
                     }
                   }
                 };
-                const result = await runAgent(
-                  agent,
-                  taskWithInput,
-                  handoffContext,
-                  guardrailLogCallback,
-                  invocation ?? { initiatedBy: 'crew_kickoff' },
-                  { retryOfExecutionId: runMeta?.retryOfExecutionId ?? null }
-                );
-                
-                if (process === 'sequential') {
-                    lastOutput = result.text;
-                } else {
-                    context += `\nOutput from ${agent.role} on task "${task.description}":\n${result.text}\n`;
-                    lastOutput = result.text;
+                const workerCount = Math.min(tasks.length, CREW_PARALLEL_TASK_CONCURRENCY);
+                await Promise.all(Array.from({ length: workerCount }, () => runParallelWorker()));
+                if (parallelFailures.length) {
+                  appendLog({
+                    type: 'crew_parallel_summary',
+                    total_tasks: tasks.length,
+                    successful_tasks: taskOutputs.length,
+                    failed_tasks: parallelFailures.length,
+                    failures: parallelFailures,
+                  });
                 }
-                taskOutputs.push({
-                  agentName: String(agent.name || `Agent ${agent.id}`),
-                  agentRole: String(agent.role || 'specialist'),
-                  task: String(task.description || ''),
-                  output: String(result.text || ''),
+                const successfulTasks = taskOutputs.length;
+                const failedTasks = parallelFailures.length;
+                if (runtimeRoutingPolicy.maxFailures != null && failedTasks > runtimeRoutingPolicy.maxFailures) {
+                  throw new Error(`Parallel run exceeded max failures (${failedTasks}/${runtimeRoutingPolicy.maxFailures}).`);
+                }
+                if (!runtimeRoutingPolicy.allowPartialSuccess && failedTasks > 0) {
+                  throw new Error(`Parallel run does not allow partial success and had ${failedTasks} failed task(s).`);
+                }
+                if (successfulTasks < runtimeRoutingPolicy.minSuccessfulUnits) {
+                  throw new Error(`Parallel quorum not met: ${successfulTasks} successful task(s), required ${runtimeRoutingPolicy.minSuccessfulUnits}.`);
+                }
+                await syncCrewExecutionMetrics({
+                  db,
+                  prisma,
+                  executionId: Number(executionId),
+                  promptTokens: executionPromptTokens,
+                  completionTokens: executionCompletionTokens,
+                  totalCost: executionCost,
                 });
+                if (cancelToken.canceled) {
+                  appendLog({ type: 'canceled', message: cancelToken.reason || 'Execution canceled' });
+                  await flushCrewLogWrites();
+                  await syncCrewExecutionStatus({
+                    db,
+                    prisma,
+                    executionId: Number(executionId),
+                    status: 'canceled',
+                  });
+                  span.setStatus({ code: SpanStatusCode.OK, message: 'canceled' });
+                  return;
+                }
+                if (!taskOutputs.length && parallelFailures.length) {
+                  throw new Error(`All parallel tasks failed (${parallelFailures.length}/${tasks.length}).`);
+                }
+            } else {
+              for (let i = 0; i < tasks.length; i++) {
+                  if (maxRuntimeMs && (Date.now() - startedAt) > maxRuntimeMs) {
+                      cancelToken.canceled = true;
+                      cancelToken.reason = `Guardrail: max runtime ${maxRuntimeMs}ms exceeded`;
+                  }
+                  if (cancelToken.canceled) {
+                      appendLog({ type: 'canceled', message: cancelToken.reason || 'Execution canceled' });
+                      await flushCrewLogWrites();
+                      await syncCrewExecutionStatus({
+                        db,
+                        prisma,
+                        executionId: Number(executionId),
+                        status: 'canceled',
+                      });
+                      span.setStatus({ code: SpanStatusCode.OK, message: 'canceled' });
+                      return;
+                  }
+                  const task = tasks[i];
+                  const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(task.agent_id) as any;
+                  if (!agent) {
+                      throw new Error(`Agent not found for task ${task?.id ?? i + 1}`);
+                  }
+                  
+                  appendLog({ type: 'start', agent: agent.name, task: task.description });
 
-                if (process !== 'hierarchical' && i === 0 && tasks.length > 1) {
-                    try {
-                        const parsed = JSON.parse(result.text);
-                        const plan = Array.isArray(parsed?.plan) ? parsed.plan : null;
-                        if (plan && plan.length) {
-                            plannerInputs = plan.map((p: any) => String(p));
-                            appendLog({ type: 'planner_handoff', plan: plannerInputs });
-                        } else if (parsed?.next_input) {
-                            plannerInputs = [String(parsed.next_input)];
-                            appendLog({ type: 'planner_handoff', plan: plannerInputs });
-                        }
-                    } catch {
-                        // Ignore planner JSON if it's not valid
+                  const recentOutputsText = taskOutputs
+                    .slice(-2)
+                    .map((entry, idx) => `#${taskOutputs.length - 1 + idx}\nAgent: ${entry.agentName} (${entry.agentRole})\nTask: ${entry.task}\nOutput:\n${entry.output}`)
+                    .join('\n\n');
+                  const handoffContext =
+                    process === 'sequential'
+                      ? (lastOutput ? `Previous agent output:\n${lastOutput}\n` : context)
+                      : `${context}${lastOutput ? `\n[Handoff]\nPrevious agent output:\n${lastOutput}\n` : ''}${recentOutputsText ? `\nRecent Upstream Outputs:\n${recentOutputsText}\n` : ''}`;
+
+                  const taskDescriptionParts: string[] = [String(task.description || '')];
+                  if (crewGuidance) {
+                      taskDescriptionParts.push(`Crew Guidance:\n${crewGuidance}`);
+                  }
+                  const planned = plannerInputs && plannerInputs[i] ? String(plannerInputs[i]) : '';
+                  if (i === 0 && initialInput) {
+                      taskDescriptionParts.push(`User Input:\n${initialInput}`);
+                  }
+                  if (planned) {
+                      taskDescriptionParts.push(`Planner Input:\n${planned}`);
+                  } else if (lastOutput) {
+                      taskDescriptionParts.push(`Previous Agent Output:\n${lastOutput}`);
+                  }
+                  const handoffPacket = {
+                    objective: initialInput || '',
+                    process,
+                    step: i + 1,
+                    total_steps: tasks.length,
+                    assigned_agent: { id: agent.id, name: agent.name, role: agent.role },
+                    upstream: taskOutputs.slice(-3).map((entry) => ({
+                      agent: entry.agentName,
+                      role: entry.agentRole,
+                      task: entry.task,
+                      output: entry.output,
+                    })),
+                  };
+                  taskDescriptionParts.push(`Handoff Packet (JSON):\n${JSON.stringify(handoffPacket, null, 2)}`);
+                  const taskWithInput = {
+                      ...task,
+                      description: taskDescriptionParts.filter(Boolean).join('\n\n'),
+                  };
+
+                  // runAgent is already instrumented, so it will create a child span
+                  const guardrailLogCallback = (log: any) => {
+                    appendLog(log);
+                    if (log?.type === 'tool_call') {
+                      executionToolCalls += 1;
+                      if (maxToolCalls && executionToolCalls > maxToolCalls) {
+                        cancelToken.canceled = true;
+                        cancelToken.reason = `Guardrail: max tool calls ${maxToolCalls} exceeded`;
+                      }
                     }
-                }
-                
-                // Track usage
-                executionPromptTokens += result.usage.prompt_tokens;
-                executionCompletionTokens += result.usage.completion_tokens;
-                executionCost += result.usage.cost;
-                if (maxCostUsd && executionCost > maxCostUsd) {
-                  cancelToken.canceled = true;
-                  cancelToken.reason = `Guardrail: max cost $${maxCostUsd} exceeded`;
-                }
+                  };
+                  const result = await runAgent(
+                    agent,
+                    taskWithInput,
+                    handoffContext,
+                    guardrailLogCallback,
+                    invocation ?? { initiatedBy: 'crew_kickoff' },
+                    { retryOfExecutionId: runMeta?.retryOfExecutionId ?? null }
+                  );
+                  
+                  if (process === 'sequential') {
+                      lastOutput = result.text;
+                  } else {
+                      context += `\nOutput from ${agent.role} on task "${task.description}":\n${result.text}\n`;
+                      lastOutput = result.text;
+                  }
+                  taskOutputs.push({
+                    agentName: String(agent.name || `Agent ${agent.id}`),
+                    agentRole: String(agent.role || 'specialist'),
+                    task: String(task.description || ''),
+                    output: String(result.text || ''),
+                  });
 
-                appendLog({ type: 'finish', agent: agent.name, result: result.text, usage: result.usage });
-                
-                // Update execution stats progressively
-                db.prepare('UPDATE crew_executions SET prompt_tokens = ?, completion_tokens = ?, total_cost = ? WHERE id = ?')
-                .run(executionPromptTokens, executionCompletionTokens, executionCost, executionId);
+                  if (process !== 'hierarchical' && i === 0 && tasks.length > 1) {
+                      try {
+                          const parsed = JSON.parse(result.text);
+                          const plan = Array.isArray(parsed?.plan) ? parsed.plan : null;
+                          if (plan && plan.length) {
+                              plannerInputs = plan.map((p: any) => String(p));
+                              appendLog({ type: 'planner_handoff', plan: plannerInputs });
+                          } else if (parsed?.next_input) {
+                              plannerInputs = [String(parsed.next_input)];
+                              appendLog({ type: 'planner_handoff', plan: plannerInputs });
+                          }
+                      } catch {
+                          // Ignore planner JSON if it's not valid
+                      }
+                  }
+                  
+                  // Track usage
+                  executionPromptTokens += result.usage.prompt_tokens;
+                  executionCompletionTokens += result.usage.completion_tokens;
+                  executionCost += result.usage.cost;
+                  if (maxCostUsd && executionCost > maxCostUsd) {
+                    cancelToken.canceled = true;
+                    cancelToken.reason = `Guardrail: max cost $${maxCostUsd} exceeded`;
+                  }
+
+                  appendLog({ type: 'finish', agent: agent.name, result: result.text, usage: result.usage });
+                  
+                  // Update execution stats progressively
+                  await syncCrewExecutionMetrics({
+                    db,
+                    prisma,
+                    executionId: Number(executionId),
+                    promptTokens: executionPromptTokens,
+                    completionTokens: executionCompletionTokens,
+                    totalCost: executionCost,
+                  });
+              }
             }
 
             // Always synthesize a cumulative crew answer so users get a real multi-agent final output.
@@ -6859,7 +11522,12 @@ async function runCrewExecution(
                 const synthesisContext = `${context}\n\nCollected Task Outputs:\n${synthesisSource}`;
                 const synthesisAgent = process === 'hierarchical'
                   ? (plannerAgentForHierarchy || db.prepare('SELECT * FROM agents WHERE id = ?').get(tasks[0]?.agent_id))
-                  : db.prepare('SELECT * FROM agents WHERE id = ?').get(tasks[tasks.length - 1]?.agent_id);
+                  : process === 'parallel'
+                    ? (
+                        db.prepare('SELECT * FROM agents WHERE id = ?').get(Number(crewRow?.coordinator_agent_id || 0)) ||
+                        db.prepare('SELECT * FROM agents WHERE id = ?').get(tasks[0]?.agent_id)
+                      )
+                    : db.prepare('SELECT * FROM agents WHERE id = ?').get(tasks[tasks.length - 1]?.agent_id);
 
                 appendLog({
                   type: 'thought',
@@ -6867,9 +11535,10 @@ async function runCrewExecution(
                   message: `Synthesizing ${taskOutputs.length} task outputs into one cumulative crew answer.`,
                 });
 
-                if (synthesisAgent && taskOutputs.length > 1) {
+                if (synthesisAgent && taskOutputs.length > 1 && (runtimeRoutingPolicy.synthesisOnPartial || !parallelFailures.length)) {
                   const synthesisTask = {
                     description: [
+                      crewGuidance ? `Crew Guidance:\n${crewGuidance}` : '',
                       `Create the final cumulative answer for this ${process} crew run.`,
                       initialInput ? `Original Objective:\n${initialInput}` : '',
                       'You must combine every upstream task output, remove duplicates, resolve conflicts, and provide one coherent final answer.',
@@ -6909,13 +11578,28 @@ async function runCrewExecution(
                   total_steps: taskOutputs.length,
                 });
 
-                db.prepare('UPDATE crew_executions SET prompt_tokens = ?, completion_tokens = ?, total_cost = ? WHERE id = ?')
-                  .run(executionPromptTokens, executionCompletionTokens, executionCost, executionId);
+                await syncCrewExecutionMetrics({
+                  db,
+                  prisma,
+                  executionId: Number(executionId),
+                  promptTokens: executionPromptTokens,
+                  completionTokens: executionCompletionTokens,
+                  totalCost: executionCost,
+                });
             }
 
-            const finalCrewStatus = (db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any)?.status;
+            await flushCrewLogWrites();
+            const finalCrewStatus = await getCrewExecutionStatus({
+              prisma,
+              executionId: Number(executionId),
+            });
             if (finalCrewStatus !== 'canceled') {
-              db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run('completed', executionId);
+              await syncCrewExecutionStatus({
+                db,
+                prisma,
+                executionId: Number(executionId),
+                status: 'completed',
+              });
             }
             span.setStatus({ code: SpanStatusCode.OK });
 
@@ -6924,26 +11608,30 @@ async function runCrewExecution(
             span.recordException(e);
             span.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
 
-            db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
-              .run(executionId, 'error', JSON.stringify({ message: e.message }));
-            const finalCrewStatus = (db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any)?.status;
+            await appendCrewExecutionLog({
+              db,
+              prisma,
+              executionId: Number(executionId),
+              type: 'error',
+              payload: { message: e.message },
+            });
+            const finalCrewStatus = await getCrewExecutionStatus({
+              prisma,
+              executionId: Number(executionId),
+            });
             if (finalCrewStatus !== 'canceled') {
-              db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run('failed', executionId);
+              await syncCrewExecutionStatus({
+                db,
+                prisma,
+                executionId: Number(executionId),
+                status: 'failed',
+              });
             }
         } finally {
             crewCancelTokens.delete(Number(executionId));
             span.end();
         }
     });
-}
-
-function readCrewExecutionLogs(executionId: number | bigint) {
-  const rows = db.prepare('SELECT timestamp, type, payload FROM crew_execution_logs WHERE execution_id = ? ORDER BY id ASC').all(executionId) as any[];
-  return rows.map((r) => {
-    let payload: any = {};
-    try { payload = r.payload ? JSON.parse(r.payload) : {}; } catch { payload = {}; }
-    return { timestamp: r.timestamp, ...payload, type: r.type };
-  });
 }
 
 function extractCrewFinalResult(logs: any[]): string {
@@ -6960,23 +11648,51 @@ function extractCrewFinalResult(logs: any[]): string {
 
 app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
   const crewId = req.params.id;
-  const { initialInput, wait, waitMs, pollMs } = req.body || {};
+  const { initialInput, wait, waitMs, pollMs, routing_policy, routingPolicy } = req.body || {};
+  const userId = String((req as any)?.user?.id || '').trim() || null;
+  const requestedRoutingPolicy =
+    routing_policy && typeof routing_policy === 'object'
+      ? routing_policy
+      : (routingPolicy && typeof routingPolicy === 'object' ? routingPolicy : null);
+  const prisma = getPrisma();
   
   // Create execution record
-  const stmt = db.prepare('INSERT INTO crew_executions (crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?)');
-  const info = stmt.run(crewId, 'running', JSON.stringify([]), initialInput || '', null);
-  const executionId = info.lastInsertRowid;
+  const execution = await createCrewExecutionRecord({
+    db,
+    prisma,
+    crewId: Number(crewId),
+    initialInput: initialInput || '',
+    retryOf: null,
+    status: 'pending',
+  });
+  const executionId = execution.id;
+
+  await appendCrewExecutionLog({
+    db,
+    prisma,
+    executionId: Number(executionId),
+    type: 'thought',
+    payload: {
+      agent: 'system',
+      message: 'Crew run queued. Waiting for a worker to claim execution.',
+    },
+  });
 
   // Start processing in background
-  await enqueueJob('run_crew', {
+  const jobId = await enqueueJob('run_crew', {
     crewId: parseInt(crewId),
     executionId,
     initialInput: initialInput || "",
     initiatedBy: 'crew_kickoff_http',
+    userId,
+    routingPolicy: requestedRoutingPolicy,
+  }, {
+    priority: readJobPriority(req.body?.priority, JOB_PRIORITY.NORMAL),
+    tenantKey: readTenantKey((req as any)?.user?.orgId || userId || 'global'),
   });
 
-  const shouldWait = req.query.wait === 'true' || wait === true;
-  if (!shouldWait) return res.json({ executionId });
+  const shouldWait = shouldWaitForExecution(req) || wait === true;
+  if (!shouldWait) return acceptedExecutionResponse(res, { execution_id: Number(executionId), job_id: jobId });
 
   const timeoutMs = typeof waitMs === 'number' && waitMs > 0 ? waitMs : 120000;
   const intervalMs = typeof pollMs === 'number' && pollMs > 0 ? Math.min(pollMs, 5000) : 1500;
@@ -6985,10 +11701,16 @@ app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   while (Date.now() - startedAt < timeoutMs) {
-    const exec = db.prepare('SELECT status FROM crew_executions WHERE id = ?').get(executionId) as any;
+    const exec = await getCrewExecution({
+      prisma,
+      executionId: Number(executionId),
+    });
     if (!exec) break;
     if (exec.status === 'completed' || exec.status === 'failed' || exec.status === 'canceled') {
-      const parsedLogs = readCrewExecutionLogs(executionId);
+      const parsedLogs = await readCrewExecutionLogsFromStore({
+        prisma,
+        executionId: Number(executionId),
+      });
       const finalResult = extractCrewFinalResult(parsedLogs);
       const lastError = [...parsedLogs].reverse().find((l: any) => l.type === 'error');
       return res.json({
@@ -7005,10 +11727,18 @@ app.post('/api/crews/:id/kickoff', localRunLimiter, async (req, res) => {
   res.status(202).json({ executionId, status: 'running' });
 });
 
-app.get('/api/executions/:id', (req, res) => {
-    const execution = db.prepare('SELECT * FROM crew_executions WHERE id = ?').get(req.params.id);
+app.get('/api/executions/:id', async (req, res) => {
+    const executionId = Number(req.params.id);
+    if (!Number.isFinite(executionId)) return res.status(400).json({ error: 'Invalid execution id' });
+    const execution = await getCrewExecution({
+      prisma: getPrisma(),
+      executionId,
+    });
     if (execution) {
-        execution.logs = readCrewExecutionLogs(Number(req.params.id));
+        execution.logs = await readCrewExecutionLogsFromStore({
+          prisma: getPrisma(),
+          executionId,
+        });
         res.json(execution);
     } else {
         res.status(404).json({ error: "Execution not found" });
@@ -7022,389 +11752,325 @@ app.get('/api/executions/:id/stream', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders?.();
+  const prisma = getPrisma();
 
   let lastCount = 0;
-  const sendSnapshot = () => {
-    const exec = db.prepare('SELECT * FROM crew_executions WHERE id = ?').get(executionId) as any;
+  const sendSnapshot = async () => {
+    const exec = await getCrewExecution({
+      prisma,
+      executionId,
+    });
     if (!exec) {
       res.write(`event: error\ndata: ${JSON.stringify({ error: 'Execution not found' })}\n\n`);
       return;
     }
-    const logs = readCrewExecutionLogs(executionId);
+    const logs = await readCrewExecutionLogsFromStore({
+      prisma,
+      executionId,
+    });
     const payload = { status: exec.status, logs: logs.slice(lastCount), fullLogCount: logs.length };
     lastCount = logs.length;
     res.write(`event: update\ndata: ${JSON.stringify(payload)}\n\n`);
     if (exec.status === 'completed' || exec.status === 'failed' || exec.status === 'canceled') {
       const result = extractCrewFinalResult(logs);
       res.write(`event: done\ndata: ${JSON.stringify({ status: exec.status, result: result || null })}\n\n`);
-      clearInterval(timer);
       res.end();
     }
   };
 
-  const timer = setInterval(sendSnapshot, 1200);
-  sendSnapshot();
-  req.on('close', () => clearInterval(timer));
+  void sendSnapshot();
+  const unsubscribe = subscribeCrewExecution(executionId, () => {
+    void sendSnapshot();
+  });
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`event: ping\ndata: {}\n\n`);
+    } catch {}
+  }, 15_000);
+  req.on('close', () => {
+    unsubscribe();
+    clearInterval(heartbeat);
+  });
 });
 
-app.post('/api/executions/:id/cancel', async (req, res) => {
-  const executionId = Number(req.params.id);
-  if (!Number.isFinite(executionId)) return res.status(400).json({ error: 'Invalid execution id' });
-  const prisma = getPrisma();
-  const exec = await prisma.orchestratorCrewExecution.findUnique({ where: { id: executionId } });
-  if (!exec) return res.status(404).json({ error: 'Execution not found' });
-  if (exec.status !== 'running') return res.status(409).json({ error: 'Execution is not running' });
-
-  const token = getCancelToken(crewCancelTokens, executionId);
-  token.canceled = true;
-  token.reason = 'Canceled by user';
-  
-  await prisma.orchestratorCrewExecution.update({
-    where: { id: executionId },
-    data: { status: 'canceled' },
-  });
-  await prisma.orchestratorCrewExecutionLog.create({
-    data: {
-      executionId: executionId,
-      type: 'canceled',
-      payload: JSON.stringify({ message: 'Canceled by user' }),
-    },
-  });
-
-  // Mirror to SQLite
-  db.prepare('UPDATE crew_executions SET status = ? WHERE id = ?').run('canceled', executionId);
-  db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
-    .run(executionId, 'canceled', JSON.stringify({ message: 'Canceled by user' }));
-
-  res.json({ success: true });
-});
-
-app.post('/api/executions/:id/retry', async (req, res) => {
-  const executionId = Number(req.params.id);
-  if (!Number.isFinite(executionId)) return res.status(400).json({ error: 'Invalid execution id' });
-  const prisma = getPrisma();
-  const exec = await prisma.orchestratorCrewExecution.findUnique({ where: { id: executionId } });
-  if (!exec) return res.status(404).json({ error: 'Execution not found' });
-  const crew = await prisma.orchestratorCrew.findUnique({ where: { id: exec.crewId } });
-  if (!crew) return res.status(404).json({ error: 'Crew not found' });
-
-  const newExec = await prisma.orchestratorCrewExecution.create({
-    data: {
-      crewId: exec.crewId,
-      status: 'running',
-      logs: JSON.stringify([]),
-      initialInput: exec.initialInput || '',
-      retryOf: executionId,
-    },
-  });
-  const newExecutionId = newExec.id;
-
-  // Mirror to SQLite
-  db.prepare('INSERT INTO crew_executions (id, crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(newExecutionId, exec.crewId, 'running', JSON.stringify([]), exec.initialInput || '', executionId);
-
-  await enqueueJob('run_crew', {
-    crewId: Number(exec.crewId),
-    executionId: newExecutionId,
-    initialInput: exec.initialInput || '',
-    initiatedBy: 'retry_crew_execution',
-    retryOfExecutionId: executionId,
-  });
-  res.json({ success: true, executionId: newExecutionId, retry_of: executionId });
-});
-
-app.post('/api/executions/:id/resume', async (req, res) => {
-  const executionId = Number(req.params.id);
-  if (!Number.isFinite(executionId)) return res.status(400).json({ error: 'Invalid execution id' });
-  const prisma = getPrisma();
-  const exec = await prisma.orchestratorCrewExecution.findUnique({ where: { id: executionId } });
-  if (!exec) return res.status(404).json({ error: 'Execution not found' });
-
-  const newExec = await prisma.orchestratorCrewExecution.create({
-    data: {
-      crewId: exec.crewId,
-      status: 'running',
-      logs: JSON.stringify([]),
-      initialInput: exec.initialInput || '',
-      retryOf: executionId,
-    },
-  });
-  const newExecutionId = newExec.id;
-
-  // Mirror to SQLite
-  db.prepare('INSERT INTO crew_executions (id, crew_id, status, logs, initial_input, retry_of) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(newExecutionId, exec.crewId, 'running', JSON.stringify([]), exec.initialInput || '', executionId);
-
-  await enqueueJob('run_crew', {
-    crewId: Number(exec.crewId),
-    executionId: newExecutionId,
-    initialInput: exec.initialInput || '',
-    initiatedBy: 'resume_crew_execution',
-    retryOfExecutionId: executionId,
-  });
-  res.json({ success: true, executionId: newExecutionId, resumed_from: executionId });
-});
-
-app.post('/api/agent-executions/:id/cancel', async (req, res) => {
-  const execId = Number(req.params.id);
-  if (!Number.isFinite(execId)) return res.status(400).json({ error: 'Invalid execution id' });
-  const exec = await getRuntimeAgentExecution(execId);
-  if (!exec) return res.status(404).json({ error: 'Execution not found' });
-  if (exec.status !== 'running') return res.status(409).json({ error: 'Execution is not running' });
-
-  const token = getCancelToken(agentCancelTokens, execId);
-  token.canceled = true;
-  token.reason = 'Canceled by user';
-  await updateRuntimeAgentExecution(execId, { status: 'canceled' });
-  await cascadeCancelDelegatedChildren(execId, 'Canceled by user');
-  if (exec.agent_id) {
-    db.prepare("UPDATE agents SET status = 'idle' WHERE id = ?").run(exec.agent_id);
-  }
-  res.json({ success: true });
-});
-
-app.post('/api/agents/:id/stop-all', async (req, res) => {
-  const agentId = Number(req.params.id);
-  if (!Number.isFinite(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
-  const prisma = getPrisma();
-  const agent = await prisma.orchestratorAgent.findUnique({ where: { id: agentId } });
-  if (!agent) return res.status(404).json({ error: 'Agent not found' });
-
-  const runningExecs = await prisma.orchestratorAgentExecution.findMany({
-    where: { agentId, status: 'running' },
-    select: { id: true }
-  });
-  for (const row of runningExecs) {
-    const token = getCancelToken(agentCancelTokens, Number(row.id));
-    token.canceled = true;
-    token.reason = 'Canceled by user (stop-all)';
-  }
-  
-  await prisma.orchestratorAgentExecution.updateMany({
-    where: { agentId, status: 'running' },
-    data: { status: 'canceled' }
-  });
-  await prisma.orchestratorAgent.update({
-    where: { id: agentId },
-    data: { status: 'idle' }
-  });
-
-  // Mirror to SQLite
-  db.prepare("UPDATE agent_executions SET status = 'canceled' WHERE agent_id = ? AND status = 'running'").run(agentId);
-  db.prepare("UPDATE agents SET status = 'idle' WHERE id = ?").run(agentId);
-
-  let canceledQueued = 0;
-  const queueRows = await prisma.orchestratorJobQueue.findMany({
-    where: { 
-      type: 'run_agent',
-      status: { in: ['pending', 'running'] }
-    }
-  });
-
-  for (const row of queueRows) {
-    let payload: any = {};
-    try { payload = row.payload ? JSON.parse(row.payload) : {}; } catch {}
-    if (Number(payload?.agentId) !== agentId) continue;
-    
-    if (row.status === 'pending') {
-      await prisma.orchestratorJobQueue.update({
-        where: { id: row.id },
-        data: { 
-          status: 'canceled',
-          error: 'Canceled by user (stop-all)',
-          finishedAt: new Date()
-        }
-      });
-      // Mirror to SQLite
-      db.prepare("UPDATE job_queue SET status = 'canceled', error = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?")
-        .run('Canceled by user (stop-all)', row.id);
-      canceledQueued++;
-    }
-  }
-  res.json({ success: true, canceled_running_executions: runningExecs.length, canceled_pending_jobs: canceledQueued });
-});
-
-app.get('/api/task-control', async (req, res) => {
+app.post('/api/executions/:id/feedback', requireUser, async (req, res) => {
   try {
-    const prisma = getPrisma();
-    const [runningAgentExecs, runningCrewExecs, pendingJobsRaw, failedAgentExecs, failedCrewExecs] = await Promise.all([
-      prisma.orchestratorAgentExecution.findMany({
-        where: { status: 'running' },
-        include: { agent: { select: { name: true, role: true } } },
-        orderBy: { createdAt: 'desc' }
-      }),
-      prisma.orchestratorCrewExecution.findMany({
-        where: { status: 'running' },
-        include: { crew: { select: { name: true, process: true } } },
-        orderBy: { createdAt: 'desc' }
-      }),
-      prisma.orchestratorJobQueue.findMany({
-        where: { status: 'pending' },
-        orderBy: { id: 'desc' },
-        take: 200
-      }),
-      prisma.orchestratorAgentExecution.findMany({
-        where: { status: 'failed' },
-        include: { agent: { select: { name: true } } },
-        orderBy: { createdAt: 'desc' },
-        take: 20
-      }),
-      prisma.orchestratorCrewExecution.findMany({
-        where: { status: 'failed' },
-        include: { crew: { select: { name: true } } },
-        orderBy: { createdAt: 'desc' },
-        take: 20
-      })
-    ]);
-
-    const runningAgentExecutions = runningAgentExecs.map(ae => ({
-      id: ae.id,
-      agent_id: ae.agentId,
-      task: ae.task,
-      created_at: ae.createdAt.toISOString(),
-      agent_name: ae.agent?.name,
-      agent_role: ae.agent?.role
-    }));
-
-    const runningCrewExecutions = runningCrewExecs.map(ce => ({
-      id: ce.id,
-      crew_id: ce.crewId,
-      initial_input: ce.initialInput,
-      created_at: ce.createdAt.toISOString(),
-      crew_name: ce.crew?.name,
-      process: ce.crew?.process
-    }));
-
-    const pendingJobs = pendingJobsRaw.map((row) => ({
-      id: row.id,
-      type: row.type,
-      status: row.status,
-      created_at: row.createdAt.toISOString(),
-      payload: row.payload ? JSON.parse(row.payload) : {}
-    }));
-
-    const failedAgentExecutions = failedAgentExecs.map(ae => ({
-      id: ae.id,
-      agent_id: ae.agentId,
-      task: ae.task,
-      created_at: ae.createdAt.toISOString(),
-      agent_name: ae.agent?.name
-    }));
-
-    const failedCrewExecutions = failedCrewExecs.map(ce => ({
-      id: ce.id,
-      crew_id: ce.crewId,
-      initial_input: ce.initialInput,
-      created_at: ce.createdAt.toISOString(),
-      crew_name: ce.crew?.name
-    }));
-
-    res.json({
-      runningAgentExecutions,
-      runningCrewExecutions,
-      pendingJobs,
-      failedAgentExecutions,
-      failedCrewExecutions,
+    const executionId = Number(req.params.id);
+    if (!Number.isFinite(executionId)) return res.status(400).json({ error: 'Invalid execution id' });
+    const exec = await getCrewExecution({
+      prisma: getPrisma(),
+      executionId,
     });
+    if (!exec) return res.status(404).json({ error: 'Execution not found' });
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleCrewId(scope, Number(exec.crew_id));
+    const userId = String((req as any)?.user?.id || '').trim();
+    if (!userId) return res.status(401).json({ error: 'Authentication required' });
+    const feedback = recordCrewExecutionFeedback(exec, userId, (req.body || {}) as FeedbackPayload);
+    res.json({ success: true, feedback });
   } catch (e: any) {
-    res.status(500).json({ error: e.message || 'Failed to load task control data' });
+    res.status(500).json({ error: e?.message || 'Failed to save crew feedback' });
   }
 });
 
-app.post('/api/task-control/jobs/:id/cancel', async (req, res) => {
-  const jobId = Number(req.params.id);
-  if (!Number.isFinite(jobId)) return res.status(400).json({ error: 'Invalid job id' });
-  const prisma = getPrisma();
-  const row = await prisma.orchestratorJobQueue.findUnique({ where: { id: jobId } });
-  if (!row) return res.status(404).json({ error: 'Job not found' });
-  if (row.status !== 'pending') return res.status(409).json({ error: 'Only pending jobs can be canceled' });
-  
-  await prisma.orchestratorJobQueue.update({
-    where: { id: jobId },
-    data: { status: 'canceled', error: 'Canceled by user', finishedAt: new Date() }
-  });
-  
-  // Mirror to SQLite
-  db.prepare("UPDATE job_queue SET status = 'canceled', error = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?")
-    .run('Canceled by user', jobId);
-  res.json({ success: true });
+registerRuntimeControlRoutes({
+  app,
+  db,
+  getPrisma,
+  getRuntimeAgentExecution,
+  updateRuntimeAgentExecution,
+  cascadeCancelDelegatedChildren,
+  enqueueJob,
+  updateJobResult: updateRuntimeJobResult,
+  agentCancelTokens,
+  crewCancelTokens,
+  getCancelToken,
 });
 
-app.post('/api/task-control/stop-running-agents', async (req, res) => {
-  const prisma = getPrisma();
-  const running = await prisma.orchestratorAgentExecution.findMany({
-    where: { status: 'running' },
-    select: { id: true, agentId: true }
-  });
-  for (const exec of running) {
-    const token = getCancelToken(agentCancelTokens, Number(exec.id));
-    token.canceled = true;
-    token.reason = 'Canceled by user (bulk stop)';
-  }
-  
-  const updateResult = await prisma.orchestratorAgentExecution.updateMany({
-    where: { status: 'running' },
-    data: { status: 'canceled' }
-  });
-  await prisma.orchestratorAgent.updateMany({
-    where: { status: 'running' },
-    data: { status: 'idle' }
-  });
+app.get('/api/agent-cron-jobs', requireUser, async (req, res) => {
+  try {
+    await ensureAgentCronJobsTable();
+    const scope = await resolveOrchestratorAccessScope(req);
+    const prisma = getPrisma();
+    const rawAgentId = Number(req.query.agent_id);
 
-  // Mirror to SQLite
-  db.prepare("UPDATE agent_executions SET status = 'canceled' WHERE status = 'running'").run();
-  db.prepare("UPDATE agents SET status = 'idle' WHERE status = 'running'").run();
-  
-  res.json({ success: true, canceled_running_executions: updateResult.count });
+    if (Number.isFinite(rawAgentId) && rawAgentId > 0) {
+      requireVisibleAgentId(scope, rawAgentId);
+      const rows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+        `
+          SELECT *
+          FROM orchestrator_agent_cron_jobs
+          WHERE agent_id = $1
+          ORDER BY id DESC
+        `,
+        rawAgentId,
+      );
+      return res.json(rows.map(normalizeAgentCronJobRow));
+    }
+
+    if (scope.isAdmin) {
+      const rows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+        'SELECT * FROM orchestrator_agent_cron_jobs ORDER BY id DESC',
+      );
+      return res.json(rows.map(normalizeAgentCronJobRow));
+    }
+
+    const scopedAgentIds = getScopedAgentIds(scope);
+    if (!scopedAgentIds?.length) return res.json([]);
+    const rows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+      `
+        SELECT *
+        FROM orchestrator_agent_cron_jobs
+        WHERE agent_id = ANY($1::int[])
+        ORDER BY id DESC
+      `,
+      scopedAgentIds,
+    );
+    res.json(rows.map(normalizeAgentCronJobRow));
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to load agent cron jobs' });
+  }
 });
 
-app.post('/api/task-control/stop-running-crews', async (req, res) => {
-  const prisma = getPrisma();
-  const running = await prisma.orchestratorCrewExecution.findMany({
-    where: { status: 'running' },
-    select: { id: true }
-  });
-  for (const exec of running) {
-    const token = getCancelToken(crewCancelTokens, Number(exec.id));
-    token.canceled = true;
-    token.reason = 'Canceled by user (bulk stop)';
-    
-    await prisma.orchestratorCrewExecutionLog.create({
-      data: {
-        executionId: Number(exec.id),
-        type: 'canceled',
-        payload: JSON.stringify({ message: 'Canceled by user (bulk stop)' })
-      }
-    });
-    
-    // Mirror to SQLite
-    db.prepare('INSERT INTO crew_execution_logs (execution_id, type, payload) VALUES (?, ?, ?)')
-      .run(Number(exec.id), 'canceled', JSON.stringify({ message: 'Canceled by user (bulk stop)' }));
+app.post('/api/agent-cron-jobs', requireUser, async (req, res) => {
+  try {
+    await ensureAgentCronJobsTable();
+    const scope = await resolveOrchestratorAccessScope(req);
+    const prisma = getPrisma();
+    const agentId = Number(req.body?.agent_id);
+    if (!Number.isFinite(agentId) || agentId <= 0) {
+      return res.status(400).json({ error: 'agent_id is required' });
+    }
+    requireVisibleAgentId(scope, agentId);
+
+    const name = String(req.body?.name || '').trim();
+    const cronExpr = String(req.body?.cron_expr || '').trim();
+    const task = String(req.body?.task || '').trim();
+    const timezone = String(req.body?.timezone || 'UTC').trim() || 'UTC';
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    if (!task) return res.status(400).json({ error: 'task is required' });
+    if (timezone.toUpperCase() !== 'UTC') {
+      return res.status(400).json({ error: 'Only UTC timezone is currently supported' });
+    }
+
+    parseCronExpression(cronExpr);
+    const enabled = req.body?.enabled === true;
+    const priority = readJobPriority(req.body?.priority, JOB_PRIORITY.NORMAL);
+    const tenantKey = readTenantKey(req.body?.tenant_key ?? scope.user.orgId ?? 'global');
+    const nextRunAt = enabled ? getNextCronOccurrenceUtc(cronExpr, new Date()) : null;
+
+    const rows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+      `
+        INSERT INTO orchestrator_agent_cron_jobs
+          (agent_id, name, cron_expr, timezone, task, enabled, priority, tenant_key, next_run_at, created_by_user_id)
+        VALUES
+          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING *
+      `,
+      agentId,
+      name,
+      cronExpr,
+      timezone,
+      task,
+      enabled,
+      priority,
+      tenantKey,
+      nextRunAt,
+      scope.user.id,
+    );
+    res.json(normalizeAgentCronJobRow(rows[0]));
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to create agent cron job' });
   }
-  
-  const updateResult = await prisma.orchestratorCrewExecution.updateMany({
-    where: { status: 'running' },
-    data: { status: 'canceled' }
-  });
-  
-  // Mirror to SQLite
-  db.prepare("UPDATE crew_executions SET status = 'canceled' WHERE status = 'running'").run();
-  
-  res.json({ success: true, canceled_running_executions: updateResult.count });
+});
+
+app.put('/api/agent-cron-jobs/:id', requireUser, async (req, res) => {
+  try {
+    await ensureAgentCronJobsTable();
+    const scope = await resolveOrchestratorAccessScope(req);
+    const prisma = getPrisma();
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'Invalid cron job id' });
+    const existingRows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+      'SELECT * FROM orchestrator_agent_cron_jobs WHERE id = $1 LIMIT 1',
+      id,
+    );
+    const existing = existingRows?.[0];
+    if (!existing) return res.status(404).json({ error: 'Cron job not found' });
+    requireVisibleAgentId(scope, Number(existing.agent_id));
+
+    const name = req.body?.name != null ? String(req.body.name).trim() : String(existing.name || '');
+    const cronExpr = req.body?.cron_expr != null ? String(req.body.cron_expr).trim() : String(existing.cron_expr || '');
+    const task = req.body?.task != null ? String(req.body.task).trim() : String(existing.task || '');
+    const timezone = req.body?.timezone != null ? String(req.body.timezone).trim() : String(existing.timezone || 'UTC');
+    const enabled = req.body?.enabled == null ? Boolean(existing.enabled) : Boolean(req.body.enabled);
+    const priority = req.body?.priority == null ? Number(existing.priority ?? JOB_PRIORITY.NORMAL) : readJobPriority(req.body.priority, JOB_PRIORITY.NORMAL);
+    const tenantKey = req.body?.tenant_key == null ? readTenantKey(existing.tenant_key || 'global') : readTenantKey(req.body.tenant_key, 'global');
+
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    if (!task) return res.status(400).json({ error: 'task is required' });
+    if (timezone.toUpperCase() !== 'UTC') {
+      return res.status(400).json({ error: 'Only UTC timezone is currently supported' });
+    }
+    parseCronExpression(cronExpr);
+    const nextRunAt = enabled ? getNextCronOccurrenceUtc(cronExpr, new Date()) : null;
+
+    const rows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+      `
+        UPDATE orchestrator_agent_cron_jobs
+        SET
+          name = $2,
+          cron_expr = $3,
+          timezone = $4,
+          task = $5,
+          enabled = $6,
+          priority = $7,
+          tenant_key = $8,
+          next_run_at = $9,
+          last_error = CASE WHEN $6 THEN NULL ELSE last_error END,
+          updated_at = NOW()
+        WHERE id = $1
+        RETURNING *
+      `,
+      id,
+      name,
+      cronExpr,
+      timezone,
+      task,
+      enabled,
+      priority,
+      tenantKey,
+      nextRunAt,
+    );
+    res.json(normalizeAgentCronJobRow(rows[0]));
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to update agent cron job' });
+  }
+});
+
+app.post('/api/agent-cron-jobs/:id/run-now', requireUser, async (req, res) => {
+  try {
+    await ensureAgentCronJobsTable();
+    const scope = await resolveOrchestratorAccessScope(req);
+    const prisma = getPrisma();
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'Invalid cron job id' });
+    const rows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+      'SELECT * FROM orchestrator_agent_cron_jobs WHERE id = $1 LIMIT 1',
+      id,
+    );
+    const row = rows?.[0];
+    if (!row) return res.status(404).json({ error: 'Cron job not found' });
+    requireVisibleAgentId(scope, Number(row.agent_id));
+
+    const jobId = await enqueueJob(
+      'run_agent',
+      {
+        agentId: Number(row.agent_id),
+        task: String(row.task || ''),
+        user_id: scope.user.id,
+        initiatedBy: 'cron_manual_run',
+      },
+      {
+        priority: readJobPriority(row.priority, JOB_PRIORITY.NORMAL),
+        tenantKey: readTenantKey(row.tenant_key || scope.user.orgId || 'global'),
+      },
+    );
+
+    const nextRunAt = Boolean(row.enabled) ? getNextCronOccurrenceUtc(String(row.cron_expr || ''), new Date()) : null;
+    await prisma.$executeRawUnsafe(
+      `
+        UPDATE orchestrator_agent_cron_jobs
+        SET
+          last_run_at = NOW(),
+          last_status = 'queued',
+          last_error = NULL,
+          next_run_at = $2,
+          updated_at = NOW()
+        WHERE id = $1
+      `,
+      id,
+      nextRunAt,
+    );
+    res.json({ success: true, job_id: jobId, cron_job_id: id });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to run cron job' });
+  }
+});
+
+app.delete('/api/agent-cron-jobs/:id', requireUser, async (req, res) => {
+  try {
+    await ensureAgentCronJobsTable();
+    const scope = await resolveOrchestratorAccessScope(req);
+    const prisma = getPrisma();
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'Invalid cron job id' });
+    const rows = await prisma.$queryRawUnsafe<AgentCronJobRow[]>(
+      'SELECT * FROM orchestrator_agent_cron_jobs WHERE id = $1 LIMIT 1',
+      id,
+    );
+    const row = rows?.[0];
+    if (!row) return res.status(404).json({ error: 'Cron job not found' });
+    requireVisibleAgentId(scope, Number(row.agent_id));
+    await prisma.$executeRawUnsafe('DELETE FROM orchestrator_agent_cron_jobs WHERE id = $1', id);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to delete cron job' });
+  }
 });
 
 app.post('/api/task-control/cancel-pending-jobs', async (req, res) => {
   const prisma = getPrisma();
-  const updateResult = await prisma.orchestratorJobQueue.updateMany({
+  const pendingJobs = await prisma.orchestratorJobQueue.findMany({
     where: { status: 'pending' },
-    data: { status: 'canceled', error: 'Canceled by user (bulk stop)', finishedAt: new Date() }
+    select: { id: true },
   });
-  
-  // Mirror to SQLite
-  db.prepare("UPDATE job_queue SET status = 'canceled', error = ?, finished_at = CURRENT_TIMESTAMP WHERE status = 'pending'")
-    .run('Canceled by user (bulk stop)');
+
+  for (const row of pendingJobs) {
+    await updateRuntimeJobResult(row.id, 'canceled', null, 'Canceled by user (bulk stop)');
+  }
     
-  res.json({ success: true, canceled_pending_jobs: updateResult.count });
+  res.json({ success: true, canceled_pending_jobs: pendingJobs.length });
 });
 
 app.get('/api/agent-executions/:id/stream', async (req, res) => {
@@ -7419,7 +12085,6 @@ app.get('/api/agent-executions/:id/stream', async (req, res) => {
     const exec = await getRuntimeAgentExecution(execId);
     if (!exec) {
       res.write(`event: error\ndata: ${JSON.stringify({ error: 'Execution not found' })}\n\n`);
-      clearInterval(timer);
       res.end();
       return;
     }
@@ -7429,16 +12094,26 @@ app.get('/api/agent-executions/:id/stream', async (req, res) => {
       select: { id: true, toolName: true, status: true, durationMs: true, createdAt: true },
     });
     const delegations = await getDelegationRows(execId);
-    res.write(`event: update\ndata: ${JSON.stringify({ execution: exec, tools, delegations })}\n\n`);
+    const orchestration = await buildDelegationOrchestrationEvents(execId, delegations, String(exec.status || 'running'));
+    res.write(`event: update\ndata: ${JSON.stringify({ execution: exec, tools, delegations, orchestration })}\n\n`);
     if (exec.status !== 'running') {
       res.write(`event: done\ndata: ${JSON.stringify({ status: exec.status })}\n\n`);
-      clearInterval(timer);
       res.end();
     }
   };
-  const timer = setInterval(() => { void sendSnapshot(); }, 1200);
   await sendSnapshot();
-  req.on('close', () => clearInterval(timer));
+  const unsubscribe = subscribeAgentExecution(execId, () => {
+    void sendSnapshot();
+  });
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`event: ping\ndata: {}\n\n`);
+    } catch {}
+  }, 15_000);
+  req.on('close', () => {
+    unsubscribe();
+    clearInterval(heartbeat);
+  });
 });
 
 app.get('/api/agent-executions/:id/timeline', async (req, res) => {
@@ -7449,7 +12124,17 @@ app.get('/api/agent-executions/:id/timeline', async (req, res) => {
   const toolRows = (await getPrisma().orchestratorToolExecution.findMany({
     where: { agentExecutionId: execId },
     orderBy: { id: 'asc' },
-    select: { id: true, toolName: true, status: true, durationMs: true, createdAt: true, error: true },
+    select: {
+      id: true,
+      toolName: true,
+      status: true,
+      durationMs: true,
+      createdAt: true,
+      error: true,
+      args: true,
+      result: true,
+      toolType: true,
+    },
   })).map((row) => ({
     id: row.id,
     tool_name: row.toolName,
@@ -7457,8 +12142,12 @@ app.get('/api/agent-executions/:id/timeline', async (req, res) => {
     duration_ms: row.durationMs,
     created_at: row.createdAt,
     error: row.error,
+    args: row.args,
+    result: row.result,
+    tool_type: row.toolType,
   }));
   const delegationRows = await getDelegationRows(execId);
+  const orchestration = await buildDelegationOrchestrationEvents(execId, delegationRows, String(exec.status || 'unknown'));
   const timeline = [
     { stage: 'queued', status: 'completed', at: exec.created_at },
     { stage: 'running', status: exec.status === 'running' ? 'running' : 'completed', at: exec.created_at },
@@ -7479,7 +12168,7 @@ app.get('/api/agent-executions/:id/timeline', async (req, res) => {
     })),
     { stage: 'finished', status: exec.status, at: exec.created_at },
   ];
-  res.json({ execution: exec, timeline, delegations: delegationRows, tools: toolRows });
+  res.json({ execution: exec, timeline, delegations: delegationRows, tools: toolRows, orchestration });
 });
 
 app.post('/api/agent-executions/:id/retry', async (req, res) => {
@@ -7497,7 +12186,13 @@ app.post('/api/agent-executions/:id/retry', async (req, res) => {
     task,
     initiatedBy: 'retry_agent_execution',
     retryOfExecutionId: execId,
+  }, {
+    priority: JOB_PRIORITY.HIGH,
+    tenantKey: readTenantKey((req as any)?.user?.orgId || 'global'),
   });
+  if (!shouldWaitForExecution(req)) {
+    return acceptedExecutionResponse(res, { job_id: jobId });
+  }
   const result = await waitForJob(jobId, 120000);
   res.json({ success: true, retry_of: execId, ...result });
 });
@@ -7514,9 +12209,36 @@ app.post('/api/agent-executions/:id/resume', async (req, res) => {
     task,
     initiatedBy: 'resume_agent_execution',
     retryOfExecutionId: execId,
+  }, {
+    priority: JOB_PRIORITY.HIGH,
+    tenantKey: readTenantKey((req as any)?.user?.orgId || 'global'),
   });
+  if (!shouldWaitForExecution(req)) {
+    return acceptedExecutionResponse(res, { job_id: jobId });
+  }
   const result = await waitForJob(jobId, 120000);
   res.json({ success: true, resumed_from: execId, ...result });
+});
+
+app.post('/api/agent-executions/:id/feedback', requireUser, async (req, res) => {
+  try {
+    const execId = Number(req.params.id);
+    if (!Number.isFinite(execId)) return res.status(400).json({ error: 'Invalid execution id' });
+    const exec = await getRuntimeAgentExecution(execId);
+    if (!exec) return res.status(404).json({ error: 'Execution not found' });
+
+    const scope = await resolveOrchestratorAccessScope(req);
+    requireVisibleAgentId(scope, Number(exec.agent_id));
+
+    const userId = String((req as any)?.user?.id || '').trim();
+    if (!userId) return res.status(401).json({ error: 'Authentication required' });
+
+    const payload = (req.body || {}) as FeedbackPayload;
+    const feedback = await recordExecutionFeedback(exec, userId, payload);
+    res.json({ success: true, feedback });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to save feedback' });
+  }
 });
 
 if (process.env.NODE_ENV === 'production') {
@@ -7551,6 +12273,15 @@ async function shutdown(signal: string) {
   }
 
   try {
+    if (voiceWss) {
+      await new Promise<void>((resolve) => voiceWss!.close(() => resolve()));
+      voiceWss = null;
+    }
+  } catch (e) {
+    console.error('Failed to close voice websocket server:', e);
+  }
+
+  try {
     if (viteServer) {
       await viteServer.close();
       viteServer = null;
@@ -7562,6 +12293,10 @@ async function shutdown(signal: string) {
   if (workerTimer) {
     clearInterval(workerTimer);
     workerTimer = null;
+  }
+  if (cronSchedulerTimer) {
+    clearInterval(cronSchedulerTimer);
+    cronSchedulerTimer = null;
   }
   if (gcsSyncTimer) {
     clearInterval(gcsSyncTimer);
@@ -7598,6 +12333,18 @@ async function shutdown(signal: string) {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
+// Handle unhandled rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  // Give time for logging then exit
+  setTimeout(() => process.exit(1), 1000);
+});
+
 function scheduleRetention() {
   const localDays = Number(process.env.LOCAL_RETENTION_DAYS || 30);
   const platformDays = Number(process.env.PLATFORM_RETENTION_DAYS || 0);
@@ -7609,12 +12356,7 @@ function scheduleRetention() {
       const cutoffIso = cutoffDate.toISOString();
       try {
         const prisma = getPrisma();
-        // Prune PostgreSQL (Primary)
-        await prisma.orchestratorCrewExecutionLog.deleteMany({ where: { timestamp: { lt: cutoffDate } } });
-        await prisma.orchestratorCrewExecution.deleteMany({ where: { createdAt: { lt: cutoffDate }, status: { not: 'running' } } });
-        await prisma.orchestratorAgentExecution.deleteMany({ where: { createdAt: { lt: cutoffDate }, status: { not: 'running' } } });
-        await prisma.orchestratorToolExecution.deleteMany({ where: { createdAt: { lt: cutoffDate }, status: { not: 'running' } } });
-        await prisma.orchestratorJobQueue.deleteMany({ where: { startedAt: { lt: cutoffDate }, status: { notIn: ['pending', 'running'] } } });
+        await pruneRuntimeRetention(cutoffDate);
 
         // Prune SQLite (Legacy Mirror)
         try {
@@ -7647,9 +12389,509 @@ function scheduleRetention() {
   setInterval(() => runCleanup().catch(() => undefined), 24 * 60 * 60 * 1000);
 }
 
+function initializeVoiceWebSocketServer(server: import('http').Server) {
+  if (voiceWss) {
+    try { voiceWss.close(); } catch {}
+    voiceWss = null;
+  }
+
+  const wss = new WebSocketServer({ noServer: true });
+  voiceWss = wss;
+
+  wss.on('connection', (ws, request) => {
+    const url = new URL(request.url || '/ws/voice', `http://${request.headers.host || 'localhost'}`);
+    const targetType = url.searchParams.get('targetType') === 'crew' ? 'crew' : 'agent';
+    const targetId = Number(url.searchParams.get('targetId') || url.searchParams.get('agentId') || 0);
+    const resolvedTarget = Number.isFinite(targetId) && targetId > 0 ? resolveVoiceTarget(targetType, targetId) : null;
+    const storedProfile = resolvedTarget?.targetType === 'crew'
+      ? getCrewVoiceProfile(resolvedTarget.targetId)
+      : resolvedTarget?.targetType === 'agent'
+        ? getAgentVoiceProfile(resolvedTarget.agentId)
+        : null;
+    const storedMeta = normalizeVoiceRuntimeMeta(storedProfile?.meta || {});
+    const initialVoiceId = url.searchParams.get('voiceId') || storedProfile?.voice_id || DEFAULT_VOICE_ID;
+    const initialTtsModelId = url.searchParams.get('ttsModelId') || storedProfile?.tts_model_id || DEFAULT_TTS_MODEL;
+    const initialSttModelId = url.searchParams.get('sttModelId') || storedProfile?.stt_model_id || DEFAULT_STT_MODEL;
+    const initialOutputFormat = url.searchParams.get('outputFormat') || storedProfile?.output_format || DEFAULT_TTS_FORMAT;
+    const initialMimeType = url.searchParams.get('audioMimeType') || 'audio/webm';
+    const initialSampleRate = Number(url.searchParams.get('sampleRate') || storedProfile?.sample_rate || DEFAULT_STT_SAMPLE_RATE);
+    const initialLanguageCode = url.searchParams.get('languageCode') || storedProfile?.language_code || 'en';
+    const initialAutoTts = String(url.searchParams.get('autoTts') || String(storedProfile?.auto_tts ?? true)) !== 'false';
+    const initialVadEnabled = String(url.searchParams.get('vadEnabled') || String(storedMeta.vad_enabled)) !== 'false';
+    const initialVadSilenceThresholdSecs = clampNumber(url.searchParams.get('vadSilenceThresholdSecs') || storedMeta.vad_silence_threshold_secs, DEFAULT_VAD_SILENCE_THRESHOLD_SECS, 0.2, 3);
+    const initialVadThreshold = clampNumber(url.searchParams.get('vadThreshold') || storedMeta.vad_threshold, DEFAULT_VAD_THRESHOLD, 0.1, 0.95);
+    const initialMinSpeechDurationMs = Math.round(clampNumber(url.searchParams.get('minSpeechDurationMs') || storedMeta.min_speech_duration_ms, DEFAULT_MIN_SPEECH_DURATION_MS, 50, 2000));
+    const initialMinSilenceDurationMs = Math.round(clampNumber(url.searchParams.get('minSilenceDurationMs') || storedMeta.min_silence_duration_ms, DEFAULT_MIN_SILENCE_DURATION_MS, 50, 3000));
+    const initialMaxTokensToRecompute = Math.round(clampNumber(url.searchParams.get('maxTokensToRecompute') || storedMeta.max_tokens_to_recompute, DEFAULT_MAX_TOKENS_TO_RECOMPUTE, 0, 50));
+    const initialBrowserNoiseSuppression = String(url.searchParams.get('browserNoiseSuppression') || String(storedMeta.browser_noise_suppression)) !== 'false';
+    const initialBrowserEchoCancellation = String(url.searchParams.get('browserEchoCancellation') || String(storedMeta.browser_echo_cancellation)) !== 'false';
+    const initialBrowserAutoGainControl = String(url.searchParams.get('browserAutoGainControl') || String(storedMeta.browser_auto_gain_control)) === 'true';
+    const initialPushToTalk = String(url.searchParams.get('pushToTalk') || String(storedMeta.push_to_talk)) === 'true';
+
+    if (!resolvedTarget) {
+      sendVoiceSocketEvent(ws, 'error', { message: `${targetType} target is required` });
+      ws.close();
+      return;
+    }
+
+    const agent = db.prepare('SELECT id, name, role, provider, model FROM agents WHERE id = ?').get(resolvedTarget.agentId) as any;
+    if (!agent) {
+      sendVoiceSocketEvent(ws, 'error', { message: 'Runtime agent not found for voice target' });
+      ws.close();
+      return;
+    }
+
+    const sessionId = createVoiceSession(resolvedTarget.agentId, {
+      targetType: resolvedTarget.targetType,
+      targetId: resolvedTarget.targetId,
+      targetName: resolvedTarget.targetName,
+      voiceId: initialVoiceId,
+      ttsModelId: initialTtsModelId,
+      sttModelId: initialSttModelId,
+      outputFormat: initialOutputFormat,
+      audioMimeType: initialMimeType,
+      audioChunks: [],
+      sessionId: '',
+      agentId: resolvedTarget.agentId,
+    } as any);
+
+    const context: VoiceSocketContext = {
+      sessionId,
+      agentId: resolvedTarget.agentId,
+      targetType: resolvedTarget.targetType,
+      targetId: resolvedTarget.targetId,
+      targetName: resolvedTarget.targetName,
+      voiceId: initialVoiceId,
+      ttsModelId: initialTtsModelId,
+      sttModelId: initialSttModelId,
+      outputFormat: initialOutputFormat,
+      audioMimeType: initialMimeType,
+      audioChunks: [],
+      sampleRate: initialSampleRate,
+      languageCode: initialLanguageCode,
+      autoTts: initialAutoTts,
+      vadEnabled: initialVadEnabled,
+      vadSilenceThresholdSecs: initialVadSilenceThresholdSecs,
+      vadThreshold: initialVadThreshold,
+      minSpeechDurationMs: initialMinSpeechDurationMs,
+      minSilenceDurationMs: initialMinSilenceDurationMs,
+      maxTokensToRecompute: initialMaxTokensToRecompute,
+      browserNoiseSuppression: initialBrowserNoiseSuppression,
+      browserEchoCancellation: initialBrowserEchoCancellation,
+      browserAutoGainControl: initialBrowserAutoGainControl,
+      pushToTalk: initialPushToTalk,
+      attachments: [],
+      sttSocket: null,
+      lastVoiceProgressAt: 0,
+      lastVoiceProgressText: '',
+      isUserSpeaking: false,
+      turnState: 'idle',
+      activeTtsAbort: null,
+      activeProgressTtsAbort: null,
+    };
+    voiceSocketContexts.set(ws, context);
+
+    sendVoiceSocketEvent(ws, 'session.started', {
+      sessionId,
+      target: {
+        type: resolvedTarget.targetType,
+        id: resolvedTarget.targetId,
+        name: resolvedTarget.targetName,
+      },
+      agent: { id: agent.id, name: agent.name, role: agent.role, provider: agent.provider, model: agent.model },
+      voice: {
+        voiceId: context.voiceId,
+        ttsModelId: context.ttsModelId,
+        sttModelId: context.sttModelId,
+        outputFormat: context.outputFormat,
+        sampleRate: context.sampleRate,
+        languageCode: context.languageCode,
+        autoTts: context.autoTts,
+        vadEnabled: context.vadEnabled,
+        vadSilenceThresholdSecs: context.vadSilenceThresholdSecs,
+        vadThreshold: context.vadThreshold,
+        minSpeechDurationMs: context.minSpeechDurationMs,
+        minSilenceDurationMs: context.minSilenceDurationMs,
+        maxTokensToRecompute: context.maxTokensToRecompute,
+        browserNoiseSuppression: context.browserNoiseSuppression,
+        browserEchoCancellation: context.browserEchoCancellation,
+        browserAutoGainControl: context.browserAutoGainControl,
+        pushToTalk: context.pushToTalk,
+      },
+      attachments: context.attachments || [],
+    });
+
+    ws.on('message', async (raw) => {
+      const current = voiceSocketContexts.get(ws);
+      if (!current) return;
+      try {
+        const message = JSON.parse(String(raw || '{}'));
+        const type = String(message?.type || '');
+        if (!type) return;
+
+        if (type === 'session.update') {
+          current.voiceId = String(message.voiceId || current.voiceId || DEFAULT_VOICE_ID);
+          current.ttsModelId = String(message.ttsModelId || current.ttsModelId || DEFAULT_TTS_MODEL);
+          current.sttModelId = String(message.sttModelId || current.sttModelId || DEFAULT_STT_MODEL);
+          current.outputFormat = String(message.outputFormat || current.outputFormat || DEFAULT_TTS_FORMAT);
+          current.audioMimeType = String(message.audioMimeType || current.audioMimeType || 'audio/webm');
+          current.sampleRate = Number(message.sampleRate || current.sampleRate || DEFAULT_STT_SAMPLE_RATE);
+          current.languageCode = String(message.languageCode || current.languageCode || 'en');
+          current.autoTts = typeof message.autoTts === 'boolean' ? message.autoTts : current.autoTts;
+          current.vadEnabled = typeof message.vadEnabled === 'boolean' ? message.vadEnabled : current.vadEnabled;
+          current.vadSilenceThresholdSecs = clampNumber(message.vadSilenceThresholdSecs, current.vadSilenceThresholdSecs ?? DEFAULT_VAD_SILENCE_THRESHOLD_SECS, 0.2, 3);
+          current.vadThreshold = clampNumber(message.vadThreshold, current.vadThreshold ?? DEFAULT_VAD_THRESHOLD, 0.1, 0.95);
+          current.minSpeechDurationMs = Math.round(clampNumber(message.minSpeechDurationMs, current.minSpeechDurationMs ?? DEFAULT_MIN_SPEECH_DURATION_MS, 50, 2000));
+          current.minSilenceDurationMs = Math.round(clampNumber(message.minSilenceDurationMs, current.minSilenceDurationMs ?? DEFAULT_MIN_SILENCE_DURATION_MS, 50, 3000));
+          current.maxTokensToRecompute = Math.round(clampNumber(message.maxTokensToRecompute, current.maxTokensToRecompute ?? DEFAULT_MAX_TOKENS_TO_RECOMPUTE, 0, 50));
+          current.browserNoiseSuppression = typeof message.browserNoiseSuppression === 'boolean' ? message.browserNoiseSuppression : current.browserNoiseSuppression;
+          current.browserEchoCancellation = typeof message.browserEchoCancellation === 'boolean' ? message.browserEchoCancellation : current.browserEchoCancellation;
+          current.browserAutoGainControl = typeof message.browserAutoGainControl === 'boolean' ? message.browserAutoGainControl : current.browserAutoGainControl;
+          current.pushToTalk = typeof message.pushToTalk === 'boolean' ? message.pushToTalk : current.pushToTalk;
+          updateVoiceSession(current.sessionId, {
+            voice_id: current.voiceId,
+            tts_model_id: current.ttsModelId,
+            stt_model_id: current.sttModelId,
+            meta: {
+              output_format: current.outputFormat,
+              audio_mime_type: current.audioMimeType,
+              sample_rate: current.sampleRate,
+              language_code: current.languageCode,
+              auto_tts: current.autoTts,
+              vad_enabled: current.vadEnabled,
+              vad_silence_threshold_secs: current.vadSilenceThresholdSecs,
+              vad_threshold: current.vadThreshold,
+              min_speech_duration_ms: current.minSpeechDurationMs,
+              min_silence_duration_ms: current.minSilenceDurationMs,
+              max_tokens_to_recompute: current.maxTokensToRecompute,
+              browser_noise_suppression: current.browserNoiseSuppression,
+              browser_echo_cancellation: current.browserEchoCancellation,
+              browser_auto_gain_control: current.browserAutoGainControl,
+              push_to_talk: current.pushToTalk,
+            },
+          });
+          appendVoiceSessionEvent(current.sessionId, 'session.updated', {
+            voiceId: current.voiceId,
+            ttsModelId: current.ttsModelId,
+            sttModelId: current.sttModelId,
+            outputFormat: current.outputFormat,
+            sampleRate: current.sampleRate,
+            languageCode: current.languageCode,
+            autoTts: current.autoTts,
+            vadEnabled: current.vadEnabled,
+            vadSilenceThresholdSecs: current.vadSilenceThresholdSecs,
+            vadThreshold: current.vadThreshold,
+            minSpeechDurationMs: current.minSpeechDurationMs,
+            minSilenceDurationMs: current.minSilenceDurationMs,
+            maxTokensToRecompute: current.maxTokensToRecompute,
+            browserNoiseSuppression: current.browserNoiseSuppression,
+            browserEchoCancellation: current.browserEchoCancellation,
+            browserAutoGainControl: current.browserAutoGainControl,
+            pushToTalk: current.pushToTalk,
+          });
+          if (current.sttSocket) {
+            try { current.sttSocket.close(); } catch {}
+            current.sttSocket = null;
+          }
+          if (current.targetType === 'agent') {
+            saveAgentVoiceProfile(current.agentId, {
+              voice_id: current.voiceId,
+              tts_model_id: current.ttsModelId,
+              stt_model_id: current.sttModelId,
+              output_format: current.outputFormat,
+              sample_rate: current.sampleRate,
+              language_code: current.languageCode,
+              auto_tts: current.autoTts,
+              meta: {
+                vad_enabled: current.vadEnabled,
+                vad_silence_threshold_secs: current.vadSilenceThresholdSecs,
+                vad_threshold: current.vadThreshold,
+                min_speech_duration_ms: current.minSpeechDurationMs,
+                min_silence_duration_ms: current.minSilenceDurationMs,
+                max_tokens_to_recompute: current.maxTokensToRecompute,
+                browser_noise_suppression: current.browserNoiseSuppression,
+                browser_echo_cancellation: current.browserEchoCancellation,
+                browser_auto_gain_control: current.browserAutoGainControl,
+                push_to_talk: current.pushToTalk,
+              },
+            });
+          } else if (current.targetType === 'crew') {
+            saveCrewVoiceProfile(current.targetId, {
+              voice_id: current.voiceId,
+              tts_model_id: current.ttsModelId,
+              stt_model_id: current.sttModelId,
+              output_format: current.outputFormat,
+              sample_rate: current.sampleRate,
+              language_code: current.languageCode,
+              auto_tts: current.autoTts,
+              meta: {
+                vad_enabled: current.vadEnabled,
+                vad_silence_threshold_secs: current.vadSilenceThresholdSecs,
+                vad_threshold: current.vadThreshold,
+                min_speech_duration_ms: current.minSpeechDurationMs,
+                min_silence_duration_ms: current.minSilenceDurationMs,
+                max_tokens_to_recompute: current.maxTokensToRecompute,
+                browser_noise_suppression: current.browserNoiseSuppression,
+                browser_echo_cancellation: current.browserEchoCancellation,
+                browser_auto_gain_control: current.browserAutoGainControl,
+                push_to_talk: current.pushToTalk,
+              },
+            });
+          }
+          sendVoiceSocketEvent(ws, 'session.updated', { sessionId: current.sessionId });
+          return;
+        }
+
+        if (type === 'audio.stream') {
+          const chunk = String(message.chunk || '');
+          if (!chunk) return;
+          const sttSocket = openRealtimeSttSocket(current, ws);
+          if (sttSocket.readyState === WebSocket.OPEN) {
+            sttSocket.send(JSON.stringify({
+              message_type: 'input_audio_chunk',
+              audio_base_64: chunk,
+            }));
+          }
+          return;
+        }
+
+        if (type === 'audio.append') {
+          const chunk = String(message.chunk || '');
+          if (!chunk) return;
+          current.audioChunks.push(Buffer.from(chunk, 'base64'));
+          sendVoiceSocketEvent(ws, 'audio.buffered', {
+            sessionId: current.sessionId,
+            chunks: current.audioChunks.length,
+            bytes: current.audioChunks.reduce((total, part) => total + part.length, 0),
+          });
+          return;
+        }
+
+        if (type === 'session.stop') {
+          interruptVoicePlayback(ws, current, 'session_stopped');
+          if (current.sttSocket && current.sttSocket.readyState === WebSocket.OPEN) {
+            current.sttSocket.close();
+          }
+          updateVoiceSession(current.sessionId, { status: 'closed' });
+          appendVoiceSessionEvent(current.sessionId, 'session.stopped', {});
+          sendVoiceSocketEvent(ws, 'session.stopped', { sessionId: current.sessionId });
+          ws.close();
+          return;
+        }
+
+        if (type === 'transcript.commit') {
+          let transcript = String(message.text || '').trim();
+          if (!transcript) {
+            transcript = String(getVoiceSession(current.sessionId)?.transcript || '').trim();
+          }
+          if (!transcript) throw new Error('No committed transcript is available yet.');
+          await executeVoiceTargetFromTranscript(ws, current, transcript);
+          return;
+        }
+
+        sendVoiceSocketEvent(ws, 'error', { message: `Unsupported voice event: ${type}` });
+      } catch (error: any) {
+        const currentSessionId = voiceSocketContexts.get(ws)?.sessionId;
+        if (currentSessionId) {
+          updateVoiceSession(currentSessionId, { status: 'failed' });
+          appendVoiceSessionEvent(currentSessionId, 'error', { message: error?.message || 'Voice session failed' });
+        }
+        sendVoiceSocketEvent(ws, 'error', { message: error?.message || 'Voice session failed' });
+      }
+    });
+
+    ws.on('close', () => {
+      const current = voiceSocketContexts.get(ws);
+      if (current) {
+        interruptVoicePlayback(ws, current, 'socket_closed');
+        if (current.sttSocket && current.sttSocket.readyState === WebSocket.OPEN) {
+          current.sttSocket.close();
+        }
+        updateVoiceSession(current.sessionId, { status: 'closed' });
+        appendVoiceSessionEvent(current.sessionId, 'socket.closed', {});
+      }
+      voiceSocketContexts.delete(ws);
+    });
+  });
+
+  server.on('upgrade', (request, socket, head) => {
+    const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
+    if (url.pathname !== '/ws/voice') return;
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  });
+}
+
 async function startServer() {
-  // Initialize Database first
-  initDb();
+  await ensurePrismaReady();
+  const localAccessInfo = getLocalAccessSubsystemInfo();
+  console.log(
+    `[orchestrator-access] subsystem=${localAccessInfo.store} tables=${localAccessInfo.tables.join(',')} mode=${localAccessInfo.ownership}`
+  );
+
+  async function ensureBuiltInInternalTools() {
+    const prisma = getPrisma();
+    const builtIns = [
+      {
+        name: 'get_current_datetime',
+        description: 'Return current date/time with UTC ISO, formatted local time, and optional unix timestamp.',
+        category: 'Utility',
+        type: 'internal',
+        config: {
+          method: 'get_current_datetime',
+          requiredArgs: [],
+          argSchema: {
+            timezone: 'string',
+            locale: 'string',
+            include_unix: 'boolean',
+          },
+          argDescriptions: {
+            timezone: 'Optional IANA timezone (for example: UTC, Asia/Kolkata, America/New_York). Default is UTC.',
+            locale: 'Optional locale for formatted output (for example: en-US).',
+            include_unix: 'Set false to omit unix_ms from the response.',
+          },
+        },
+      },
+      {
+        name: 'delegate_to_agent',
+        description: 'Delegate a subtask to another agent so it can use its own tools and MCP bundles, then return the child result to the current agent.',
+        category: 'Orchestration',
+        type: 'internal',
+        config: {
+          method: 'delegate_to_agent',
+          requiredArgs: ['target_agent_name', 'task'],
+          argSchema: {
+            target_agent_name: 'string',
+            target_agent_id: 'number',
+            task: 'string',
+            context: 'string',
+            expected_output: 'string',
+            title: 'string',
+            share_session: 'boolean',
+          },
+          argDescriptions: {
+            target_agent_name: 'Name of the target specialist agent to delegate to.',
+            target_agent_id: 'Numeric id of the target specialist agent if you prefer an exact reference.',
+            task: 'The delegated task for the target agent to perform.',
+            context: 'Optional extra context or notes for the delegated agent.',
+            expected_output: 'Optional guidance about what the delegated agent should return.',
+            title: 'Optional title for the delegation trace entry.',
+            share_session: 'Set false to avoid sharing the current session memory with the delegated agent.',
+          },
+        },
+      },
+      {
+        name: 'generate_attachment_public_url',
+        description: 'Create a temporary public URL for an uploaded attachment so external tools and MCP packages can fetch it.',
+        category: 'Attachments',
+        type: 'internal',
+        config: {
+          method: 'generate_attachment_public_url',
+          requiredArgs: ['attachment_id'],
+          argSchema: {
+            attachment_id: 'string',
+            expires_in_seconds: 'number',
+          },
+          argDescriptions: {
+            attachment_id: 'The uploaded platform attachment id to expose temporarily.',
+            expires_in_seconds: 'How long the public link should remain valid. Defaults to 3600 seconds.',
+          },
+        },
+      },
+      {
+        name: 'curl_request',
+        description: 'Make a direct HTTP request similar to curl and return status, headers, and body.',
+        category: 'HTTP',
+        type: 'internal',
+        config: {
+          method: 'curl_request',
+          requiredArgs: ['url'],
+          argSchema: {
+            url: 'string',
+            method: 'string',
+            headers: 'object',
+            body: 'string|object',
+            timeout_ms: 'number',
+            follow_redirects: 'boolean',
+          },
+          argDescriptions: {
+            url: 'The absolute URL to request.',
+            method: 'HTTP method such as GET, POST, PUT, PATCH, or DELETE.',
+            headers: 'Optional request headers.',
+            body: 'Optional request body for non-GET methods.',
+            timeout_ms: 'Optional timeout in milliseconds. Defaults to 30000.',
+            follow_redirects: 'Set false to inspect redirect responses instead of following them.',
+          },
+        },
+      },
+    ];
+
+    for (const builtIn of builtIns) {
+      const serializedConfig = JSON.stringify(builtIn.config);
+      const existing = await prisma.orchestratorTool.findFirst({
+        where: { name: builtIn.name },
+        select: { id: true, version: true, description: true, category: true, type: true, config: true },
+      });
+      if (!existing) {
+        const created = await prisma.orchestratorTool.create({
+          data: {
+            name: builtIn.name,
+            description: builtIn.description,
+            category: builtIn.category,
+            type: builtIn.type,
+            config: serializedConfig,
+            version: 1,
+          },
+        });
+        await prisma.orchestratorToolVersion.create({
+          data: {
+            toolId: created.id,
+            versionNumber: 1,
+            name: builtIn.name,
+            description: builtIn.description,
+            category: builtIn.category,
+            type: builtIn.type,
+            config: serializedConfig,
+            changeKind: 'create',
+          },
+        });
+        continue;
+      }
+      if (
+        existing.description === builtIn.description &&
+        existing.category === builtIn.category &&
+        existing.type === builtIn.type &&
+        String(existing.config || '') === serializedConfig
+      ) {
+        continue;
+      }
+      const nextVersion = Number(existing.version || 1) + 1;
+      await prisma.orchestratorTool.update({
+        where: { id: existing.id },
+        data: {
+          description: builtIn.description,
+          category: builtIn.category,
+          type: builtIn.type,
+          config: serializedConfig,
+          version: nextVersion,
+          updatedAt: new Date(),
+        },
+      });
+      await prisma.orchestratorToolVersion.create({
+        data: {
+          toolId: existing.id,
+          versionNumber: nextVersion,
+          name: builtIn.name,
+          description: builtIn.description,
+          category: builtIn.category,
+          type: builtIn.type,
+          config: serializedConfig,
+          changeKind: 'update',
+        },
+      });
+    }
+  }
 
   function ensureDefaultPricing() {
     const upsert = db.prepare(`
@@ -7672,6 +12914,9 @@ async function startServer() {
     await prisma.orchestratorAgent.updateMany({
       data: { status: 'idle' },
     });
+    await ensureAgentCronJobsTable();
+    await warmPersistedMcpPackagesFromTools();
+    await ensureBuiltInInternalTools();
     await refreshPersistentMirror();
     
     // Now that mirror is synced, ensure pricing is there (it writes to memory db)
@@ -7689,6 +12934,7 @@ async function startServer() {
   }
 
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     viteServer = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -7699,9 +12945,11 @@ async function startServer() {
   httpServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+  initializeVoiceWebSocketServer(httpServer);
 
   scheduleRetention();
   startJobWorker();
+  startAgentCronScheduler();
   gcsSyncTimer = startSqliteGcsSyncLoop(getSqlitePath());
 }
 

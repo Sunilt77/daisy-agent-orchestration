@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Plus, Users, PlayCircle, ArrowRight, Trash2, Activity, DollarSign, Brain, Sparkles, X, LayoutGrid, Bot, Gauge, TrendingUp, Clock3, Cpu, FileText, Calendar, Package, Target, Wand2, BarChart3 } from 'lucide-react';
+import { Plus, Users, PlayCircle, ArrowRight, Trash2, Activity, DollarSign, Brain, Sparkles, X, LayoutGrid, Bot, Gauge, TrendingUp, Clock3, Cpu, FileText, Calendar, Package, Target, Wand2, BarChart3, Search } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Pagination from '../components/Pagination';
 import { LiveAgentCard } from '../components/LiveAgentCard';
@@ -122,8 +122,13 @@ export default function Dashboard() {
   const [agents, setAgents] = useState<any[]>([]);
   const [crewsPage, setCrewsPage] = useState(1);
   const [crewsPageSize, setCrewsPageSize] = useState(6);
+  const [crewQuery, setCrewQuery] = useState('');
+  const [crewProcessFilter, setCrewProcessFilter] = useState<'all' | 'sequential' | 'hierarchical' | 'parallel'>('all');
+  const [crewExposureFilter, setCrewExposureFilter] = useState<'all' | 'exposed' | 'private'>('all');
   const [execPage, setExecPage] = useState(1);
   const [execPageSize, setExecPageSize] = useState(8);
+  const [executionQuery, setExecutionQuery] = useState('');
+  const [executionStatusFilter, setExecutionStatusFilter] = useState<'all' | 'running' | 'completed' | 'failed' | 'canceled'>('all');
   const [templates, setTemplates] = useState<CrewTemplate[]>([]);
   const [failureAnalytics, setFailureAnalytics] = useState<{ topFailingTools: any[]; timeoutHotspots: any[]; tokenSpikes: any[] }>({
     topFailingTools: [],
@@ -133,6 +138,9 @@ export default function Dashboard() {
   const [cancelingAgentId, setCancelingAgentId] = useState<number | null>(null);
   const [agentStopMessage, setAgentStopMessage] = useState<string>('');
   const [stoppingAgentIds, setStoppingAgentIds] = useState<number[]>([]);
+  const dashboardDarkPanel = 'bg-linear-to-br from-slate-950 via-slate-900 to-slate-900 border-slate-800/80 shadow-[0_24px_70px_rgba(2,6,23,0.35)]';
+  const dashboardOperatorPanel = `panel-chrome rounded-[2rem] border p-6 ${dashboardDarkPanel}`;
+  const dashboardOperatorCard = 'rounded-2xl border border-white/10 bg-white/[0.06] p-4';
   
   const navigate = useNavigate();
 
@@ -166,27 +174,62 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 5000); // Poll every 5 seconds
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      fetchData();
+    }, 5000);
     return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
     setCrewsPage(1);
   }, [crews.length]);
+  useEffect(() => {
+    setCrewsPage(1);
+  }, [crewQuery, crewProcessFilter, crewExposureFilter]);
 
   useEffect(() => {
     setExecPage(1);
   }, [recentExecutions.length]);
+  useEffect(() => {
+    setExecPage(1);
+  }, [executionQuery, executionStatusFilter]);
+
+  const filteredCrews = useMemo(() => {
+    const query = crewQuery.trim().toLowerCase();
+    return crews.filter((crew) => {
+      const matchesQuery = !query || [crew.name, crew.process, crew.is_exposed ? 'exposed' : 'private']
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query));
+      const matchesProcess = crewProcessFilter === 'all' || crew.process === crewProcessFilter;
+      const matchesExposure = crewExposureFilter === 'all' || (crewExposureFilter === 'exposed' ? Boolean(crew.is_exposed) : !crew.is_exposed);
+      return matchesQuery && matchesProcess && matchesExposure;
+    });
+  }, [crews, crewExposureFilter, crewProcessFilter, crewQuery]);
+
+  const filteredExecutions = useMemo(() => {
+    const query = executionQuery.trim().toLowerCase();
+    return recentExecutions.filter((exec) => {
+      const matchesQuery = !query || [exec.agent_name, exec.status, exec.input, exec.output]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query));
+      const normalizedStatus = String(exec.status || 'completed').toLowerCase();
+      const matchesStatus = executionStatusFilter === 'all' || normalizedStatus === executionStatusFilter;
+      return matchesQuery && matchesStatus;
+    });
+  }, [recentExecutions, executionQuery, executionStatusFilter]);
+  const hasCrewFilters = crewQuery.trim().length > 0 || crewProcessFilter !== 'all' || crewExposureFilter !== 'all';
+  const hasExecutionFilters = executionQuery.trim().length > 0 || executionStatusFilter !== 'all';
 
   const pagedCrews = useMemo(() => {
     const start = (crewsPage - 1) * crewsPageSize;
-    return crews.slice(start, start + crewsPageSize);
-  }, [crews, crewsPage, crewsPageSize]);
+    return filteredCrews.slice(start, start + crewsPageSize);
+  }, [filteredCrews, crewsPage, crewsPageSize]);
 
   const pagedExecutions = useMemo(() => {
     const start = (execPage - 1) * execPageSize;
-    return recentExecutions.slice(start, start + execPageSize);
-  }, [recentExecutions, execPage, execPageSize]);
+    return filteredExecutions.slice(start, start + execPageSize);
+  }, [filteredExecutions, execPage, execPageSize]);
 
   const dashboardInsights = useMemo(() => {
     const now = Date.now();
@@ -195,7 +238,7 @@ export default function Dashboard() {
     const totalPrompt = recentExecutions.reduce((sum, e) => sum + (e.prompt_tokens || 0), 0);
     const totalCompletion = recentExecutions.reduce((sum, e) => sum + (e.completion_tokens || 0), 0);
     const totalCost = recentExecutions.reduce((sum, e) => sum + (e.total_cost || 0), 0);
-    const avgLatency = (Array.isArray(recentExecutions) && recentExecutions.length)
+    const approxRunAge = (Array.isArray(recentExecutions) && recentExecutions.length)
       ? Math.round(recentExecutions.reduce((sum, e) => {
           if (!e.created_at) return sum;
           const delta = now - new Date(e.created_at).getTime();
@@ -215,7 +258,7 @@ export default function Dashboard() {
       totalPrompt,
       totalCompletion,
       totalCost,
-      avgLatency,
+      approxRunAge,
       runningAgents,
       activeRunsNow,
       exposedCrews,
@@ -394,6 +437,15 @@ export default function Dashboard() {
       tokens: toPath('tokensY'),
       cost: toPath('costY'),
     };
+  }, [evolutionSeries]);
+
+  const evolutionTotals = useMemo(() => {
+    return evolutionSeries.reduce((acc, point) => {
+      acc.runs += point.runs;
+      acc.tokens += point.tokens;
+      acc.cost += point.cost;
+      return acc;
+    }, { runs: 0, tokens: 0, cost: 0 });
   }, [evolutionSeries]);
 
   const orchestrationLanes = useMemo(() => ([
@@ -586,10 +638,10 @@ export default function Dashboard() {
           transition={{ duration: 0.5, delay: 0.2 }}
           className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-6 mb-12"
         >
-          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-brand-500/20 shadow-2xl">
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className={`telemetry-tile p-6 relative overflow-hidden group border-brand-500/30 ${dashboardDarkPanel}`}>
             <div className="absolute -top-8 -right-8 w-32 h-32 rounded-full bg-brand-500/10 blur-3xl group-hover:bg-brand-500/20 transition-all duration-500" />
             <div className="relative">
-              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-brand-300/80 mb-3">Agents Online</div>
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-brand-300 mb-3">Agents Online</div>
               <div className="flex items-end justify-between">
                 <div className="text-5xl font-black text-white tracking-tighter">{agents.length}</div>
                 <div className="p-3 rounded-2xl bg-brand-500/20 text-brand-300 border border-brand-500/30 group-hover:rotate-12 transition-all">
@@ -603,49 +655,49 @@ export default function Dashboard() {
             </div>
           </motion.div>
 
-          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-accent-500/20 shadow-2xl">
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className={`telemetry-tile p-6 relative overflow-hidden group border-amber-400/30 ${dashboardDarkPanel}`}>
             <div className="absolute -bottom-10 -left-10 w-32 h-32 rounded-full bg-accent-500/10 blur-3xl group-hover:bg-accent-500/20 transition-all duration-500" />
             <div className="relative">
-              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-accent-300/80 mb-3">Crew Matrix</div>
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-amber-300 mb-3">Crew Matrix</div>
               <div className="flex items-end justify-between">
                 <div className="text-5xl font-black text-white tracking-tighter">{crews.length}</div>
                 <div className="p-3 rounded-2xl bg-accent-500/20 text-accent-300 border border-accent-500/30 group-hover:rotate-12 transition-all">
                   <Users size={24} />
                 </div>
               </div>
-              <div className="text-[12px] font-bold text-slate-400 mt-4 flex items-center gap-2">
+              <div className="text-[12px] font-bold text-slate-200 mt-4 flex items-center gap-2">
                 <div className="w-3 h-3 rounded bg-accent-500/30" />
                 {dashboardInsights.exposedCrews} exposed via API/MCP
               </div>
             </div>
           </motion.div>
 
-          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-emerald-500/20 shadow-2xl">
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className={`telemetry-tile p-6 relative overflow-hidden group border-emerald-500/30 ${dashboardDarkPanel}`}>
             <div className="relative">
-              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-emerald-300/80 mb-3">24H Throughput</div>
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-emerald-300 mb-3">24H Throughput</div>
               <div className="flex items-end justify-between">
                 <div className="text-5xl font-black text-white tracking-tighter">{dashboardInsights.execution24h}</div>
                 <div className="p-3 rounded-2xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 group-hover:rotate-12 transition-all">
                   <TrendingUp size={24} />
                 </div>
               </div>
-              <div className="text-[12px] font-bold text-slate-400 mt-4 flex items-center gap-2">
+              <div className="text-[12px] font-bold text-slate-200 mt-4 flex items-center gap-2">
                 <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                Recent executions today
+                Executions recorded in the last 24 hours
               </div>
             </div>
           </motion.div>
 
-          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-indigo-500/20 shadow-2xl">
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className={`telemetry-tile p-6 relative overflow-hidden group border-indigo-500/30 ${dashboardDarkPanel}`}>
             <div className="relative">
-              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-indigo-300/80 mb-3">Token Flow</div>
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-indigo-300 mb-3">Token Flow</div>
               <div className="flex items-end justify-between">
                 <div className="text-4xl font-black text-white tracking-tighter leading-none">{(dashboardInsights.totalPrompt + dashboardInsights.totalCompletion).toLocaleString()}</div>
                 <div className="p-3 rounded-2xl bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 group-hover:rotate-12 transition-all">
                   <Cpu size={24} />
                 </div>
               </div>
-              <div className="text-[11px] font-bold text-slate-400 mt-4 truncate flex items-center gap-2">
+              <div className="text-[11px] font-bold text-slate-200 mt-4 truncate flex items-center gap-2">
                 <span className="text-indigo-300">P</span> {dashboardInsights.totalPrompt.toLocaleString()}
                 <span className="mx-1 text-slate-600">|</span>
                 <span className="text-violet-300">C</span> {dashboardInsights.totalCompletion.toLocaleString()}
@@ -653,27 +705,27 @@ export default function Dashboard() {
             </div>
           </motion.div>
 
-          <motion.div whileHover={{ y: -5, scale: 1.02 }} className="telemetry-tile p-6 relative overflow-hidden group bg-linear-to-br from-slate-900/40 to-slate-900/60 border-emerald-500/20 shadow-2xl">
+          <motion.div whileHover={{ y: -5, scale: 1.02 }} className={`telemetry-tile p-6 relative overflow-hidden group border-emerald-500/30 ${dashboardDarkPanel}`}>
             <div className="relative">
-              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-emerald-300/80 mb-3">Cost Envelope</div>
+              <div className="text-[11px] font-black uppercase tracking-[0.25em] text-emerald-300 mb-3">Cost Envelope</div>
               <div className="flex items-end justify-between">
                 <div className="text-4xl font-black text-emerald-400 tracking-tighter">${dashboardInsights.totalCost.toFixed(4)}</div>
                 <div className="p-3 rounded-2xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 group-hover:rotate-12 transition-all">
                   <DollarSign size={24} />
                 </div>
               </div>
-              <div className="text-[12px] font-bold text-slate-400 mt-4">Avg latency {dashboardInsights.avgLatency}s</div>
+              <div className="text-[12px] font-bold text-slate-200 mt-4">Approx run age {dashboardInsights.approxRunAge}s</div>
             </div>
           </motion.div>
         </motion.div>
 
-      <div className="panel-chrome rounded-[2.5rem] p-8 mb-10 overflow-hidden relative">
+      <div className="panel-chrome rounded-[2.5rem] p-8 mb-10 overflow-hidden relative border border-slate-200/90 bg-white/92">
         <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-brand-500/5 blur-[120px] rounded-full -mr-64 -mt-64" />
         
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-10 relative z-10">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-10 relative z-10">
           <div className="telemetry-tile p-6 relative overflow-hidden group border-white/10">
             <div className="absolute top-0 right-0 w-32 h-32 bg-violet-500/10 blur-3xl -mr-16 -mt-16 group-hover:bg-violet-500/20 transition-colors" />
-            <div className="text-[10px] text-violet-300 font-black uppercase tracking-[0.25em] mb-1">Swarm Efficiency</div>
+            <div className="text-[10px] text-violet-300 font-black uppercase tracking-[0.25em] mb-1">Success Rate</div>
             <div className="text-4xl font-black text-white">{opsPulse.successRate.toFixed(1)}%</div>
             <div className="mt-5 h-2.5 bg-white/10 rounded-full overflow-hidden border border-white/5 shadow-inner">
               <motion.div 
@@ -684,20 +736,8 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="telemetry-tile p-6 relative overflow-hidden group border-white/10">
-            <div className="absolute top-0 right-0 w-32 h-32 bg-cyan-500/10 blur-3xl -mr-16 -mt-16 group-hover:bg-cyan-500/20 transition-colors" />
-            <div className="text-[10px] text-cyan-300 font-black uppercase tracking-[0.25em] mb-1">Impact Velocity</div>
-            <div className="text-4xl font-black text-white">${dashboardInsights.totalCost.toFixed(2)}</div>
-            <div className="mt-5 h-2.5 bg-white/10 rounded-full overflow-hidden border border-white/5 shadow-inner">
-              <motion.div 
-                initial={{ width: 0 }}
-                animate={{ width: `${Math.min(100, Math.max(8, dashboardInsights.activeRunsNow * 10))}%` }}
-                className="h-full bg-linear-to-r from-cyan-600 to-emerald-500 rounded-full shadow-[0_0_15px_rgba(6,182,212,0.6)]" 
-              />
-            </div>
-          </div>
-          <div className="telemetry-tile p-6 relative overflow-hidden group border-white/10">
             <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-500/10 blur-3xl -mr-16 -mt-16 group-hover:bg-emerald-500/20 transition-colors" />
-            <div className="text-[10px] text-emerald-300 font-black uppercase tracking-[0.25em] mb-1">Cerebral Load</div>
+            <div className="text-[10px] text-emerald-300 font-black uppercase tracking-[0.25em] mb-1">Active Capacity</div>
             <div className="text-4xl font-black text-white">{dashboardInsights.utilization}%</div>
             <div className="mt-5 h-2.5 bg-white/10 rounded-full overflow-hidden border border-white/5 shadow-inner">
               <motion.div 
@@ -708,21 +748,21 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="telemetry-tile p-6 relative overflow-hidden group border-white/10">
-            <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/10 blur-3xl -mr-16 -mt-16 group-hover:bg-orange-500/20 transition-colors" />
-            <div className="text-[10px] text-orange-300 font-black uppercase tracking-[0.25em] mb-1">Neural Patterns</div>
-            <div className="text-4xl font-black text-white">{recentExecutions.length}</div>
+            <div className="absolute top-0 right-0 w-32 h-32 bg-cyan-500/10 blur-3xl -mr-16 -mt-16 group-hover:bg-cyan-500/20 transition-colors" />
+            <div className="text-[10px] text-cyan-300 font-black uppercase tracking-[0.25em] mb-1">Active Runs</div>
+            <div className="text-4xl font-black text-white">{dashboardInsights.activeRunsNow}</div>
             <div className="mt-5 h-2.5 bg-white/10 rounded-full overflow-hidden border border-white/5 shadow-inner">
               <motion.div 
                 initial={{ width: 0 }}
-                animate={{ width: `${Math.min(100, recentExecutions.length * 4)}%` }}
-                className="h-full bg-linear-to-r from-orange-600 to-amber-500 rounded-full shadow-[0_0_15px_rgba(245,158,11,0.6)]" 
+                animate={{ width: `${Math.min(100, Math.max(8, dashboardInsights.activeRunsNow * 12))}%` }}
+                className="h-full bg-linear-to-r from-cyan-600 to-blue-500 rounded-full shadow-[0_0_15px_rgba(6,182,212,0.6)]" 
               />
             </div>
           </div>
         </div>
 
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 relative z-10">
-          <div className="rounded-[2.4rem] border border-white/10 bg-white/[0.05] p-8 backdrop-blur-2xl relative overflow-hidden group">
+          <div className={`rounded-[2.4rem] border p-8 backdrop-blur-2xl relative overflow-hidden group ${dashboardDarkPanel}`}>
             <div className="absolute inset-0 bg-linear-to-b from-indigo-500/5 to-transparent pointer-events-none" />
             <div className="flex items-center justify-between mb-6 relative z-10">
               <div className="flex items-center gap-4">
@@ -731,10 +771,10 @@ export default function Dashboard() {
                 </div>
                 <div>
                   <h3 className="text-xl font-black text-white tracking-tight">Collective Evolution</h3>
-                  <div className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mt-0.5">Analytics Core</div>
+                  <div className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mt-0.5">Analytics Core</div>
                 </div>
               </div>
-              <div className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 text-[10px] font-black text-slate-400 uppercase tracking-widest hidden sm:block">
+              <div className="px-4 py-1.5 rounded-full bg-white/10 border border-white/10 text-[10px] font-black text-slate-300 uppercase tracking-widest hidden sm:block">
                 Last 7 Days
               </div>
             </div>
@@ -805,28 +845,28 @@ export default function Dashboard() {
               <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 p-4 flex items-center justify-between group/legend">
                 <div>
                   <div className="text-[10px] font-black text-violet-300 uppercase tracking-widest mb-1">Runs</div>
-                  <div className="text-sm font-black text-white">{dashboardInsights.execution24h}</div>
+                  <div className="text-sm font-black text-white">{evolutionTotals.runs}</div>
                 </div>
                 <div className="w-3 h-3 rounded-full bg-violet-500 shadow-[0_0_12px_rgba(139,92,246,0.8)] group-hover:scale-125 transition-transform" />
               </div>
               <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4 flex items-center justify-between group/legend">
                 <div>
                   <div className="text-[10px] font-black text-cyan-300 uppercase tracking-widest mb-1">Tokens</div>
-                  <div className="text-sm font-black text-white">{Math.round((dashboardInsights.totalPrompt + dashboardInsights.totalCompletion)/1000)}k</div>
+                  <div className="text-sm font-black text-white">{Math.round(evolutionTotals.tokens / 1000)}k</div>
                 </div>
                 <div className="w-3 h-3 rounded-full bg-cyan-500 shadow-[0_0_12px_rgba(6,182,212,0.8)] group-hover:scale-125 transition-transform" />
               </div>
               <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4 flex items-center justify-between group/legend">
                 <div>
                   <div className="text-[10px] font-black text-emerald-300 uppercase tracking-widest mb-1">Cost</div>
-                  <div className="text-sm font-black text-white">${dashboardInsights.totalCost.toFixed(2)}</div>
+                  <div className="text-sm font-black text-white">${evolutionTotals.cost.toFixed(2)}</div>
                 </div>
                 <div className="w-3 h-3 rounded-full bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.8)] group-hover:scale-125 transition-transform" />
               </div>
             </div>
           </div>
 
-          <div className="rounded-[2.4rem] border border-white/10 bg-white/[0.05] p-8 backdrop-blur-2xl relative overflow-hidden group">
+          <div className={`rounded-[2.4rem] border p-8 backdrop-blur-2xl relative overflow-hidden group ${dashboardDarkPanel}`}>
             <div className="absolute inset-0 bg-linear-to-b from-brand-500/5 to-transparent pointer-events-none" />
             <div className="flex items-center justify-between mb-6 relative z-10">
               <div className="flex items-center gap-4">
@@ -835,10 +875,10 @@ export default function Dashboard() {
                 </div>
                 <div>
                   <h3 className="text-xl font-black text-white tracking-tight">Swarm Coordination</h3>
-                  <div className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mt-0.5">Real-Time Node Mesh</div>
+                  <div className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mt-0.5">Real-Time Node Mesh</div>
                 </div>
               </div>
-              <div className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 text-[10px] font-black text-slate-400 uppercase tracking-widest hidden sm:block">
+              <div className="px-4 py-1.5 rounded-full bg-white/10 border border-white/10 text-[10px] font-black text-slate-300 uppercase tracking-widest hidden sm:block">
                 Top Active Nodes
               </div>
             </div>
@@ -851,13 +891,13 @@ export default function Dashboard() {
                 </div>
               ) : (
                 coordinationSeries.map((row) => (
-                  <div key={row.name} className="group/row bg-white/[0.02] p-4 rounded-2xl border border-white/5 hover:bg-white/[0.05] transition-all">
+                  <div key={row.name} className="group/row bg-white/[0.06] p-4 rounded-2xl border border-white/10 hover:bg-white/[0.09] transition-all">
                     <div className="flex items-center justify-between text-[11px] mb-3">
                       <span className="truncate max-w-[65%] text-slate-200 font-black tracking-tight group-hover/row:text-brand-100 transition-colors uppercase">{row.name}</span>
-                      <div className="flex gap-3 font-black text-[9px] text-slate-500 uppercase tracking-wider">
-                         <span className="text-violet-400">Done:{row.completedPct}%</span>
-                         <span className="text-sky-400">Live:{row.runningPct}%</span>
-                         <span className="text-orange-400">Fail:{row.failedPct}%</span>
+                      <div className="flex gap-3 font-black text-[9px] text-slate-400 uppercase tracking-wider">
+                         <span className="text-violet-300">Done:{row.completedPct}%</span>
+                         <span className="text-sky-300">Live:{row.runningPct}%</span>
+                         <span className="text-orange-300">Fail:{row.failedPct}%</span>
                       </div>
                     </div>
                     <div className="h-4 w-full rounded-full bg-slate-900/50 overflow-hidden flex border border-white/5 shadow-inner">
@@ -903,22 +943,29 @@ export default function Dashboard() {
       </div>
 
       <div className="mb-10 grid grid-cols-1 xl:grid-cols-2 gap-6">
-        <div className="panel-chrome rounded-2xl p-6">
-          <h2 className="text-lg font-bold text-slate-800 mb-3 flex items-center gap-2">
-            <Sparkles size={18} className="text-brand-600" />
-            Crew Blueprints
-          </h2>
-          <p className="text-sm text-slate-500 mb-4">Launch proven crew patterns in one click.</p>
+        <div className={dashboardOperatorPanel}>
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <Sparkles size={18} className="text-cyan-300" />
+                Command Blueprints
+              </h2>
+              <p className="text-sm text-slate-400 mt-1">Launch proven crew patterns without leaving the operator surface.</p>
+            </div>
+            <div className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-cyan-200">
+              Quick Start
+            </div>
+          </div>
           <div className="space-y-3">
             {templates.map((tpl) => (
-              <div key={tpl.id} className="border border-slate-200 rounded-xl p-3 bg-white/70 flex items-start justify-between gap-3">
+              <div key={tpl.id} className="flex items-start justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.06] p-4">
                 <div>
-                  <div className="font-semibold text-slate-800">{tpl.name}</div>
-                  <div className="text-xs text-slate-500 mt-1">{tpl.description}</div>
+                  <div className="font-semibold text-white">{tpl.name}</div>
+                  <div className="text-xs text-slate-400 mt-1">{tpl.description}</div>
                 </div>
                 <button
                   onClick={() => createCrewFromTemplate(tpl.id)}
-                  className="px-3 py-2 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
+                  className="px-3 py-2 text-xs font-semibold rounded-xl bg-cyan-500 text-slate-950 hover:bg-cyan-400"
                 >
                   Use Template
                 </button>
@@ -928,31 +975,39 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="panel-chrome rounded-2xl p-6">
-          <h2 className="text-lg font-bold text-slate-800 mb-3 flex items-center gap-2">
-            <Activity size={18} className="text-red-500" />
-            Failure Analytics
-          </h2>
+        <div className={dashboardOperatorPanel}>
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <Activity size={18} className="text-orange-300" />
+                Failure Analytics
+              </h2>
+              <p className="text-sm text-slate-400 mt-1">Watch the highest-friction tools and timeout hotspots before they spread.</p>
+            </div>
+            <div className="rounded-full border border-orange-400/20 bg-orange-400/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-orange-200">
+              Risk Watch
+            </div>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <div className="text-xs uppercase tracking-wider text-slate-500 mb-2">Top Failing Tools</div>
+              <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">Top Failing Tools</div>
               <div className="space-y-2">
                 {failureAnalytics.topFailingTools.slice(0, 5).map((row: any) => (
-                  <div key={row.tool_name} className="flex items-center justify-between text-sm border border-slate-100 rounded-lg px-3 py-2">
-                    <span className="text-slate-700">{row.tool_name}</span>
-                    <span className="font-mono text-red-600">{row.failures}</span>
+                  <div key={row.tool_name} className="flex items-center justify-between text-sm rounded-xl border border-white/10 bg-white/[0.06] px-3 py-2">
+                    <span className="text-slate-200">{row.tool_name}</span>
+                    <span className="font-mono text-red-300">{row.failures}</span>
                   </div>
                 ))}
                 {failureAnalytics.topFailingTools.length === 0 && <div className="text-xs text-slate-500">No failures detected.</div>}
               </div>
             </div>
             <div>
-              <div className="text-xs uppercase tracking-wider text-slate-500 mb-2">Timeout Hotspots</div>
+              <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">Timeout Hotspots</div>
               <div className="space-y-2">
                 {failureAnalytics.timeoutHotspots.slice(0, 5).map((row: any) => (
-                  <div key={row.agent_name} className="flex items-center justify-between text-sm border border-slate-100 rounded-lg px-3 py-2">
-                    <span className="text-slate-700">{row.agent_name}</span>
-                    <span className="font-mono text-amber-600">{row.timeout_failures}</span>
+                  <div key={row.agent_name} className="flex items-center justify-between text-sm rounded-xl border border-white/10 bg-white/[0.06] px-3 py-2">
+                    <span className="text-slate-200">{row.agent_name}</span>
+                    <span className="font-mono text-amber-300">{row.timeout_failures}</span>
                   </div>
                 ))}
                 {failureAnalytics.timeoutHotspots.length === 0 && <div className="text-xs text-slate-500">No timeout hotspots yet.</div>}
@@ -968,63 +1023,63 @@ export default function Dashboard() {
         transition={{ duration: 0.5, delay: 0.05, ease: 'easeOut' }}
         className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-12"
       >
-        <div className="panel-chrome rounded-2xl p-6 xl:col-span-2">
+        <div className={`${dashboardOperatorPanel} xl:col-span-2`}>
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-              <Gauge size={18} className="text-brand-600" />
+            <h2 className="text-lg font-bold text-white flex items-center gap-2">
+              <Gauge size={18} className="text-cyan-300" />
               Ops Pulse
             </h2>
-            <span className="text-xs uppercase tracking-[0.2em] text-slate-500">Real-Time</span>
+            <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Real-Time</span>
           </div>
           <div className="space-y-4">
             <div>
-              <div className="flex justify-between text-xs text-slate-600 mb-1">
+              <div className="flex justify-between text-xs text-slate-300 mb-1">
                 <span>Agent Utilization</span>
                 <span>{dashboardInsights.utilization}%</span>
               </div>
-              <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
+              <div className="h-2 rounded-full bg-white/10 overflow-hidden">
                 <div className="h-full rounded-full bg-linear-to-r from-brand-500 to-brand-700" style={{ width: `${dashboardInsights.utilization}%` }} />
               </div>
             </div>
             <div>
-              <div className="flex justify-between text-xs text-slate-600 mb-1">
+              <div className="flex justify-between text-xs text-slate-300 mb-1">
                 <span>Crew Exposure Coverage</span>
                 <span>{crews.length ? Math.round((dashboardInsights.exposedCrews / crews.length) * 100) : 0}%</span>
               </div>
-              <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
+              <div className="h-2 rounded-full bg-white/10 overflow-hidden">
                 <div className="h-full rounded-full bg-linear-to-r from-accent-500 to-accent-700" style={{ width: `${crews.length ? Math.round((dashboardInsights.exposedCrews / crews.length) * 100) : 0}%` }} />
               </div>
             </div>
             <div className="grid grid-cols-2 gap-4 pt-2">
-              <div className="bg-white/75 border border-slate-200 rounded-xl p-3">
-                <div className="text-xs text-slate-500 mb-1 flex items-center gap-1"><Clock3 size={12} /> Avg Recency</div>
-                <div className="text-lg font-bold text-slate-900">{dashboardInsights.avgLatency}s</div>
+              <div className={dashboardOperatorCard}>
+                <div className="text-xs text-slate-400 mb-1 flex items-center gap-1"><Clock3 size={12} /> Approx Run Age</div>
+                <div className="text-lg font-bold text-white">{dashboardInsights.approxRunAge}s</div>
               </div>
-              <div className="bg-white/75 border border-slate-200 rounded-xl p-3">
-                <div className="text-xs text-slate-500 mb-1 flex items-center gap-1"><Activity size={12} /> Active Runs</div>
-                <div className="text-lg font-bold text-slate-900">{dashboardInsights.activeRunsNow}</div>
+              <div className={dashboardOperatorCard}>
+                <div className="text-xs text-slate-400 mb-1 flex items-center gap-1"><Activity size={12} /> Active Runs</div>
+                <div className="text-lg font-bold text-white">{dashboardInsights.activeRunsNow}</div>
               </div>
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2">
-              <div className="bg-white/75 border border-slate-200 rounded-xl p-3">
-                <div className="text-[11px] text-slate-500">Success Rate</div>
+              <div className={dashboardOperatorCard}>
+                <div className="text-[11px] text-slate-400">Success Rate</div>
                 <div className="text-base font-bold text-emerald-700">{opsPulse.successRate}%</div>
               </div>
-              <div className="bg-white/75 border border-slate-200 rounded-xl p-3">
-                <div className="text-[11px] text-slate-500">Avg Tokens/Run</div>
-                <div className="text-base font-bold text-slate-900">{opsPulse.avgTokens.toLocaleString()}</div>
+              <div className={dashboardOperatorCard}>
+                <div className="text-[11px] text-slate-400">Avg Tokens/Run</div>
+                <div className="text-base font-bold text-white">{opsPulse.avgTokens.toLocaleString()}</div>
               </div>
-              <div className="bg-white/75 border border-slate-200 rounded-xl p-3">
-                <div className="text-[11px] text-slate-500">Avg Cost/Run</div>
-                <div className="text-base font-bold text-slate-900">${opsPulse.avgCost.toFixed(4)}</div>
+              <div className={dashboardOperatorCard}>
+                <div className="text-[11px] text-slate-400">Avg Cost/Run</div>
+                <div className="text-base font-bold text-white">${opsPulse.avgCost.toFixed(4)}</div>
               </div>
-              <div className="bg-white/75 border border-slate-200 rounded-xl p-3">
-                <div className="text-[11px] text-slate-500">Busiest Agent</div>
-                <div className="text-sm font-bold text-slate-900 truncate" title={opsPulse.busiestAgent}>{opsPulse.busiestAgent}</div>
+              <div className={dashboardOperatorCard}>
+                <div className="text-[11px] text-slate-400">Busiest Agent</div>
+                <div className="text-sm font-bold text-white truncate" title={opsPulse.busiestAgent}>{opsPulse.busiestAgent}</div>
               </div>
             </div>
-            <div className="bg-white/75 border border-slate-200 rounded-xl p-3">
-              <div className="flex items-center justify-between text-xs text-slate-500 mb-2">
+            <div className={dashboardOperatorCard}>
+              <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
                 <span>Recent Status Mix (last {opsPulse.total})</span>
                 <span>{opsPulse.lastRun ? new Date(opsPulse.lastRun).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</span>
               </div>
@@ -1036,19 +1091,19 @@ export default function Dashboard() {
               </div>
             </div>
             <div className="pt-2">
-              <div className="text-xs uppercase tracking-wider text-slate-500 mb-2">Running Agents</div>
-              {agentStopMessage && <div className="text-[11px] text-slate-600 mb-2">{agentStopMessage}</div>}
+              <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">Running Agents</div>
+              {agentStopMessage && <div className="text-[11px] text-slate-300 mb-2">{agentStopMessage}</div>}
               <div className="space-y-2 max-h-[130px] overflow-y-auto pr-1 custom-scrollbar">
                 {runningAgentsList.length === 0 && (
-                  <div className="text-xs text-slate-500 border border-slate-200 rounded-lg px-3 py-2 bg-white/70">
+                  <div className="text-xs text-slate-400 border border-white/10 rounded-lg px-3 py-2 bg-white/[0.05]">
                     No agents running right now.
                   </div>
                 )}
                 {runningAgentsList.map((agent) => (
-                  <div key={agent.id} className="flex items-center justify-between border border-slate-200 rounded-lg px-3 py-2 bg-white/70">
+                  <div key={agent.id} className="flex items-center justify-between border border-white/10 rounded-lg px-3 py-2 bg-white/[0.05]">
                     <div className="min-w-0">
-                      <div className="text-xs font-semibold text-slate-800 truncate">{agent.name}</div>
-                      <div className="text-[11px] text-slate-500 truncate">
+                      <div className="text-xs font-semibold text-white truncate">{agent.name}</div>
+                      <div className="text-[11px] text-slate-400 truncate">
                         {agent.role} • {agent.runningCount} active
                         {stoppingAgentIds.includes(agent.id) ? ' • stopping...' : ''}
                       </div>
@@ -1067,12 +1122,12 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="panel-chrome rounded-2xl p-6">
+        <div className={dashboardOperatorPanel}>
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-bold text-slate-800">Execution Wave</h2>
-            <span className="text-xs uppercase tracking-[0.2em] text-slate-500">Last 10</span>
+            <h2 className="text-lg font-bold text-white">Execution Wave</h2>
+            <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Last 10</span>
           </div>
-          <div className="flex items-center justify-between text-[10px] text-slate-500 mb-3">
+          <div className="flex items-center justify-between text-[10px] text-slate-400 mb-3">
             <span>Main bar = tokens</span>
             <span>Mini bar = cost</span>
           </div>
@@ -1081,18 +1136,18 @@ export default function Dashboard() {
               <div className="text-sm text-slate-500">No runs yet.</div>
             )}
             {recentLoadBars.map((bar) => (
-              <div key={bar.id} className="border border-slate-200 rounded-xl p-2 bg-white/60">
+              <div key={bar.id} className="border border-white/10 rounded-xl p-2 bg-white/[0.05]">
                 <div className="flex items-center justify-between mb-1">
                   <div className="flex items-center gap-2 min-w-0">
-                    <div className="w-4.5 h-4.5 rounded-full bg-slate-100 border border-slate-200 text-[10px] text-slate-600 flex items-center justify-center">
+                    <div className="w-4.5 h-4.5 rounded-full bg-white/10 border border-white/10 text-[10px] text-slate-300 flex items-center justify-center">
                       {bar.index}
                     </div>
-                    <div className="text-xs text-slate-700 truncate max-w-[120px]" title={bar.agentName}>{bar.agentName || `Agent ${bar.id}`}</div>
+                    <div className="text-xs text-slate-200 truncate max-w-[120px]" title={bar.agentName}>{bar.agentName || `Agent ${bar.id}`}</div>
                   </div>
-                  <div className="text-[10px] text-slate-500">{new Date(bar.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                  <div className="text-[10px] text-slate-400">{new Date(bar.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
                 </div>
                 <div className="flex items-center gap-2">
-                  <div className="flex-1 h-2 rounded-full bg-slate-200 overflow-hidden">
+                  <div className="flex-1 h-2 rounded-full bg-white/10 overflow-hidden">
                     <motion.div
                       initial={{ width: 0 }}
                       animate={{ width: `${bar.pct}%` }}
@@ -1100,10 +1155,10 @@ export default function Dashboard() {
                       className="h-full rounded-full bg-linear-to-r from-indigo-500 via-brand-500 to-emerald-500"
                     />
                   </div>
-                  <div className="w-14 text-right text-[10px] font-mono text-slate-700">{bar.tokens.toLocaleString()}t</div>
+                  <div className="w-14 text-right text-[10px] font-mono text-slate-200">{bar.tokens.toLocaleString()}t</div>
                 </div>
                 <div className="flex items-center gap-2 mt-1">
-                  <div className="flex-1 h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                  <div className="flex-1 h-1.5 rounded-full bg-white/10 overflow-hidden">
                     <motion.div
                       initial={{ width: 0 }}
                       animate={{ width: `${bar.costPct}%` }}
@@ -1117,7 +1172,7 @@ export default function Dashboard() {
             ))}
           </div>
           {recentLoadBars.length > 0 && recentLoadBars.every((bar) => bar.cost === 0) && (
-            <div className="mt-3 text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-2">
+            <div className="mt-3 text-[11px] text-slate-400 bg-white/[0.05] border border-white/10 rounded-lg px-2.5 py-2">
               Cost tracking is enabled, but recent runs returned $0.0000. Token and time view is shown above.
             </div>
           )}
@@ -1126,11 +1181,11 @@ export default function Dashboard() {
 
       <div className="mb-12">
         <div className="flex items-center justify-between mb-6">
-          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+          <h2 className="text-lg font-bold text-white flex items-center gap-2">
             <Users className="text-brand-500" size={20} />
             Active Workforce
           </h2>
-          <Link to="/agents" className="text-sm font-bold text-brand-600 hover:text-brand-700 transition-colors flex items-center gap-1">
+          <Link to="/agents" className="text-sm font-bold text-brand-300 hover:text-brand-200 transition-colors flex items-center gap-1">
             View All Agents <ArrowRight size={14} />
           </Link>
         </div>
@@ -1144,6 +1199,7 @@ export default function Dashboard() {
               <LiveAgentCard 
                 key={agent.id} 
                 agent={agent} 
+                variant="dashboard"
                 onClick={() => navigate('/agents')} 
               />
             ))}
@@ -1152,47 +1208,56 @@ export default function Dashboard() {
       </div>
 
       {isCreating && (
-        <div className="mb-8 bg-white p-6 rounded-xl border border-slate-200 shadow-sm animate-in fade-in slide-in-from-top-4">
-          <h3 className="text-lg font-semibold mb-4">Create New Crew</h3>
+        <div className={`mb-8 animate-in fade-in slide-in-from-top-4 ${dashboardOperatorPanel}`}>
+          <div className="flex items-start justify-between gap-4 mb-4">
+            <div>
+              <h3 className="text-lg font-semibold text-white">Create New Crew</h3>
+              <p className="text-sm text-slate-400 mt-1">Spin up a new syndicate without leaving the command surface.</p>
+            </div>
+            <div className="rounded-full border border-brand-400/20 bg-brand-400/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-brand-200">
+              Quick Deploy
+            </div>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="md:col-span-2">
-                <label className="block text-sm font-medium text-slate-700 mb-1">Crew Name</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Crew Name</label>
                 <input
                 type="text"
                 placeholder="e.g. Marketing Team"
-                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                className="w-full px-4 py-2 border border-white/10 bg-white/[0.06] text-white rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
                 value={newCrewName}
                 onChange={(e) => setNewCrewName(e.target.value)}
                 />
             </div>
 
             <div className="md:col-span-2">
-                <label className="block text-sm font-medium text-slate-700 mb-1">Description</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Description</label>
                 <input
                 type="text"
                 placeholder="Brief description for MCP/API users"
-                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                className="w-full px-4 py-2 border border-white/10 bg-white/[0.06] text-white rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
                 value={newCrewDescription}
                 onChange={(e) => setNewCrewDescription(e.target.value)}
                 />
             </div>
             
             <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Process</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Process</label>
                 <select
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white"
+                    className="w-full px-4 py-2 border border-white/10 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white/[0.06] text-white"
                     value={newCrewProcess}
                     onChange={(e) => setNewCrewProcess(e.target.value)}
                 >
                     <option value="sequential">Sequential</option>
+                    <option value="parallel">Parallel</option>
                     <option value="hierarchical">Hierarchical</option>
                 </select>
             </div>
 
             <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Project</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Project</label>
                 <select
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white"
+                    className="w-full px-4 py-2 border border-white/10 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white/[0.06] text-white"
                     value={selectedProjectId}
                     onChange={(e) => setSelectedProjectId(e.target.value)}
                 >
@@ -1211,7 +1276,7 @@ export default function Dashboard() {
                     checked={newCrewExposed}
                     onChange={(e) => setNewCrewExposed(e.target.checked)}
                 />
-                <label htmlFor="crewExposed" className="text-sm text-slate-700">
+                <label htmlFor="crewExposed" className="text-sm text-slate-300">
                     Expose Crew via API/MCP (Publicly accessible if key is shared)
                 </label>
             </div>
@@ -1220,7 +1285,7 @@ export default function Dashboard() {
           <div className="flex justify-end gap-3 mt-4">
             <button 
               onClick={() => setIsCreating(false)}
-              className="text-slate-500 px-4 py-2 hover:text-slate-700"
+              className="text-slate-400 px-4 py-2 hover:text-slate-200"
             >
               Cancel
             </button>
@@ -1234,80 +1299,129 @@ export default function Dashboard() {
         </div>
       )}
 
+      <div className="mt-14">
         <div className="flex items-center justify-between mb-6">
-          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+          <h2 className="text-lg font-bold text-white flex items-center gap-2">
             <LayoutGrid className="text-accent-500" size={20} />
             Syndicates & Operations
           </h2>
-          <Link to="/crews" className="text-sm font-bold text-brand-600 hover:text-brand-700 transition-colors flex items-center gap-1">
+          <Link to="/crews" className="text-sm font-bold text-brand-300 hover:text-brand-200 transition-colors flex items-center gap-1">
             Browse All Crews <ArrowRight size={14} />
           </Link>
         </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {pagedCrews.map(crew => (
-          <Link 
-            key={crew.id} 
-            to={`/crew/${crew.id}`}
-            className="group glass-card p-6 rounded-2xl hover:border-brand-200 transition-all duration-300 relative overflow-hidden"
-          >
-            <div className="absolute top-0 right-0 w-32 h-32 bg-brand-50 rounded-full -mr-16 -mt-16 opacity-0 group-hover:opacity-100 transition-all duration-500" />
-            
-            <div className="flex justify-between items-start mb-6 relative z-10">
-              <div className="p-3 bg-brand-50 rounded-xl text-brand-600 transition-colors group-hover:bg-brand-500 group-hover:text-white">
-                <Users size={24} />
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-black px-2 py-1 bg-slate-100 text-slate-600 rounded-lg uppercase tracking-widest border border-slate-200">
-                  {crew.process}
-                </span>
-                {crew.is_exposed && (
-                    <span className="text-[10px] font-bold px-2 py-1 bg-purple-100 text-purple-600 rounded-full uppercase tracking-wide">
-                        MCP
-                    </span>
-                )}
-                <button
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setRunCrew(crew);
-                  }}
-                  className="p-1 text-slate-300 hover:text-indigo-600 transition-colors"
-                  title="Run Crew"
-                >
-                  <PlayCircle size={16} />
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    deleteCrew(crew.id);
-                  }}
-                  className="p-1 text-slate-300 hover:text-red-500 transition-colors"
-                >
-                  <Trash2 size={16} />
-                </button>
-              </div>
+        <div className="mb-4 panel-chrome rounded-2xl p-3">
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-[minmax(0,1.4fr)_repeat(2,minmax(0,0.8fr))_auto]">
+            <div className="flex items-center gap-2 border border-slate-200 rounded-xl px-3 py-2 bg-white/80">
+              <Clock3 size={15} className="text-slate-400" />
+              <input
+                value={crewQuery}
+                onChange={(e) => setCrewQuery(e.target.value)}
+                className="w-full bg-transparent text-sm outline-none text-slate-700 placeholder:text-slate-400"
+                placeholder="Filter crews by name, process, or exposure..."
+              />
             </div>
-            <h3 className="text-xl font-semibold text-slate-900 mb-2">{crew.name}</h3>
-            <p className="text-slate-500 text-sm mb-4">Click to manage agents and tasks for this crew.</p>
-            <div className="flex items-center text-indigo-600 text-sm font-medium">
-              Manage Crew <ArrowRight size={16} className="ml-1 group-hover:translate-x-1 transition-transform" />
-            </div>
-          </Link>
-        ))}
-        
-      {crews.length === 0 && !isCreating && (
-          <div className="col-span-full text-center py-12 bg-slate-50 rounded-xl border border-dashed border-slate-300">
-            <p className="text-slate-500">No crews created yet. Start by creating one!</p>
+            <select
+              value={crewProcessFilter}
+              onChange={(e) => setCrewProcessFilter(e.target.value as 'all' | 'sequential' | 'hierarchical' | 'parallel')}
+              className="rounded-xl border border-slate-200 bg-white/80 px-3 py-2 text-sm text-slate-700"
+            >
+              <option value="all">All Process</option>
+              <option value="sequential">Sequential</option>
+              <option value="hierarchical">Hierarchical</option>
+              <option value="parallel">Parallel</option>
+            </select>
+            <select
+              value={crewExposureFilter}
+              onChange={(e) => setCrewExposureFilter(e.target.value as 'all' | 'exposed' | 'private')}
+              className="rounded-xl border border-slate-200 bg-white/80 px-3 py-2 text-sm text-slate-700"
+            >
+              <option value="all">All Exposure</option>
+              <option value="exposed">Exposed</option>
+              <option value="private">Private</option>
+            </select>
+            <button
+              type="button"
+              disabled={!hasCrewFilters}
+              onClick={() => {
+                setCrewQuery('');
+                setCrewProcessFilter('all');
+                setCrewExposureFilter('all');
+              }}
+              className="rounded-xl border border-slate-200 bg-white/80 px-3 py-2 text-sm font-semibold text-slate-600 disabled:opacity-45"
+            >
+              Reset
+            </button>
           </div>
-        )}
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {pagedCrews.map(crew => (
+            <Link 
+              key={crew.id} 
+              to={`/crew/${crew.id}`}
+              className="group relative overflow-hidden rounded-[1.75rem] border border-white/10 bg-slate-950/88 p-6 shadow-[0_18px_65px_rgba(15,23,42,0.42)] backdrop-blur-xl transition-all duration-300 hover:border-brand-300/40 hover:bg-slate-950/94"
+            >
+              <div className="absolute inset-x-0 top-0 h-24 bg-[radial-gradient(circle_at_top_right,rgba(96,165,250,0.2),transparent_60%)] opacity-90" />
+              <div className="absolute -right-10 top-4 h-28 w-28 rounded-full border border-white/10 bg-white/5 blur-xl" />
+              
+              <div className="relative z-10">
+                <div className="flex justify-between items-start mb-6">
+                  <div className="rounded-2xl border border-brand-300/20 bg-brand-500/12 p-3 text-brand-100 transition-colors group-hover:bg-brand-500/20">
+                    <Users size={24} />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-slate-200">
+                      {crew.process}
+                    </span>
+                    {crew.is_exposed && (
+                      <span className="rounded-full border border-violet-400/30 bg-violet-500/15 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.2em] text-violet-100">
+                        MCP
+                      </span>
+                    )}
+                    <button
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setRunCrew(crew);
+                      }}
+                      className="rounded-lg p-1 text-slate-400 transition-colors hover:text-brand-200"
+                      title="Run Crew"
+                    >
+                      <PlayCircle size={16} />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        deleteCrew(crew.id);
+                      }}
+                      className="rounded-lg p-1 text-slate-400 transition-colors hover:text-rose-300"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                </div>
+                <h3 className="mb-2 text-xl font-semibold text-white">{crew.name}</h3>
+                <p className="mb-4 text-sm text-slate-400">Click to manage agents, execution flow, and delegated operations for this crew.</p>
+                <div className="flex items-center text-sm font-medium text-brand-300">
+                  Manage Crew <ArrowRight size={16} className="ml-1 transition-transform group-hover:translate-x-1" />
+                </div>
+              </div>
+            </Link>
+          ))}
+          
+          {filteredCrews.length === 0 && !isCreating && (
+            <div className="col-span-full rounded-[1.75rem] border border-dashed border-white/10 bg-slate-950/72 py-12 text-center">
+              <p className="text-slate-400">{crews.length === 0 ? 'No crews created yet. Start by creating one!' : 'No crews match the current filter.'}</p>
+            </div>
+          )}
+        </div>
       </div>
       <div className="mt-6">
         <Pagination
           page={crewsPage}
           pageSize={crewsPageSize}
-          total={crews.length}
+          total={filteredCrews.length}
           onPageChange={setCrewsPage}
           onPageSizeChange={setCrewsPageSize}
         />
@@ -1318,21 +1432,62 @@ export default function Dashboard() {
       )}
 
       <div className="mt-16">
-        <h2 className="text-xl font-bold text-slate-900 mb-6 flex items-center gap-2">
+        <h2 className="text-xl font-bold text-slate-900 mb-3 flex items-center gap-2">
             <div className="p-2 bg-accent-50 rounded-lg text-accent-600">
               <Activity size={20} />
             </div>
             Operation Streams
         </h2>
-        <div className="glass-card rounded-2xl overflow-hidden">
-            {recentExecutions.length === 0 ? (
+        <div className="mb-4 panel-chrome rounded-2xl p-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-2 border border-slate-200 rounded-xl px-3 py-2 bg-white/80 w-full sm:max-w-md">
+            <Search size={15} className="text-slate-400" />
+            <input
+              value={executionQuery}
+              onChange={(e) => setExecutionQuery(e.target.value)}
+              className="w-full bg-transparent text-sm outline-none text-slate-700 placeholder:text-slate-400"
+              placeholder="Filter execution streams..."
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              value={executionStatusFilter}
+              onChange={(e) => setExecutionStatusFilter(e.target.value as 'all' | 'running' | 'completed' | 'failed' | 'canceled')}
+              className="rounded-xl border border-slate-200 bg-white/80 px-3 py-2 text-sm text-slate-700"
+            >
+              <option value="all">All Status</option>
+              <option value="running">Running</option>
+              <option value="completed">Completed</option>
+              <option value="failed">Failed</option>
+              <option value="canceled">Canceled</option>
+            </select>
+            <button
+              type="button"
+              disabled={!hasExecutionFilters}
+              onClick={() => {
+                setExecutionQuery('');
+                setExecutionStatusFilter('all');
+              }}
+              className="rounded-xl border border-slate-200 bg-white/80 px-3 py-2 text-sm font-semibold text-slate-600 disabled:opacity-45"
+            >
+              Reset
+            </button>
+          </div>
+          <Link
+            to="/agent-executions"
+            className="text-sm font-semibold text-indigo-700 hover:text-indigo-900"
+          >
+            Browse All Agent Executions
+          </Link>
+        </div>
+        <div className={`${dashboardOperatorPanel} overflow-hidden p-0`}>
+            {filteredExecutions.length === 0 ? (
                 <div className="p-8 text-center text-slate-500">
-                    No recent activity found.
+                    {recentExecutions.length === 0 ? 'No recent activity found.' : 'No executions match the current filter.'}
                 </div>
             ) : (
                 <div className="overflow-x-auto">
-                    <table className="w-full text-sm text-left text-slate-600">
-                        <thead className="bg-slate-50 text-slate-700 font-medium border-b border-slate-200">
+                    <table className="w-full text-sm text-left text-slate-300">
+                        <thead className="bg-white/[0.06] text-slate-200 font-medium border-b border-white/10">
                             <tr>
                                 <th className="px-6 py-4">Agent</th>
                                 <th className="px-6 py-4">Time</th>
@@ -1341,26 +1496,26 @@ export default function Dashboard() {
                                 <th className="px-6 py-4 text-right">Cost</th>
                             </tr>
                         </thead>
-                        <tbody className="divide-y divide-slate-100">
+                        <tbody className="divide-y divide-white/10">
                             {pagedExecutions.map(exec => (
                                 <tr 
                                     key={exec.id} 
-                                    className="hover:bg-slate-50 transition-colors cursor-pointer"
+                                    className="hover:bg-white/[0.05] transition-colors cursor-pointer"
                                     onClick={() => setSelectedExecution(exec)}
                                 >
-                                    <td className="px-6 py-4 font-medium text-slate-900 flex items-center gap-2">
-                                        <div className="w-6 h-6 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center text-xs">
+                                    <td className="px-6 py-4 font-medium text-white flex items-center gap-2">
+                                        <div className="w-6 h-6 rounded-full bg-indigo-500/20 text-indigo-200 flex items-center justify-center text-xs">
                                             <Brain size={14} />
                                         </div>
                                         {exec.agent_name}
                                     </td>
-                                    <td className="px-6 py-4 text-slate-500">
+                                    <td className="px-6 py-4 text-slate-400">
                                         {exec.created_at ? new Date(exec.created_at).toLocaleString() : '—'}
                                     </td>
-                                    <td className="px-6 py-4 text-right font-mono text-slate-600">
+                                    <td className="px-6 py-4 text-right font-mono text-slate-300">
                                         {(exec.prompt_tokens || 0).toLocaleString()}
                                     </td>
-                                    <td className="px-6 py-4 text-right font-mono text-slate-600">
+                                    <td className="px-6 py-4 text-right font-mono text-slate-300">
                                         {(exec.completion_tokens || 0).toLocaleString()}
                                     </td>
                                     <td className="px-6 py-4 text-right font-mono font-medium text-emerald-600">
@@ -1376,7 +1531,7 @@ export default function Dashboard() {
                 <Pagination
                     page={execPage}
                     pageSize={execPageSize}
-                    total={recentExecutions.length}
+                    total={filteredExecutions.length}
                     onPageChange={setExecPage}
                     onPageSizeChange={setExecPageSize}
                 />
@@ -1440,6 +1595,12 @@ export default function Dashboard() {
                 </div>
                 
                 <div className="p-6 border-t border-slate-100 bg-slate-50 rounded-b-xl flex justify-end">
+                    <Link
+                        to={`/agent-executions/${selectedExecution.id}`}
+                        className="px-4 py-2 mr-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium"
+                    >
+                        Open Full Timeline
+                    </Link>
                     <button 
                         onClick={() => setSelectedExecution(null)}
                         className="px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 font-medium"

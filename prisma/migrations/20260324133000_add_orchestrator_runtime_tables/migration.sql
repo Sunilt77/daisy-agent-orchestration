@@ -24,6 +24,9 @@ CREATE TABLE "orchestrator_job_queue" (
     "status" TEXT NOT NULL DEFAULT 'pending',
     "result" TEXT,
     "error" TEXT,
+    "priority" INTEGER NOT NULL DEFAULT 100,
+    "ready_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "tenant_key" TEXT NOT NULL DEFAULT 'global',
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "started_at" TIMESTAMP(3),
     "finished_at" TIMESTAMP(3),
@@ -131,6 +134,8 @@ CREATE INDEX "orchestrator_agent_executions_agent_id_idx" ON "orchestrator_agent
 CREATE INDEX "orchestrator_agent_executions_status_idx" ON "orchestrator_agent_executions"("status");
 CREATE INDEX "orchestrator_agent_executions_parent_execution_id_idx" ON "orchestrator_agent_executions"("parent_execution_id");
 CREATE INDEX "orchestrator_job_queue_status_idx" ON "orchestrator_job_queue"("status");
+CREATE INDEX "orchestrator_job_queue_status_ready_priority_idx" ON "orchestrator_job_queue"("status", "ready_at", "priority" DESC, "id");
+CREATE INDEX "orchestrator_job_queue_status_ready_tenant_priority_idx" ON "orchestrator_job_queue"("status", "ready_at", "tenant_key", "priority" DESC, "id");
 CREATE INDEX "orchestrator_agent_delegations_parent_execution_id_idx" ON "orchestrator_agent_delegations"("parent_execution_id");
 CREATE INDEX "orchestrator_agent_delegations_agent_id_idx" ON "orchestrator_agent_delegations"("agent_id");
 CREATE INDEX "orchestrator_agent_delegations_child_execution_id_idx" ON "orchestrator_agent_delegations"("child_execution_id");

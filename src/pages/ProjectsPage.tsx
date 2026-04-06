@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Folder, Plus, Trash2, DollarSign, Layers, Users, Link2, Loader2, ExternalLink, Check } from 'lucide-react';
+import { Folder, Plus, Trash2, DollarSign, Layers, Users, Link2, Loader2, ExternalLink, Check, Search } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import Pagination from '../components/Pagination';
 
@@ -38,6 +38,8 @@ export default function ProjectsPage() {
   const [isCreatingPlatformProject, setIsCreatingPlatformProject] = useState(false);
   const [projectsPage, setProjectsPage] = useState(1);
   const [projectsPageSize, setProjectsPageSize] = useState(8);
+  const [search, setSearch] = useState('');
+  const [projectFilter, setProjectFilter] = useState<'all' | 'linked' | 'unlinked' | 'ingest-target' | 'has-crews'>('all');
 
   useEffect(() => {
     fetchProjects();
@@ -47,12 +49,36 @@ export default function ProjectsPage() {
 
   useEffect(() => {
     setProjectsPage(1);
-  }, [projects.length]);
+  }, [projects.length, search, projectFilter]);
+
+  const filteredProjects = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return projects.filter((project) => {
+      const linkedPlatformId = platformLinks[project.id];
+      const isSelectedForIngest = !!linkedPlatformId && !!ingestProjectId && linkedPlatformId === ingestProjectId;
+      if (projectFilter === 'linked' && !linkedPlatformId) return false;
+      if (projectFilter === 'unlinked' && linkedPlatformId) return false;
+      if (projectFilter === 'ingest-target' && !isSelectedForIngest) return false;
+      if (projectFilter === 'has-crews' && project.crews_count <= 0) return false;
+      if (!query) return true;
+      const haystack = [project.name, project.description || ''].join(' ').toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [projects, platformLinks, ingestProjectId, search, projectFilter]);
 
   const pagedProjects = useMemo(() => {
     const start = (projectsPage - 1) * projectsPageSize;
-    return projects.slice(start, start + projectsPageSize);
-  }, [projects, projectsPage, projectsPageSize]);
+    return filteredProjects.slice(start, start + projectsPageSize);
+  }, [filteredProjects, projectsPage, projectsPageSize]);
+
+  const projectInsights = useMemo(() => {
+    return {
+      totalProjects: projects.length,
+      totalCrews: projects.reduce((sum, project) => sum + project.crews_count, 0),
+      totalAgents: projects.reduce((sum, project) => sum + project.agents_count, 0),
+      totalCost: projects.reduce((sum, project) => sum + project.total_cost, 0),
+    };
+  }, [projects]);
 
   const fetchProjects = () => {
     fetch('/api/projects', { cache: 'no-store' })
@@ -174,18 +200,78 @@ export default function ProjectsPage() {
 
   return (
     <div>
-      <div className="flex justify-between items-center mb-8">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900">Projects</h1>
-          <p className="text-slate-500 mt-1">Organize your crews into projects</p>
+      <div className="swarm-hero p-6 mb-8">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="text-3xl font-black text-white">Projects</h1>
+            <p className="text-slate-300 mt-1">Group agents, crews, traces, and platform links into clear project spaces.</p>
+          </div>
+          <button
+            onClick={() => setIsCreating((prev) => !prev)}
+            className="bg-white/10 hover:bg-white/15 text-white px-4 py-2 rounded-xl flex items-center gap-2 transition-colors border border-white/10"
+          >
+            <Plus size={18} />
+            {isCreating ? 'Close Builder' : 'New Project'}
+          </button>
         </div>
-        <button 
-          onClick={() => setIsCreating(true)}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
-        >
-          <Plus size={18} />
-          New Project
-        </button>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-4 mt-6">
+          {[
+            { label: 'Projects', value: projectInsights.totalProjects },
+            { label: 'Crews', value: projectInsights.totalCrews },
+            { label: 'Agents', value: projectInsights.totalAgents },
+            { label: 'Tracked Cost', value: `$${projectInsights.totalCost.toFixed(2)}` },
+          ].map((item) => (
+            <div key={item.label} className="telemetry-tile p-4">
+              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">{item.label}</div>
+              <div className="mt-2 text-3xl font-black text-white">{item.value}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="relative w-full max-w-md">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full rounded-xl border border-slate-300 bg-white pl-10 pr-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+              placeholder="Search projects by name or description..."
+            />
+          </div>
+          <div className="text-xs text-slate-500">
+            <span className="font-semibold text-slate-700">{filteredProjects.length}</span> visible of <span className="font-semibold text-slate-700">{projects.length}</span>
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {[
+            { key: 'all', label: 'All' },
+            { key: 'linked', label: 'Linked' },
+            { key: 'unlinked', label: 'Unlinked' },
+            { key: 'ingest-target', label: 'Ingestion Target' },
+            { key: 'has-crews', label: 'Has Crews' },
+          ].map((chip) => (
+            <button
+              key={chip.key}
+              onClick={() => setProjectFilter(chip.key as typeof projectFilter)}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                projectFilter === chip.key
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+          <button
+            onClick={() => { setProjectFilter('all'); setSearch(''); }}
+            disabled={projectFilter === 'all' && !search.trim()}
+            className="ml-auto rounded-full px-3 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:hover:bg-white"
+          >
+            Reset
+          </button>
+        </div>
       </div>
 
       {isCreating && (
@@ -266,7 +352,7 @@ export default function ProjectsPage() {
             </div>
             
             <h3 className="text-xl font-semibold text-slate-900 mb-1">{project.name}</h3>
-            <p className="text-sm text-slate-500 mb-4 line-clamp-2 h-10">{project.description || "No description provided."}</p>
+            <p className="text-sm text-slate-500 mb-4 line-clamp-2 h-10">{project.description || "No description."}</p>
             
             <div className="flex items-center gap-4 text-sm text-slate-600 mb-4 bg-slate-50 p-3 rounded-lg">
                 <div className="flex items-center gap-1.5" title="Crews">
@@ -308,24 +394,37 @@ export default function ProjectsPage() {
                 )}
               </div>
             </div>
-
-            {/* In a real app, this would link to a filtered view of crews */}
-            <div className="text-xs text-slate-400 italic">
-                Manage crews in Dashboard
-            </div>
           </div>
         )})}
         
         {projects.length === 0 && !isCreating && (
           <div className="col-span-full text-center py-12 bg-slate-50 rounded-xl border border-dashed border-slate-300">
             <p className="text-slate-500">No projects created yet.</p>
+            <button
+              onClick={() => setIsCreating(true)}
+              className="mt-4 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+            >
+              <Plus size={16} />
+              Create Project
+            </button>
+          </div>
+        )}
+        {projects.length > 0 && filteredProjects.length === 0 && (
+          <div className="col-span-full text-center py-12 bg-slate-50 rounded-xl border border-dashed border-slate-300">
+            <p className="text-slate-500">No projects match the current filters.</p>
+            <button
+              onClick={() => { setProjectFilter('all'); setSearch(''); }}
+              className="mt-4 inline-flex items-center gap-2 rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-900"
+            >
+              Clear Filters
+            </button>
           </div>
         )}
         <div className="col-span-full">
           <Pagination
             page={projectsPage}
             pageSize={projectsPageSize}
-            total={projects.length}
+            total={filteredProjects.length}
             onPageChange={setProjectsPage}
             onPageSizeChange={setProjectsPageSize}
           />

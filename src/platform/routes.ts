@@ -2,7 +2,7 @@ import type { Express, Request, Response, NextFunction } from 'express';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
-import { getPrisma } from './prisma';
+import { ensurePrismaReady, getPrisma } from './prisma';
 import { asHttpError, HttpError } from './httpErrors';
 import { clearSessionCookie, getSessionDays, hashPassword, requireUser, setSessionCookie, verifyPassword } from './auth';
 import { createProjectApiKey, verifyProjectApiKey } from './apiKeys';
@@ -82,6 +82,11 @@ type AccessControlsStore = {
   tenants: Record<string, AccessPolicy>;
 };
 
+type EmbeddingConfig = {
+  provider: 'google' | 'openai' | 'anthropic';
+  model: string;
+};
+
 const DEFAULT_PLATFORM_SETTINGS = {
   daily_message_cap: 1000,
   batch_size: 50,
@@ -106,7 +111,8 @@ function getJsonSetting<T>(key: string, fallback: T): T {
 }
 
 async function setJsonSetting<T>(key: string, value: T) {
-  await getPrisma().orchestratorSetting.upsert({
+  const prisma = await ensurePrismaReady();
+  await prisma.orchestratorSetting.upsert({
     where: { key },
     update: { value: JSON.stringify(value) },
     create: { key, value: JSON.stringify(value) },
@@ -122,9 +128,53 @@ function getPlatformSettings() {
   };
 }
 
+async function reclaimUserSessionSlot(userId: string, maxActiveSessionsPerUser: number): Promise<void> {
+  if (!Number.isFinite(maxActiveSessionsPerUser) || maxActiveSessionsPerUser <= 0) return;
+
+  const prisma = getPrisma();
+  const now = new Date();
+  const keepCount = Math.max(maxActiveSessionsPerUser - 1, 0);
+  const activeSessions = await prisma.session.findMany({
+    where: { userId, revokedAt: null, expiresAt: { gt: now } },
+    orderBy: { createdAt: 'asc' },
+    select: { id: true },
+  });
+
+  const revokeCount = activeSessions.length - keepCount;
+  if (revokeCount <= 0) return;
+
+  const sessionIdsToRevoke = activeSessions.slice(0, revokeCount).map((s) => s.id);
+  await prisma.session.updateMany({
+    where: { id: { in: sessionIdsToRevoke }, revokedAt: null },
+    data: { revokedAt: now },
+  });
+}
+
 function sanitizeIdList(input: any): number[] {
   if (!Array.isArray(input)) return [];
   return Array.from(new Set(input.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0)));
+}
+
+function resolveDefaultEmbeddingConfig(): EmbeddingConfig {
+  const googleEnvKey = (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || '').trim();
+  if (googleEnvKey) {
+    return { provider: 'google', model: 'text-embedding-004' };
+  }
+  const openaiEnvKey = (process.env.OPENAI_API_KEY || '').trim();
+  if (openaiEnvKey) {
+    return { provider: 'openai', model: 'text-embedding-3-small' };
+  }
+
+  try {
+    const provider = db.prepare(
+      'SELECT provider FROM llm_providers WHERE COALESCE(TRIM(api_key), \'\') <> \'\' ORDER BY is_default DESC, id ASC LIMIT 1',
+    ).get() as any;
+    const value = String(provider?.provider || '').toLowerCase();
+    if (value === 'google') return { provider: 'google', model: 'text-embedding-004' };
+    if (value === 'openai') return { provider: 'openai', model: 'text-embedding-3-small' };
+  } catch {}
+
+  throw new HttpError(400, 'No embedding provider key configured. Set GOOGLE_API_KEY (or GEMINI_API_KEY) or OPENAI_API_KEY.');
 }
 
 function normalizeAccessPolicy(input: any, fallback?: AccessPolicy): AccessPolicy {
@@ -268,7 +318,17 @@ async function getTenantUsageMap(orgIds: string[], prisma: ReturnType<typeof get
 
   if (!orgIds.length) return map;
 
-  const linkRows = db.prepare('SELECT project_id, platform_project_id FROM project_links').all() as Array<{ project_id: number; platform_project_id: string }>;
+  const linkRows = db.prepare(`
+    SELECT id as project_id, platform_project_id
+    FROM projects
+    WHERE platform_project_id IS NOT NULL AND platform_project_id != ''
+    UNION
+    SELECT project_id, platform_project_id
+    FROM project_links
+    WHERE project_id NOT IN (
+      SELECT id FROM projects WHERE platform_project_id IS NOT NULL AND platform_project_id != ''
+    )
+  `).all() as Array<{ project_id: number; platform_project_id: string }>;
   const platformProjectIds = Array.from(new Set(linkRows.map((r) => String(r.platform_project_id)).filter(Boolean)));
   const platformProjects = platformProjectIds.length
     ? await prisma.project.findMany({ where: { id: { in: platformProjectIds } }, select: { id: true, orgId: true } })
@@ -531,6 +591,38 @@ function mergeRunMaxMetricsTags(existingTags: any, delta: MaxMetricsDelta) {
   return base;
 }
 
+async function resolveUserProjectId(
+  prisma: ReturnType<typeof getPrisma>,
+  orgId: string,
+  requestedProjectId: string,
+): Promise<string> {
+  const raw = String(requestedProjectId || '').trim();
+  if (!raw) throw new HttpError(400, 'projectId is required');
+
+  const directProject = await prisma.project.findFirst({
+    where: { id: raw, orgId },
+    select: { id: true },
+  });
+  if (directProject) return directProject.id;
+
+  const orchestratorId = Number(raw);
+  if (Number.isFinite(orchestratorId) && orchestratorId > 0) {
+    const localProject = await prisma.orchestratorProject.findUnique({
+      where: { id: orchestratorId },
+      select: { platformProjectId: true },
+    });
+    if (localProject?.platformProjectId) {
+      const mappedProject = await prisma.project.findFirst({
+        where: { id: localProject.platformProjectId, orgId },
+        select: { id: true },
+      });
+      if (mappedProject) return mappedProject.id;
+    }
+  }
+
+  throw new HttpError(404, 'Project not found');
+}
+
 export function registerPlatformRoutes(app: Express) {
   const router = express.Router();
   const prisma = getPrisma();
@@ -591,6 +683,10 @@ export function registerPlatformRoutes(app: Express) {
       }
 
       const policy = await getResolvedOrgPolicy(user.orgId);
+      if (policy.max_active_sessions_per_user && policy.max_active_sessions_per_user > 0) {
+        // Keep session limits strict while avoiding permanent lockout when a client fails to call /logout.
+        await reclaimUserSessionSlot(user.id, policy.max_active_sessions_per_user);
+      }
       if (policy.max_active_sessions_org && policy.max_active_sessions_org > 0) {
         const orgActiveSessions = await prisma.session.count({
           where: {
@@ -1197,7 +1293,17 @@ export function registerPlatformRoutes(app: Express) {
       `).all() as any[];
       const mcpBundles = db.prepare('SELECT id, name, slug FROM mcp_bundles ORDER BY name ASC').all() as any[];
       const agents = db.prepare('SELECT id, name, project_id FROM agents ORDER BY name ASC').all() as any[];
-      const links = db.prepare('SELECT project_id, platform_project_id FROM project_links').all() as any[];
+      const links = db.prepare(`
+        SELECT id as project_id, platform_project_id
+        FROM projects
+        WHERE platform_project_id IS NOT NULL AND platform_project_id != ''
+        UNION
+        SELECT project_id, platform_project_id
+        FROM project_links
+        WHERE project_id NOT IN (
+          SELECT id FROM projects WHERE platform_project_id IS NOT NULL AND platform_project_id != ''
+        )
+      `).all() as any[];
       const projectMap = new Map<number, string>();
       for (const row of links) projectMap.set(Number(row.project_id), String(row.platform_project_id));
       const platformProjectIds = Array.from(new Set(Array.from(projectMap.values())));
@@ -1219,6 +1325,176 @@ export function registerPlatformRoutes(app: Express) {
           })),
         },
       });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  router.get('/api/admin/learning-insights', requireUser, async (req, res, next) => {
+    try {
+      requirePlatformAdmin(req);
+      const agents = db.prepare('SELECT id, name FROM agents').all() as Array<{ id: number; name: string }>;
+      const crews = db.prepare('SELECT id, name FROM crews').all() as Array<{ id: number; name: string }>;
+      const workflows = db.prepare('SELECT id, name FROM workflows').all() as Array<{ id: number; name: string }>;
+      const agentNameById = new Map(agents.map((row) => [Number(row.id), row.name]));
+      const crewNameById = new Map(crews.map((row) => [Number(row.id), row.name]));
+      const workflowNameById = new Map(workflows.map((row) => [Number(row.id), row.name]));
+
+      const agentLessons = db.prepare(`
+        SELECT id, agent_id, user_id, lesson_kind, task_signature, guidance, weight, source_feedback_id, updated_at
+        FROM agent_learning_lessons
+        ORDER BY datetime(updated_at) DESC
+        LIMIT 50
+      `).all() as any[];
+      const agentFeedback = db.prepare(`
+        SELECT id, execution_id, agent_id, user_id, rating, solved, feedback_text, task_signature, tool_sequence, created_at
+        FROM run_feedback
+        ORDER BY datetime(created_at) DESC
+        LIMIT 50
+      `).all() as any[];
+      const crewFeedback = db.prepare(`
+        SELECT id, execution_id, crew_id, user_id, rating, solved, feedback_text, created_at
+        FROM crew_run_feedback
+        ORDER BY datetime(created_at) DESC
+        LIMIT 50
+      `).all() as any[];
+      const workflowFeedback = db.prepare(`
+        SELECT id, workflow_run_id, workflow_id, user_id, rating, solved, feedback_text, created_at
+        FROM workflow_run_feedback
+        ORDER BY datetime(created_at) DESC
+        LIMIT 50
+      `).all() as any[];
+      const preferences = db.prepare(`
+        SELECT user_id, agent_id, preference_text, updated_at
+        FROM user_agent_preferences
+        ORDER BY datetime(updated_at) DESC
+        LIMIT 50
+      `).all() as any[];
+      const learningSettings = db.prepare(`
+        SELECT resource_type, resource_id, enabled, updated_at
+        FROM entity_learning_settings
+        ORDER BY datetime(updated_at) DESC
+        LIMIT 100
+      `).all() as any[];
+
+      const disabledCounts = learningSettings.reduce(
+        (acc, row) => {
+          if (Number(row.enabled) === 0) {
+            if (row.resource_type === 'agent') acc.agents += 1;
+            if (row.resource_type === 'crew') acc.crews += 1;
+            if (row.resource_type === 'workflow') acc.workflows += 1;
+          }
+          return acc;
+        },
+        { agents: 0, crews: 0, workflows: 0 },
+      );
+
+      res.json({
+        summary: {
+          lessons: agentLessons.length,
+          feedback_rows: agentFeedback.length + crewFeedback.length + workflowFeedback.length,
+          preferences: preferences.length,
+          disabled_counts: disabledCounts,
+        },
+        settings: learningSettings,
+        agent_lessons: agentLessons.map((row) => ({
+          ...row,
+          agent_name: agentNameById.get(Number(row.agent_id)) || `Agent ${row.agent_id}`,
+        })),
+        agent_feedback: agentFeedback.map((row) => ({
+          ...row,
+          agent_name: agentNameById.get(Number(row.agent_id)) || `Agent ${row.agent_id}`,
+        })),
+        crew_feedback: crewFeedback.map((row) => ({
+          ...row,
+          crew_name: crewNameById.get(Number(row.crew_id)) || `Crew ${row.crew_id}`,
+        })),
+        workflow_feedback: workflowFeedback.map((row) => ({
+          ...row,
+          workflow_name: workflowNameById.get(Number(row.workflow_id)) || `Workflow ${row.workflow_id}`,
+        })),
+        preferences: preferences.map((row) => ({
+          ...row,
+          agent_name: agentNameById.get(Number(row.agent_id)) || `Agent ${row.agent_id}`,
+        })),
+      });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  router.delete('/api/admin/learning-insights/agent-lessons/:id', requireUser, async (req, res, next) => {
+    try {
+      requirePlatformAdmin(req);
+      const result = db.prepare('DELETE FROM agent_learning_lessons WHERE id = ?').run(String(req.params.id));
+      if (!result.changes) throw new HttpError(404, 'Learning lesson not found');
+      res.json({ success: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  router.delete('/api/admin/learning-insights/agent-feedback/:id', requireUser, async (req, res, next) => {
+    try {
+      requirePlatformAdmin(req);
+      const result = db.prepare('DELETE FROM run_feedback WHERE id = ?').run(String(req.params.id));
+      if (!result.changes) throw new HttpError(404, 'Feedback entry not found');
+      res.json({ success: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  router.delete('/api/admin/learning-insights/crew-feedback/:id', requireUser, async (req, res, next) => {
+    try {
+      requirePlatformAdmin(req);
+      const result = db.prepare('DELETE FROM crew_run_feedback WHERE id = ?').run(String(req.params.id));
+      if (!result.changes) throw new HttpError(404, 'Crew feedback entry not found');
+      res.json({ success: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  router.delete('/api/admin/learning-insights/workflow-feedback/:id', requireUser, async (req, res, next) => {
+    try {
+      requirePlatformAdmin(req);
+      const result = db.prepare('DELETE FROM workflow_run_feedback WHERE id = ?').run(String(req.params.id));
+      if (!result.changes) throw new HttpError(404, 'Workflow feedback entry not found');
+      res.json({ success: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  router.delete('/api/admin/learning-insights/entity/:resourceType/:resourceId', requireUser, async (req, res, next) => {
+    try {
+      requirePlatformAdmin(req);
+      const resourceType = String(req.params.resourceType);
+      const resourceId = Number(req.params.resourceId);
+      if (!Number.isFinite(resourceId) || resourceId <= 0) throw new HttpError(400, 'Invalid resource id');
+
+      if (resourceType === 'agent') {
+        const lessonsDeleted = db.prepare('DELETE FROM agent_learning_lessons WHERE agent_id = ?').run(resourceId).changes;
+        const feedbackDeleted = db.prepare('DELETE FROM run_feedback WHERE agent_id = ?').run(resourceId).changes;
+        const prefsDeleted = db.prepare('DELETE FROM user_agent_preferences WHERE agent_id = ?').run(resourceId).changes;
+        const settingsDeleted = db.prepare("DELETE FROM entity_learning_settings WHERE resource_type = 'agent' AND resource_id = ?").run(resourceId).changes;
+        return res.json({ success: true, deleted: { lessons: lessonsDeleted, feedback: feedbackDeleted, preferences: prefsDeleted, settings: settingsDeleted } });
+      }
+
+      if (resourceType === 'crew') {
+        const feedbackDeleted = db.prepare('DELETE FROM crew_run_feedback WHERE crew_id = ?').run(resourceId).changes;
+        const settingsDeleted = db.prepare("DELETE FROM entity_learning_settings WHERE resource_type = 'crew' AND resource_id = ?").run(resourceId).changes;
+        return res.json({ success: true, deleted: { feedback: feedbackDeleted, settings: settingsDeleted } });
+      }
+
+      if (resourceType === 'workflow') {
+        const feedbackDeleted = db.prepare('DELETE FROM workflow_run_feedback WHERE workflow_id = ?').run(resourceId).changes;
+        const settingsDeleted = db.prepare("DELETE FROM entity_learning_settings WHERE resource_type = 'workflow' AND resource_id = ?").run(resourceId).changes;
+        return res.json({ success: true, deleted: { feedback: feedbackDeleted, settings: settingsDeleted } });
+      }
+
+      throw new HttpError(400, 'Unsupported resource type');
     } catch (e) {
       next(e);
     }
@@ -1510,7 +1786,8 @@ export function registerPlatformRoutes(app: Express) {
 
       const where: any = { project: { orgId: user.orgId } };
       if (projectId) {
-        where.projectId = projectId;
+        const resolvedProjectId = await resolveUserProjectId(prisma, user.orgId, String(projectId));
+        where.projectId = resolvedProjectId;
       }
 
       const documents = await prisma.document.findMany({
@@ -1529,13 +1806,7 @@ export function registerPlatformRoutes(app: Express) {
       const user = req.user!;
       const { projectId } = req.body;
 
-      if (!projectId) throw new HttpError(400, 'projectId is required');
-
-      // Verify project belongs to user's org
-      const project = await prisma.project.findFirst({
-        where: { id: projectId, orgId: user.orgId }
-      });
-      if (!project) throw new HttpError(404, 'Project not found');
+      const resolvedProjectId = await resolveUserProjectId(prisma, user.orgId, String(projectId || ''));
 
       // Handle file upload
       const multer = (await import('multer')).default();
@@ -1551,15 +1822,17 @@ export function registerPlatformRoutes(app: Express) {
 
         // Get or create default index for project
         let index = await prisma.knowledgebaseIndex.findFirst({
-          where: { projectId, name: 'Default Index' }
+          where: { projectId: resolvedProjectId, name: 'Default Index' }
         });
 
         if (!index) {
           const { createKnowledgebaseIndex } = await import('../utils/documentProcessing.js');
-          const indexId = await createKnowledgebaseIndex(projectId, 'Default Index', 'Default knowledgebase index', {
-            provider: 'google',
-            model: 'text-embedding-004'
-          });
+          const indexId = await createKnowledgebaseIndex(
+            resolvedProjectId,
+            'Default Index',
+            'Default knowledgebase index',
+            resolveDefaultEmbeddingConfig(),
+          );
           index = await prisma.knowledgebaseIndex.findUnique({ where: { id: indexId } });
         }
 
@@ -1567,7 +1840,7 @@ export function registerPlatformRoutes(app: Express) {
 
         // Process document
         const docId = await processDocument(
-          projectId,
+          resolvedProjectId,
           file.path,
           {
             name: req.body.name || file.originalname,
@@ -1612,7 +1885,8 @@ export function registerPlatformRoutes(app: Express) {
 
       const where: any = { project: { orgId: user.orgId } };
       if (projectId) {
-        where.projectId = projectId;
+        const resolvedProjectId = await resolveUserProjectId(prisma, user.orgId, String(projectId));
+        where.projectId = resolvedProjectId;
       }
 
       const indexes = await prisma.knowledgebaseIndex.findMany({
@@ -1620,7 +1894,31 @@ export function registerPlatformRoutes(app: Express) {
         include: { project: { select: { name: true } } },
         orderBy: { createdAt: 'desc' }
       });
-      res.json(indexes);
+      const projectIds = Array.from(new Set(indexes.map((index) => String(index.projectId)).filter(Boolean)));
+      const statsByProject: Record<string, { documentCount: number; chunkCount: number; totalSize: number }> = {};
+      if (projectIds.length > 0) {
+        const docs = await prisma.document.findMany({
+          where: { projectId: { in: projectIds } },
+          select: {
+            projectId: true,
+            fileSize: true,
+            _count: { select: { chunks: true } },
+          },
+        });
+        for (const doc of docs) {
+          const key = String(doc.projectId);
+          const bucket = statsByProject[key] || { documentCount: 0, chunkCount: 0, totalSize: 0 };
+          bucket.documentCount += 1;
+          bucket.chunkCount += Number(doc._count?.chunks || 0);
+          bucket.totalSize += Number(doc.fileSize || 0);
+          statsByProject[key] = bucket;
+        }
+      }
+
+      res.json(indexes.map((index) => ({
+        ...index,
+        stats: statsByProject[String(index.projectId)] || { documentCount: 0, chunkCount: 0, totalSize: 0 },
+      })));
     } catch (e) {
       next(e);
     }
@@ -1631,19 +1929,10 @@ export function registerPlatformRoutes(app: Express) {
       const user = req.user!;
       const { projectId, name, description } = req.body;
 
-      if (!projectId) throw new HttpError(400, 'projectId is required');
-
-      // Verify project belongs to user's org
-      const project = await prisma.project.findFirst({
-        where: { id: projectId, orgId: user.orgId }
-      });
-      if (!project) throw new HttpError(404, 'Project not found');
+      const resolvedProjectId = await resolveUserProjectId(prisma, user.orgId, String(projectId || ''));
 
       const { createKnowledgebaseIndex } = await import('../utils/documentProcessing.js');
-      const indexId = await createKnowledgebaseIndex(projectId, name, description, {
-        provider: 'google',
-        model: 'text-embedding-004'
-      });
+      const indexId = await createKnowledgebaseIndex(resolvedProjectId, name, description, resolveDefaultEmbeddingConfig());
 
       res.json({ id: indexId });
     } catch (e) {
@@ -1673,4 +1962,13 @@ async function requireUserOptional(req: Request, _res: Response, next: NextFunct
   } catch (e) {
     next(e);
   }
+}
+
+function handleHttpErrors(app: Express) {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+    const httpError = asHttpError(err);
+    console.error('Platform API error:', err); // Added for debugging
+    res.status(httpError.status).json({ error: httpError.message });
+  });
 }

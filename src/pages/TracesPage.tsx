@@ -1,7 +1,30 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Activity, BarChart3, Bot, Clock3, DollarSign, Filter, MessageSquare, Search, TrendingUp, Wrench, X } from 'lucide-react';
+import { Activity, BarChart3, Bot, Clock3, DollarSign, Filter, MessageSquare, Search, TrendingUp, Wrench, X, RotateCcw, CalendarClock } from 'lucide-react';
 import Pagination from '../components/Pagination';
+
+function formatToolTraceName(rawName?: string | null) {
+  const raw = String(rawName || '').trim();
+  if (!raw) return 'Unknown tool';
+  const normalized = raw.replace(/-/g, '_');
+  const bundleSplitIndex = normalized.indexOf('_tool_');
+  if (bundleSplitIndex >= 0) {
+    let bundleName = normalized.slice(0, bundleSplitIndex);
+    let toolName = normalized.slice(bundleSplitIndex + 6);
+    bundleName = bundleName.replace(/^mcp_bundle_/, '').replace(/^bundle_/, '').replace(/_bundle$/, '');
+    toolName = toolName.replace(/^tool_/, '').replace(/^npm_/, '').replace(/_mcp_server_/, '_').replace(/_mcp_/, '_');
+    const bundlePrefix = bundleName.replace(/_mcp$/, '');
+    if (bundlePrefix && toolName.startsWith(bundlePrefix + '_')) {
+      toolName = toolName.slice(bundlePrefix.length + 1);
+    }
+    return `${bundleName} / ${toolName}`;
+  }
+  return normalized
+    .replace(/^mcp_bundle_/, '')
+    .replace(/^bundle_/, '')
+    .replace(/^mcp_/, '')
+    .replace(/^tool_/, '');
+}
 import { loadPersisted, savePersisted } from '../utils/persistence';
 
 type LocalProject = { id: number; name: string; description?: string; created_at?: string };
@@ -176,10 +199,31 @@ export default function TracesPage() {
   const [localToolPageSize, setLocalToolPageSize] = useState(10);
   const [stateReady, setStateReady] = useState(false);
 
+  const applyQuickRange = (hours: number) => {
+    const now = new Date();
+    const start = new Date(now.getTime() - hours * 60 * 60 * 1000);
+    const asLocalInput = (value: Date) => {
+      const pad = (n: number) => String(n).padStart(2, '0');
+      return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}T${pad(value.getHours())}:${pad(value.getMinutes())}`;
+    };
+    setFrom(asLocalInput(start));
+    setTo(asLocalInput(now));
+  };
+
+  const resetFilters = () => {
+    setQ('');
+    setStatus('');
+    setKind('');
+    setFrom('');
+    setTo('');
+  };
+  const hasTraceFilters = Boolean(q || status || kind || from || to);
+
   useEffect(() => {
     const persisted = loadPersisted<any>(TRACES_UI_KEY, {});
     if (persisted && typeof persisted === 'object') {
-      if (typeof persisted.localProjectId === 'number') setLocalProjectId(persisted.localProjectId);
+      // Always default to "All" project on first load.
+      setLocalProjectId(null);
       if (persisted.viewMode === 'platform' || persisted.viewMode === 'local-agent' || persisted.viewMode === 'local-tool') setViewMode(persisted.viewMode);
       if (typeof persisted.q === 'string') setQ(persisted.q);
       if (typeof persisted.status === 'string') setStatus(persisted.status);
@@ -207,8 +251,11 @@ export default function TracesPage() {
     const res = await fetch('/api/projects', { cache: 'no-store' });
     if (!res.ok) return;
     const data = await res.json().catch(() => []);
-    setProjects(Array.isArray(data) ? data : []);
-    if (localProjectId == null && Array.isArray(data) && data.length) setLocalProjectId(data[0].id);
+    const list = Array.isArray(data) ? data : [];
+    setProjects(list);
+    if (localProjectId != null && !list.some((project: LocalProject) => Number(project.id) === Number(localProjectId))) {
+      setLocalProjectId(null);
+    }
   };
 
   const loadPlatformLink = async (pid: number) => {
@@ -343,26 +390,46 @@ export default function TracesPage() {
 
   useEffect(() => {
     setLocalPage(1);
-  }, [localTraces.length, localProjectId]);
+  }, [localTraces.length, localProjectId, q]);
 
   useEffect(() => {
     setLocalToolPage(1);
-  }, [localToolTraces.length, localProjectId]);
+  }, [localToolTraces.length, localProjectId, q, status]);
 
   const pagedRuns = useMemo(() => {
     const start = (runsPage - 1) * runsPageSize;
     return runs.slice(start, start + runsPageSize);
   }, [runs, runsPage, runsPageSize]);
 
+  const localFilteredTraces = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    if (!query) return localTraces;
+    return localTraces.filter((trace) =>
+      [trace.agent_name, trace.agent_role, trace.input, trace.output, trace.created_at]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query))
+    );
+  }, [localTraces, q]);
+  const localFilteredToolTraces = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    return localToolTraces.filter((trace) => {
+      const matchesQuery = !query || [trace.tool_name, trace.tool_type, trace.agent_name, trace.args, trace.result, trace.error]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query));
+      const matchesStatus = !status || String(trace.status || '').toLowerCase() === String(status || '').toLowerCase();
+      return matchesQuery && matchesStatus;
+    });
+  }, [localToolTraces, q, status]);
+
   const pagedLocalTraces = useMemo(() => {
     const start = (localPage - 1) * localPageSize;
-    return localTraces.slice(start, start + localPageSize);
-  }, [localTraces, localPage, localPageSize]);
+    return localFilteredTraces.slice(start, start + localPageSize);
+  }, [localFilteredTraces, localPage, localPageSize]);
 
   const pagedLocalToolTraces = useMemo(() => {
     const start = (localToolPage - 1) * localToolPageSize;
-    return localToolTraces.slice(start, start + localToolPageSize);
-  }, [localToolTraces, localToolPage, localToolPageSize]);
+    return localFilteredToolTraces.slice(start, start + localToolPageSize);
+  }, [localFilteredToolTraces, localToolPage, localToolPageSize]);
 
   useEffect(() => {
     if (!platformProjectId) {
@@ -482,18 +549,8 @@ export default function TracesPage() {
       <div className="swarm-hero p-6 mb-6">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-              <Activity size={12} />
-              Observability Fabric
-            </div>
             <h1 className="text-3xl font-black text-white">Traces</h1>
             <p className="text-slate-300 mt-1 max-w-3xl">{activeSummary.title}. {activeSummary.subtitle}</p>
-          </div>
-          <div className="hidden lg:flex min-w-[260px] flex-col rounded-3xl border border-white/10 bg-slate-950/30 p-4">
-            <div className="text-[11px] uppercase tracking-[0.24em] text-slate-400">Pulse Stream</div>
-            <div className="mt-3">
-              <SparkBars values={activeSummary.bars} />
-            </div>
           </div>
         </div>
         <div className="mt-6 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -509,29 +566,32 @@ export default function TracesPage() {
         </div>
       </div>
 
-      <div className="mb-4 flex items-center gap-2">
+      <div className="mb-4 panel-chrome rounded-2xl p-2 flex items-center gap-2 flex-wrap">
         <button
           onClick={() => setViewMode('platform')}
           disabled={!platformProjectId}
-          className={`px-3 py-2 rounded-lg text-sm font-medium border ${viewMode === 'platform' ? 'bg-indigo-50 border-indigo-200 text-indigo-800' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'} ${!platformProjectId ? 'opacity-60 cursor-not-allowed' : ''}`}
+          className={`px-3 py-2 rounded-xl text-sm font-semibold border inline-flex items-center gap-2 ${viewMode === 'platform' ? 'bg-indigo-50 border-indigo-200 text-indigo-800' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'} ${!platformProjectId ? 'opacity-60 cursor-not-allowed' : ''}`}
         >
+          <Activity size={14} />
           Platform Runs
         </button>
         <button
           onClick={() => setViewMode('local-agent')}
-          className={`px-3 py-2 rounded-lg text-sm font-medium border ${viewMode === 'local-agent' ? 'bg-indigo-50 border-indigo-200 text-indigo-800' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
+          className={`px-3 py-2 rounded-xl text-sm font-semibold border inline-flex items-center gap-2 ${viewMode === 'local-agent' ? 'bg-indigo-50 border-indigo-200 text-indigo-800' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
         >
+          <Bot size={14} />
           Local Agent Traces
         </button>
         <button
           onClick={() => setViewMode('local-tool')}
-          className={`px-3 py-2 rounded-lg text-sm font-medium border ${viewMode === 'local-tool' ? 'bg-indigo-50 border-indigo-200 text-indigo-800' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
+          className={`px-3 py-2 rounded-xl text-sm font-semibold border inline-flex items-center gap-2 ${viewMode === 'local-tool' ? 'bg-indigo-50 border-indigo-200 text-indigo-800' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
         >
+          <Wrench size={14} />
           Local Tool Traces
         </button>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-xl p-4 mb-6">
+      <div className="panel-chrome rounded-2xl p-4 mb-6">
         <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
           <div className="md:col-span-3">
             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Project</label>
@@ -540,7 +600,7 @@ export default function TracesPage() {
               onChange={(e) => setLocalProjectId(e.target.value ? Number(e.target.value) : null)}
               className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white"
             >
-              <option value="">Choose…</option>
+              <option value="">All</option>
               {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           </div>
@@ -584,7 +644,7 @@ export default function TracesPage() {
             </select>
           </div>
 
-          <div className="md:col-span-12 flex justify-between items-center">
+          <div className="md:col-span-12 flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
             <div className="text-xs text-slate-500">
               {selectedProject ? (
                 platformProjectId ? (
@@ -594,29 +654,35 @@ export default function TracesPage() {
                 )
               ) : 'Select a project.'}
             </div>
-            <button
-              onClick={() => {
-                if (!selectedProject) return;
-                if (viewMode === 'local-agent') {
-                  loadLocalTraces();
-                  return;
-                }
-                if (viewMode === 'local-tool') {
-                  loadLocalToolTraces();
-                  return;
-                }
-                if (!platformProjectId) {
-                  setRunsError('Project not linked to platform traces. Link it from Projects.');
-                  return;
-                }
-                loadRuns();
-                loadInsights();
-              }}
-              disabled={!selectedProject}
-              className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white px-4 py-2 rounded-lg text-sm font-medium"
-            >
-              <Filter size={16} /> Apply
-            </button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button type="button" onClick={() => applyQuickRange(24)} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1"><CalendarClock size={12} />24h</button>
+              <button type="button" onClick={() => applyQuickRange(72)} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50">3d</button>
+              <button type="button" onClick={() => applyQuickRange(168)} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50">7d</button>
+              <button type="button" onClick={resetFilters} disabled={!hasTraceFilters} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1 disabled:opacity-45"><RotateCcw size={12} />Reset</button>
+              <button
+                onClick={() => {
+                  if (!selectedProject) return;
+                  if (viewMode === 'local-agent') {
+                    loadLocalTraces();
+                    return;
+                  }
+                  if (viewMode === 'local-tool') {
+                    loadLocalToolTraces();
+                    return;
+                  }
+                  if (!platformProjectId) {
+                    setRunsError('Project not linked to platform traces. Link it from Projects.');
+                    return;
+                  }
+                  loadRuns();
+                  loadInsights();
+                }}
+                disabled={!selectedProject}
+                className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white px-4 py-2 rounded-lg text-sm font-semibold"
+              >
+                <Filter size={16} /> Apply
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -834,7 +900,7 @@ export default function TracesPage() {
               <tbody>
                 {localToolLoading ? (
                   <tr className="border-t border-slate-100"><td className="px-4 py-6 text-center text-slate-500" colSpan={5}>Loading local tool traces...</td></tr>
-                ) : localToolTraces.length === 0 ? (
+                ) : localFilteredToolTraces.length === 0 ? (
                   <tr className="border-t border-slate-100"><td className="px-4 py-6 text-center text-slate-500" colSpan={5}>No local tool traces found for this project.</td></tr>
                 ) : (
                   pagedLocalToolTraces.map((t) => (
@@ -844,7 +910,7 @@ export default function TracesPage() {
                       className="border-t border-slate-100 hover:bg-slate-50 cursor-pointer"
                     >
                       <td className="px-4 py-3">
-                        <div className="font-medium text-slate-900">{t.tool_name}</div>
+                        <div className="font-medium text-slate-900">{formatToolTraceName(t.tool_name)}</div>
                         <div className="text-xs text-slate-400 uppercase">{t.tool_type || 'custom'}</div>
                       </td>
                       <td className="px-4 py-3">
@@ -877,7 +943,7 @@ export default function TracesPage() {
               <tbody>
                 {localLoading ? (
                   <tr className="border-t border-slate-100"><td className="px-4 py-6 text-center text-slate-500" colSpan={5}>Loading local traces...</td></tr>
-                ) : localTraces.length === 0 ? (
+                ) : localFilteredTraces.length === 0 ? (
                   <tr className="border-t border-slate-100"><td className="px-4 py-6 text-center text-slate-500" colSpan={5}>No local traces found for this project.</td></tr>
                 ) : (
                   pagedLocalTraces.map((t) => (
@@ -919,7 +985,7 @@ export default function TracesPage() {
             <Pagination
               page={localToolPage}
               pageSize={localToolPageSize}
-              total={localToolTraces.length}
+              total={localFilteredToolTraces.length}
               onPageChange={setLocalToolPage}
               onPageSizeChange={setLocalToolPageSize}
             />
@@ -927,7 +993,7 @@ export default function TracesPage() {
             <Pagination
               page={localPage}
               pageSize={localPageSize}
-              total={localTraces.length}
+              total={localFilteredTraces.length}
               onPageChange={setLocalPage}
               onPageSizeChange={setLocalPageSize}
             />
@@ -1014,7 +1080,7 @@ export default function TracesPage() {
             </div>
             <div className="p-6 overflow-y-auto space-y-6">
               <div className="flex flex-wrap items-center gap-3 text-sm text-slate-500 bg-slate-50 p-3 rounded-lg border border-slate-100">
-                <span className="font-semibold text-slate-800">{selectedToolTrace.tool_name}</span>
+                <span className="font-semibold text-slate-800">{formatToolTraceName(selectedToolTrace.tool_name)}</span>
                 <span className="text-slate-300">|</span>
                 <span className="px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded text-xs font-bold uppercase">{selectedToolTrace.tool_type || 'custom'}</span>
                 <span className="text-slate-300">|</span>

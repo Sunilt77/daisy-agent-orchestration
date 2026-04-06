@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Activity, AlertTriangle, Building2, KeyRound, MessageSquare, RefreshCw, Save, Search, ShieldCheck, Users, Zap } from 'lucide-react';
+import { Activity, AlertTriangle, Building2, KeyRound, MessageSquare, RefreshCw, RotateCcw, Save, Search, ShieldCheck, Users, Zap } from 'lucide-react';
 import Pagination from '../components/Pagination';
 
 type AdminStats = {
@@ -119,6 +119,93 @@ type Settings = {
   max_active_sessions_org: number;
 };
 
+type LearningSummary = {
+  lessons: number;
+  feedback_rows: number;
+  preferences: number;
+  disabled_counts: {
+    agents: number;
+    crews: number;
+    workflows: number;
+  };
+};
+
+type LearningSettingRow = {
+  resource_type: 'agent' | 'crew' | 'workflow';
+  resource_id: number;
+  enabled: number;
+  updated_at: string;
+};
+
+type LearningLessonRow = {
+  id: string;
+  agent_id: number;
+  agent_name: string;
+  user_id: string;
+  lesson_kind: string;
+  task_signature: string | null;
+  guidance: string;
+  weight: number;
+  source_feedback_id?: string | null;
+  updated_at: string;
+};
+
+type AgentFeedbackRow = {
+  id: string;
+  execution_id: string;
+  agent_id: number;
+  agent_name: string;
+  user_id: string;
+  rating: 'helpful' | 'improve';
+  solved: number;
+  feedback_text?: string | null;
+  task_signature?: string | null;
+  tool_sequence?: string | null;
+  created_at: string;
+};
+
+type CrewFeedbackRow = {
+  id: string;
+  execution_id: string;
+  crew_id: number;
+  crew_name: string;
+  user_id: string;
+  rating: 'helpful' | 'improve';
+  solved: number;
+  feedback_text?: string | null;
+  created_at: string;
+};
+
+type WorkflowFeedbackRow = {
+  id: string;
+  workflow_run_id: string;
+  workflow_id: number;
+  workflow_name: string;
+  user_id: string;
+  rating: 'helpful' | 'improve';
+  solved: number;
+  feedback_text?: string | null;
+  created_at: string;
+};
+
+type LearningPreferenceRow = {
+  user_id: string;
+  agent_id: number;
+  agent_name: string;
+  preference_text: string;
+  updated_at: string;
+};
+
+type LearningInsightsResponse = {
+  summary: LearningSummary;
+  settings: LearningSettingRow[];
+  agent_lessons: LearningLessonRow[];
+  agent_feedback: AgentFeedbackRow[];
+  crew_feedback: CrewFeedbackRow[];
+  workflow_feedback: WorkflowFeedbackRow[];
+  preferences: LearningPreferenceRow[];
+};
+
 const DEFAULT_SETTINGS: Settings = {
   daily_message_cap: 1,
   batch_size: 1,
@@ -181,8 +268,11 @@ export default function PlatformPage() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [tenantStatusFilter, setTenantStatusFilter] = useState<'all' | 'active' | 'suspended'>('all');
   const [tenantPage, setTenantPage] = useState(1);
   const [tenantPageSize, setTenantPageSize] = useState(8);
+  const [userSearch, setUserSearch] = useState('');
+  const [userSessionFilter, setUserSessionFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [userPage, setUserPage] = useState(1);
   const [userPageSize, setUserPageSize] = useState(8);
   const [newPassword, setNewPassword] = useState<Record<string, string>>({});
@@ -199,9 +289,22 @@ export default function PlatformPage() {
   const [tenantAccessDraft, setTenantAccessDraft] = useState<AccessPolicy>({ agents_mode: 'all', tools_mode: 'all', mcp_mode: 'all', allowed_agent_ids: [], allowed_tool_ids: [], allowed_mcp_tool_ids: [], allowed_mcp_bundle_ids: [] });
   const [selectedTenant, setSelectedTenant] = useState<string>('');
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
+  const [planSearch, setPlanSearch] = useState('');
+  const [planStatusFilter, setPlanStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [planForm, setPlanForm] = useState<Omit<Plan, 'id'>>(EMPTY_PLAN);
   const [tenantPolicyTenantId, setTenantPolicyTenantId] = useState<string>('');
   const [tenantPolicyDraft, setTenantPolicyDraft] = useState<Record<string, string>>({});
+  const [learningInsights, setLearningInsights] = useState<LearningInsightsResponse>({
+    summary: { lessons: 0, feedback_rows: 0, preferences: 0, disabled_counts: { agents: 0, crews: 0, workflows: 0 } },
+    settings: [],
+    agent_lessons: [],
+    agent_feedback: [],
+    crew_feedback: [],
+    workflow_feedback: [],
+    preferences: [],
+  });
+  const [learningSearch, setLearningSearch] = useState('');
+  const [learningScope, setLearningScope] = useState<'all' | 'agent' | 'crew' | 'workflow'>('all');
 
   const notify = (type: 'success' | 'error', message: string) => {
     setNotice({ type, message });
@@ -221,12 +324,13 @@ export default function PlatformPage() {
   const fetchAll = async () => {
     setLoading(true);
     try {
-      const [statsRes, tenantsRes, usersRes, plansRes, settingsRes] = await Promise.all([
+      const [statsRes, tenantsRes, usersRes, plansRes, settingsRes, learningRes] = await Promise.all([
         requestJson('/api/admin/stats'),
         requestJson('/api/admin/tenants'),
         requestJson('/api/admin/users'),
         requestJson('/api/admin/plans'),
         requestJson('/api/admin/settings'),
+        requestJson('/api/admin/learning-insights'),
       ]);
       const accessRes = await requestJson('/api/admin/access-controls');
       setStats(statsRes);
@@ -234,6 +338,7 @@ export default function PlatformPage() {
       setUsers(Array.isArray(usersRes) ? usersRes : []);
       setPlans(Array.isArray(plansRes) ? plansRes : []);
       setSettings(settingsRes || DEFAULT_SETTINGS);
+      setLearningInsights(learningRes || {});
       setAccessControls(accessRes);
       setGlobalAccessDraft(accessRes?.global || {});
     } catch (e: any) {
@@ -252,21 +357,42 @@ export default function PlatformPage() {
     hydrateTenantPolicyDraft(tenantPolicyTenantId);
   }, [tenantPolicyTenantId, tenants]);
 
+  useEffect(() => {
+    setTenantPage(1);
+  }, [searchTerm, tenantStatusFilter, tenants.length]);
+
+  useEffect(() => {
+    setUserPage(1);
+  }, [userSearch, userSessionFilter, users.length]);
+
   const filteredTenants = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
-    if (!q) return tenants;
-    return tenants.filter((t) => t.name.toLowerCase().includes(q) || t.id.toLowerCase().includes(q));
-  }, [tenants, searchTerm]);
+    return tenants.filter((t) => {
+      if (tenantStatusFilter !== 'all' && t.status !== tenantStatusFilter) return false;
+      if (!q) return true;
+      return t.name.toLowerCase().includes(q) || t.id.toLowerCase().includes(q);
+    });
+  }, [tenants, searchTerm, tenantStatusFilter]);
 
   const pagedTenants = useMemo(() => {
     const start = (tenantPage - 1) * tenantPageSize;
     return filteredTenants.slice(start, start + tenantPageSize);
   }, [filteredTenants, tenantPage, tenantPageSize]);
 
+  const filteredUsers = useMemo(() => {
+    const q = userSearch.trim().toLowerCase();
+    return users.filter((u) => {
+      if (userSessionFilter === 'active' && Number(u.active_sessions || 0) <= 0) return false;
+      if (userSessionFilter === 'inactive' && Number(u.active_sessions || 0) > 0) return false;
+      if (!q) return true;
+      return [u.email, u.org_name, u.id].some((value) => String(value || '').toLowerCase().includes(q));
+    });
+  }, [users, userSearch, userSessionFilter]);
+
   const pagedUsers = useMemo(() => {
     const start = (userPage - 1) * userPageSize;
-    return users.slice(start, start + userPageSize);
-  }, [users, userPage, userPageSize]);
+    return filteredUsers.slice(start, start + userPageSize);
+  }, [filteredUsers, userPage, userPageSize]);
 
   const insightMetrics = useMemo(() => {
     const activeUsers = Number(stats.active_users || 0);
@@ -517,21 +643,109 @@ export default function PlatformPage() {
     }
   };
 
+  const removeLearningItem = async (
+    scope: 'agent-lessons' | 'agent-feedback' | 'crew-feedback' | 'workflow-feedback',
+    id: string,
+  ) => {
+    try {
+      await requestJson(`/api/admin/learning-insights/${scope}/${id}`, { method: 'DELETE' });
+      notify('success', 'Learning record removed');
+      await fetchAll();
+    } catch (e: any) {
+      notify('error', e.message || 'Failed to remove learning record');
+    }
+  };
+
+  const clearLearningEntity = async (resourceType: 'agent' | 'crew' | 'workflow', resourceId: number) => {
+    try {
+      await requestJson(`/api/admin/learning-insights/entity/${resourceType}/${resourceId}`, { method: 'DELETE' });
+      notify('success', `${resourceType} learning history cleared`);
+      await fetchAll();
+    } catch (e: any) {
+      notify('error', e.message || 'Failed to clear entity learning history');
+    }
+  };
+
+  const learningStatusText = (enabled: number) => (Number(enabled) === 0 ? 'Disabled' : 'Enabled');
+  const learningQuery = learningSearch.trim().toLowerCase();
+  const filteredAgentLessons = useMemo(() => {
+    return learningInsights.agent_lessons.filter((row) => {
+      if (learningScope !== 'all' && learningScope !== 'agent') return false;
+      if (!learningQuery) return true;
+      return [row.agent_name, row.user_id, row.lesson_kind, row.guidance, row.task_signature || ''].some((value) =>
+        String(value).toLowerCase().includes(learningQuery),
+      );
+    });
+  }, [learningInsights.agent_lessons, learningQuery, learningScope]);
+
+  const filteredAgentFeedback = useMemo(() => {
+    return learningInsights.agent_feedback.filter((row) => {
+      if (learningScope !== 'all' && learningScope !== 'agent') return false;
+      if (!learningQuery) return true;
+      return [row.agent_name, row.user_id, row.feedback_text || '', row.task_signature || '', row.rating].some((value) =>
+        String(value).toLowerCase().includes(learningQuery),
+      );
+    });
+  }, [learningInsights.agent_feedback, learningQuery, learningScope]);
+
+  const filteredCrewFeedback = useMemo(() => {
+    return learningInsights.crew_feedback.filter((row) => {
+      if (learningScope !== 'all' && learningScope !== 'crew') return false;
+      if (!learningQuery) return true;
+      return [row.crew_name, row.user_id, row.feedback_text || '', row.rating].some((value) =>
+        String(value).toLowerCase().includes(learningQuery),
+      );
+    });
+  }, [learningInsights.crew_feedback, learningQuery, learningScope]);
+
+  const filteredWorkflowFeedback = useMemo(() => {
+    return learningInsights.workflow_feedback.filter((row) => {
+      if (learningScope !== 'all' && learningScope !== 'workflow') return false;
+      if (!learningQuery) return true;
+      return [row.workflow_name, row.user_id, row.feedback_text || '', row.rating].some((value) =>
+        String(value).toLowerCase().includes(learningQuery),
+      );
+    });
+  }, [learningInsights.workflow_feedback, learningQuery, learningScope]);
+
+  const filteredPreferences = useMemo(() => {
+    return learningInsights.preferences.filter((row) => {
+      if (learningScope !== 'all' && learningScope !== 'agent') return false;
+      if (!learningQuery) return true;
+      return [row.agent_name, row.user_id, row.preference_text].some((value) =>
+        String(value).toLowerCase().includes(learningQuery),
+      );
+    });
+  }, [learningInsights.preferences, learningQuery, learningScope]);
+
+  const filteredPlans = useMemo(() => {
+    const q = planSearch.trim().toLowerCase();
+    return plans.filter((plan) => {
+      const isActive = plan.is_active !== false;
+      if (planStatusFilter === 'active' && !isActive) return false;
+      if (planStatusFilter === 'inactive' && isActive) return false;
+      if (!q) return true;
+      return [plan.name, plan.description || '', plan.id].some((value) => String(value || '').toLowerCase().includes(q));
+    });
+  }, [plans, planSearch, planStatusFilter]);
+
   return (
     <div className="space-y-7">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-3xl font-black tracking-tight text-slate-900">Platform Administration</h1>
-          <p className="text-slate-500 mt-1">Control tenants, users, plans, session limits, and usage governance.</p>
+      <div className="swarm-hero p-6">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="text-3xl font-black text-white">Platform Administration</h1>
+            <p className="text-slate-300 mt-1">Control tenants, users, plans, access policies, and usage ceilings from one command surface.</p>
+          </div>
+          <button
+            onClick={fetchAll}
+            disabled={loading}
+            className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-semibold text-white hover:bg-white/15 disabled:opacity-60"
+          >
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            {loading ? 'Refreshing...' : 'Refresh Metrics'}
+          </button>
         </div>
-        <button
-          onClick={fetchAll}
-          disabled={loading}
-          className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
-        >
-          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-          {loading ? 'Refreshing...' : 'Refresh Metrics'}
-        </button>
       </div>
 
       {notice && (
@@ -589,82 +803,26 @@ export default function PlatformPage() {
         ))}
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-2xl p-5">
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="min-w-[220px]">
+      <details className="bg-white border border-slate-200 rounded-2xl p-5 group">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+          <div>
             <div className="text-sm font-bold text-slate-900">Global Session/Usage Limits</div>
             <div className="text-xs text-slate-500">Defaults applied to all orgs unless overridden by plan.</div>
           </div>
-          <input
-            type="number"
-            className="ui-input w-48"
-            value={settings.daily_message_cap}
-            onChange={(e) => setSettings((s) => ({ ...s, daily_message_cap: Number(e.target.value || 0) }))}
-            placeholder="Daily cap"
-          />
-          <input
-            type="number"
-            className="ui-input w-40"
-            value={settings.batch_size}
-            onChange={(e) => setSettings((s) => ({ ...s, batch_size: Number(e.target.value || 0) }))}
-            placeholder="Batch size"
-          />
-          <input
-            type="number"
-            className="ui-input w-52"
-            value={settings.rate_limit_per_second}
-            onChange={(e) => setSettings((s) => ({ ...s, rate_limit_per_second: Number(e.target.value || 0) }))}
-            placeholder="Rate/sec"
-          />
-          <input
-            type="number"
-            className="ui-input w-40"
-            value={settings.max_agents}
-            onChange={(e) => setSettings((s) => ({ ...s, max_agents: Number(e.target.value || 0) }))}
-            placeholder="Max agents"
-          />
-          <input
-            type="number"
-            className="ui-input w-40"
-            value={settings.max_crews}
-            onChange={(e) => setSettings((s) => ({ ...s, max_crews: Number(e.target.value || 0) }))}
-            placeholder="Max crews"
-          />
-          <input
-            type="number"
-            className="ui-input w-44"
-            value={settings.max_linked_tools}
-            onChange={(e) => setSettings((s) => ({ ...s, max_linked_tools: Number(e.target.value || 0) }))}
-            placeholder="Max tools"
-          />
-          <input
-            type="number"
-            className="ui-input w-48"
-            value={settings.max_linked_mcp_tools}
-            onChange={(e) => setSettings((s) => ({ ...s, max_linked_mcp_tools: Number(e.target.value || 0) }))}
-            placeholder="Max MCP tools"
-          />
-          <input
-            type="number"
-            className="ui-input w-52"
-            value={settings.max_linked_mcp_bundles}
-            onChange={(e) => setSettings((s) => ({ ...s, max_linked_mcp_bundles: Number(e.target.value || 0) }))}
-            placeholder="Max MCP bundles"
-          />
-          <input
-            type="number"
-            className="ui-input w-56"
-            value={settings.max_active_sessions_per_user}
-            onChange={(e) => setSettings((s) => ({ ...s, max_active_sessions_per_user: Number(e.target.value || 0) }))}
-            placeholder="Sessions per user"
-          />
-          <input
-            type="number"
-            className="ui-input w-52"
-            value={settings.max_active_sessions_org}
-            onChange={(e) => setSettings((s) => ({ ...s, max_active_sessions_org: Number(e.target.value || 0) }))}
-            placeholder="Sessions per org"
-          />
+          <span className="text-xs font-semibold text-slate-600 group-open:hidden">Show limits</span>
+          <span className="text-xs font-semibold text-slate-600 hidden group-open:inline">Hide limits</span>
+        </summary>
+        <div className="mt-4 flex flex-wrap items-end gap-3">
+          <input type="number" className="ui-input w-48" value={settings.daily_message_cap} onChange={(e) => setSettings((s) => ({ ...s, daily_message_cap: Number(e.target.value || 0) }))} placeholder="Daily cap" />
+          <input type="number" className="ui-input w-40" value={settings.batch_size} onChange={(e) => setSettings((s) => ({ ...s, batch_size: Number(e.target.value || 0) }))} placeholder="Batch size" />
+          <input type="number" className="ui-input w-52" value={settings.rate_limit_per_second} onChange={(e) => setSettings((s) => ({ ...s, rate_limit_per_second: Number(e.target.value || 0) }))} placeholder="Rate/sec" />
+          <input type="number" className="ui-input w-40" value={settings.max_agents} onChange={(e) => setSettings((s) => ({ ...s, max_agents: Number(e.target.value || 0) }))} placeholder="Max agents" />
+          <input type="number" className="ui-input w-40" value={settings.max_crews} onChange={(e) => setSettings((s) => ({ ...s, max_crews: Number(e.target.value || 0) }))} placeholder="Max crews" />
+          <input type="number" className="ui-input w-44" value={settings.max_linked_tools} onChange={(e) => setSettings((s) => ({ ...s, max_linked_tools: Number(e.target.value || 0) }))} placeholder="Max tools" />
+          <input type="number" className="ui-input w-48" value={settings.max_linked_mcp_tools} onChange={(e) => setSettings((s) => ({ ...s, max_linked_mcp_tools: Number(e.target.value || 0) }))} placeholder="Max MCP tools" />
+          <input type="number" className="ui-input w-52" value={settings.max_linked_mcp_bundles} onChange={(e) => setSettings((s) => ({ ...s, max_linked_mcp_bundles: Number(e.target.value || 0) }))} placeholder="Max MCP bundles" />
+          <input type="number" className="ui-input w-56" value={settings.max_active_sessions_per_user} onChange={(e) => setSettings((s) => ({ ...s, max_active_sessions_per_user: Number(e.target.value || 0) }))} placeholder="Sessions per user" />
+          <input type="number" className="ui-input w-52" value={settings.max_active_sessions_org} onChange={(e) => setSettings((s) => ({ ...s, max_active_sessions_org: Number(e.target.value || 0) }))} placeholder="Sessions per org" />
           <button
             onClick={saveSettings}
             disabled={savingSettings}
@@ -674,14 +832,18 @@ export default function PlatformPage() {
             {savingSettings ? 'Saving...' : 'Save'}
           </button>
         </div>
-      </div>
+      </details>
 
-      <div className="bg-white border border-slate-200 rounded-2xl p-5">
-        <div className="flex items-center justify-between gap-3 mb-3">
+      <details className="bg-white border border-slate-200 rounded-2xl p-5 group">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 mb-3">
           <div>
             <h3 className="text-lg font-black text-slate-900">Global Access Controls</h3>
-            <p className="text-xs text-slate-500">Control global visibility/usage of agents, tools, and MCP resources.</p>
+            <p className="text-xs text-slate-500">Control global visibility and usage of agents, tools, and MCP resources.</p>
           </div>
+          <span className="text-xs font-semibold text-slate-600 group-open:hidden">Show policy</span>
+          <span className="text-xs font-semibold text-slate-600 hidden group-open:inline">Hide policy</span>
+        </summary>
+        <div className="flex items-center justify-end mb-3">
           <button onClick={saveGlobalAccessControls} className="bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-4 py-2 text-sm font-bold">
             Save Access Policy
           </button>
@@ -771,7 +933,7 @@ export default function PlatformPage() {
             </div>
           </div>
         )}
-      </div>
+      </details>
 
       <div className="bg-white border border-slate-200 rounded-2xl p-5">
         <div className="flex items-center gap-2 mb-3">
@@ -797,6 +959,223 @@ export default function PlatformPage() {
         )}
       </div>
 
+      <details className="bg-white border border-slate-200 rounded-2xl p-5 group" open>
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+          <div>
+            <h3 className="text-lg font-black text-slate-900">Learning Insights</h3>
+            <p className="text-xs text-slate-500">Inspect lessons learned from feedback, review recent corrections, and clear stale or misleading guidance.</p>
+          </div>
+          <span className="text-xs font-semibold text-slate-600 group-open:hidden">Show insights</span>
+          <span className="text-xs font-semibold text-slate-600 hidden group-open:inline">Hide insights</span>
+        </summary>
+        <div className="mt-4 space-y-4">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            {[
+              { label: 'Saved Lessons', value: learningInsights.summary.lessons },
+              { label: 'Feedback Rows', value: learningInsights.summary.feedback_rows },
+              { label: 'User Preferences', value: learningInsights.summary.preferences },
+              { label: 'Learning Disabled', value: learningInsights.summary.disabled_counts.agents + learningInsights.summary.disabled_counts.crews + learningInsights.summary.disabled_counts.workflows },
+              { label: 'Overrides Tracked', value: learningInsights.settings.length },
+            ].map((card) => (
+              <div key={card.label} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-slate-500">{card.label}</div>
+                <div className="mt-2 text-2xl font-black text-slate-900">{card.value}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_220px] gap-3">
+            <input
+              value={learningSearch}
+              onChange={(e) => setLearningSearch(e.target.value)}
+              className="ui-input"
+              placeholder="Search lessons, users, agents, crews, workflows..."
+            />
+            <select className="ui-select" value={learningScope} onChange={(e) => setLearningScope(e.target.value as any)}>
+              <option value="all">All Learning Records</option>
+              <option value="agent">Agent Learning Only</option>
+              <option value="crew">Crew Learning Only</option>
+              <option value="workflow">Workflow Learning Only</option>
+            </select>
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div>
+                  <div className="text-sm font-black text-slate-900">Recent Learned Lessons</div>
+                  <div className="text-xs text-slate-500">Failure avoidance and shortest-path guidance now affecting future runs.</div>
+                </div>
+                <span className="text-xs text-slate-500">{filteredAgentLessons.length} rows</span>
+              </div>
+              <div className="space-y-3">
+                {filteredAgentLessons.length === 0 ? (
+                  <p className="text-sm text-slate-500">No lessons stored yet.</p>
+                ) : filteredAgentLessons.slice(0, 6).map((row) => (
+                  <div key={row.id} className="rounded-xl border border-slate-200 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">{row.agent_name}</div>
+                        <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">{row.lesson_kind.replace(/_/g, ' ')} • weight {row.weight}</div>
+                      </div>
+                      <button
+                        onClick={() => removeLearningItem('agent-lessons', row.id)}
+                        className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                    <div className="mt-2 text-sm text-slate-700">{row.guidance}</div>
+                    <div className="mt-2 text-[11px] text-slate-500">
+                      user {row.user_id} • {row.task_signature || 'general lesson'} • {new Date(row.updated_at).toLocaleString()}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div>
+                  <div className="text-sm font-black text-slate-900">Learning Switches</div>
+                  <div className="text-xs text-slate-500">Entity-level overrides applied on top of the default learning behavior.</div>
+                </div>
+                <span className="text-xs text-slate-500">{learningInsights.settings.length} tracked</span>
+              </div>
+              <div className="space-y-2">
+                {learningInsights.settings.length === 0 ? (
+                  <p className="text-sm text-slate-500">No entity-specific learning overrides yet.</p>
+                ) : learningInsights.settings.slice(0, 8).map((row) => (
+                  <div key={`${row.resource_type}-${row.resource_id}`} className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-900">{row.resource_type} #{row.resource_id}</div>
+                      <div className="text-[11px] text-slate-500">{new Date(row.updated_at).toLocaleString()}</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`rounded-full px-2 py-1 text-xs font-semibold ${Number(row.enabled) === 0 ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                        {learningStatusText(row.enabled)}
+                      </span>
+                      <button
+                        onClick={() => clearLearningEntity(row.resource_type, row.resource_id)}
+                        className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div className="text-sm font-black text-slate-900">Agent Feedback</div>
+                <span className="text-xs text-slate-500">{filteredAgentFeedback.length} rows</span>
+              </div>
+              <div className="space-y-3">
+                {filteredAgentFeedback.length === 0 ? (
+                  <p className="text-sm text-slate-500">No agent feedback captured yet.</p>
+                ) : filteredAgentFeedback.slice(0, 5).map((row) => (
+                  <div key={row.id} className="rounded-xl border border-slate-200 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">{row.agent_name}</div>
+                        <div className="text-[11px] text-slate-500">{row.rating} • {Number(row.solved) === 1 ? 'solved' : 'not solved'}</div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => clearLearningEntity('agent', row.agent_id)} className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-700">Clear Agent</button>
+                        <button onClick={() => removeLearningItem('agent-feedback', row.id)} className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">Delete</button>
+                      </div>
+                    </div>
+                    <div className="mt-2 text-sm text-slate-700">{row.feedback_text || 'No correction text provided.'}</div>
+                    <div className="mt-2 text-[11px] text-slate-500">user {row.user_id} • {new Date(row.created_at).toLocaleString()}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div className="text-sm font-black text-slate-900">Crew Feedback</div>
+                <span className="text-xs text-slate-500">{filteredCrewFeedback.length} rows</span>
+              </div>
+              <div className="space-y-3">
+                {filteredCrewFeedback.length === 0 ? (
+                  <p className="text-sm text-slate-500">No crew feedback captured yet.</p>
+                ) : filteredCrewFeedback.slice(0, 5).map((row) => (
+                  <div key={row.id} className="rounded-xl border border-slate-200 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">{row.crew_name}</div>
+                        <div className="text-[11px] text-slate-500">{row.rating} • {Number(row.solved) === 1 ? 'solved' : 'not solved'}</div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => clearLearningEntity('crew', row.crew_id)} className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-700">Clear Crew</button>
+                        <button onClick={() => removeLearningItem('crew-feedback', row.id)} className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">Delete</button>
+                      </div>
+                    </div>
+                    <div className="mt-2 text-sm text-slate-700">{row.feedback_text || 'No correction text provided.'}</div>
+                    <div className="mt-2 text-[11px] text-slate-500">user {row.user_id} • {new Date(row.created_at).toLocaleString()}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div className="text-sm font-black text-slate-900">Workflow Feedback</div>
+                <span className="text-xs text-slate-500">{filteredWorkflowFeedback.length} rows</span>
+              </div>
+              <div className="space-y-3">
+                {filteredWorkflowFeedback.length === 0 ? (
+                  <p className="text-sm text-slate-500">No workflow feedback captured yet.</p>
+                ) : filteredWorkflowFeedback.slice(0, 5).map((row) => (
+                  <div key={row.id} className="rounded-xl border border-slate-200 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">{row.workflow_name}</div>
+                        <div className="text-[11px] text-slate-500">{row.rating} • {Number(row.solved) === 1 ? 'solved' : 'not solved'}</div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => clearLearningEntity('workflow', row.workflow_id)} className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-700">Clear Workflow</button>
+                        <button onClick={() => removeLearningItem('workflow-feedback', row.id)} className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">Delete</button>
+                      </div>
+                    </div>
+                    <div className="mt-2 text-sm text-slate-700">{row.feedback_text || 'No correction text provided.'}</div>
+                    <div className="mt-2 text-[11px] text-slate-500">user {row.user_id} • {new Date(row.created_at).toLocaleString()}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 p-4">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <div>
+                <div className="text-sm font-black text-slate-900">Recent User Preferences</div>
+                <div className="text-xs text-slate-500">Per-user hints the platform now feeds back into later agent runs.</div>
+              </div>
+              <span className="text-xs text-slate-500">{filteredPreferences.length} rows</span>
+            </div>
+            {filteredPreferences.length === 0 ? (
+              <p className="text-sm text-slate-500">No learned user preferences yet.</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                {filteredPreferences.slice(0, 6).map((row) => (
+                  <div key={`${row.user_id}-${row.agent_id}`} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="text-sm font-semibold text-slate-900">{row.agent_name}</div>
+                    <div className="mt-1 text-sm text-slate-700">{row.preference_text}</div>
+                    <div className="mt-2 text-[11px] text-slate-500">user {row.user_id} • {new Date(row.updated_at).toLocaleString()}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </details>
+
       <div className="space-y-6">
         <div className="bg-white border border-slate-200 rounded-2xl p-5 min-h-[560px]">
           <div className="flex items-center justify-between mb-3">
@@ -808,14 +1187,39 @@ export default function PlatformPage() {
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
                 value={searchTerm}
-                onChange={(e) => {
-                  setSearchTerm(e.target.value);
-                  setTenantPage(1);
-                }}
+                onChange={(e) => setSearchTerm(e.target.value)}
                 className="w-full pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-lg"
                 placeholder="Search org..."
               />
             </div>
+          </div>
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            {[
+              { key: 'all', label: `All (${tenants.length})` },
+              { key: 'active', label: `Active (${tenants.filter((t) => t.status === 'active').length})` },
+              { key: 'suspended', label: `Suspended (${tenants.filter((t) => t.status === 'suspended').length})` },
+            ].map((chip) => (
+              <button
+                key={chip.key}
+                onClick={() => setTenantStatusFilter(chip.key as typeof tenantStatusFilter)}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                  tenantStatusFilter === chip.key ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+            <button
+              onClick={() => { setSearchTerm(''); setTenantStatusFilter('all'); }}
+              disabled={!searchTerm.trim() && tenantStatusFilter === 'all'}
+              className="ml-auto inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:hover:bg-white"
+            >
+              <RotateCcw size={11} />
+              Reset
+            </button>
+          </div>
+          <div className="mb-3 text-xs text-slate-500">
+            <span className="font-semibold text-slate-700">{filteredTenants.length}</span> visible of <span className="font-semibold text-slate-700">{tenants.length}</span>
           </div>
 
           <div className="table-shell">
@@ -958,8 +1362,49 @@ export default function PlatformPage() {
         </div>
 
         <div className="bg-white border border-slate-200 rounded-2xl p-5">
-          <h3 className="text-lg font-black text-slate-900 mb-1">Users & Password Resets</h3>
-          <p className="text-xs text-slate-500 mb-3">Reset credentials and inspect active sessions.</p>
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+            <div>
+              <h3 className="text-lg font-black text-slate-900 mb-1">Users & Password Resets</h3>
+              <p className="text-xs text-slate-500">Reset credentials and inspect active sessions.</p>
+            </div>
+            <div className="relative w-64">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                value={userSearch}
+                onChange={(e) => setUserSearch(e.target.value)}
+                className="w-full pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-lg"
+                placeholder="Search user or org..."
+              />
+            </div>
+          </div>
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            {[
+              { key: 'all', label: `All (${users.length})` },
+              { key: 'active', label: `Active Sessions (${users.filter((u) => Number(u.active_sessions || 0) > 0).length})` },
+              { key: 'inactive', label: `No Sessions (${users.filter((u) => Number(u.active_sessions || 0) <= 0).length})` },
+            ].map((chip) => (
+              <button
+                key={chip.key}
+                onClick={() => setUserSessionFilter(chip.key as typeof userSessionFilter)}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                  userSessionFilter === chip.key ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+            <button
+              onClick={() => { setUserSearch(''); setUserSessionFilter('all'); }}
+              disabled={!userSearch.trim() && userSessionFilter === 'all'}
+              className="ml-auto inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:hover:bg-white"
+            >
+              <RotateCcw size={11} />
+              Reset
+            </button>
+          </div>
+          <div className="mb-3 text-xs text-slate-500">
+            <span className="font-semibold text-slate-700">{filteredUsers.length}</span> visible of <span className="font-semibold text-slate-700">{users.length}</span>
+          </div>
           <div className="table-shell">
             <table className="w-full text-sm">
               <thead>
@@ -1000,7 +1445,7 @@ export default function PlatformPage() {
             className="mt-3"
             page={userPage}
             pageSize={userPageSize}
-            total={users.length}
+            total={filteredUsers.length}
             onPageChange={setUserPage}
             onPageSizeChange={(n) => {
               setUserPageSize(n);
@@ -1199,6 +1644,43 @@ export default function PlatformPage() {
           <input className="ui-input" type="number" placeholder="Max tools" value={planForm.max_linked_tools || 0} onChange={(e) => setPlanForm((p) => ({ ...p, max_linked_tools: Number(e.target.value || 0) }))} />
           <input className="ui-input" type="number" placeholder="Max MCP bundles" value={planForm.max_linked_mcp_bundles || 0} onChange={(e) => setPlanForm((p) => ({ ...p, max_linked_mcp_bundles: Number(e.target.value || 0) }))} />
         </div>
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <div className="relative w-72">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              value={planSearch}
+              onChange={(e) => setPlanSearch(e.target.value)}
+              className="w-full pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-lg"
+              placeholder="Search plans..."
+            />
+          </div>
+          {[
+            { key: 'all', label: `All (${plans.length})` },
+            { key: 'active', label: `Active (${plans.filter((p) => p.is_active !== false).length})` },
+            { key: 'inactive', label: `Inactive (${plans.filter((p) => p.is_active === false).length})` },
+          ].map((chip) => (
+            <button
+              key={chip.key}
+              onClick={() => setPlanStatusFilter(chip.key as typeof planStatusFilter)}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                planStatusFilter === chip.key ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+          <button
+            onClick={() => { setPlanSearch(''); setPlanStatusFilter('all'); }}
+            disabled={!planSearch.trim() && planStatusFilter === 'all'}
+            className="ml-auto inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:hover:bg-white"
+          >
+            <RotateCcw size={11} />
+            Reset
+          </button>
+          <div className="w-full text-xs text-slate-500">
+            <span className="font-semibold text-slate-700">{filteredPlans.length}</span> visible of <span className="font-semibold text-slate-700">{plans.length}</span>
+          </div>
+        </div>
         <div className="table-shell">
           <table className="w-full text-sm">
             <thead>
@@ -1213,7 +1695,9 @@ export default function PlatformPage() {
             <tbody>
               {plans.length === 0 ? (
                 <tr><td colSpan={5} className="px-3 py-3 text-slate-500">No plans yet.</td></tr>
-              ) : plans.map((p) => (
+              ) : filteredPlans.length === 0 ? (
+                <tr><td colSpan={5} className="px-3 py-3 text-slate-500">No plans match the current filters.</td></tr>
+              ) : filteredPlans.map((p) => (
                 <tr key={p.id} className="border-t border-slate-100">
                   <td className="px-3 py-2 font-semibold text-slate-900">{p.name}</td>
                   <td className="px-3 py-2">{p.daily_message_cap}</td>

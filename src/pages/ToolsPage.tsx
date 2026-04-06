@@ -97,6 +97,52 @@ interface HttpAuthConfig {
   credentialId: string;
 }
 
+interface McpPackageImportResult {
+  success: boolean;
+  packageName: string;
+  command: string;
+  args: string[];
+  discoveredCount: number;
+  tools: Array<{ id: number; name: string; mcpToolName: string }>;
+  bundle?: { id: number; name: string; slug: string } | null;
+}
+
+interface McpSchemaProperty {
+  type?: string;
+  description?: string;
+}
+
+interface McpInputSchema {
+  type?: string;
+  properties?: Record<string, McpSchemaProperty>;
+  required?: string[];
+  additionalProperties?: boolean;
+}
+
+interface ToolAutoBuildEvent {
+  type: 'status' | 'error' | 'done';
+  message?: string;
+  timestamp?: string;
+  received_at?: string;
+  tool_ids?: number[];
+  processed_tools?: number;
+  capped_tools?: number;
+}
+
+interface ResourceAccessPayload {
+  owner?: {
+    owner_user_id?: string;
+    owner_org_id?: string | null;
+    visibility?: 'private' | 'org';
+  } | null;
+  shares?: Array<{
+    id: number;
+    shared_with_user_id?: string | null;
+    shared_with_org_id?: string | null;
+    created_at?: string;
+  }>;
+}
+
 type HttpArgType = 'string' | 'number' | 'boolean' | 'object' | 'array';
 
 function tokenizeCurl(input: string): string[] {
@@ -174,6 +220,65 @@ function buildArgsTemplate(args: string[], argTypes: Record<string, HttpArgType>
     out[key] = getDefaultArgValue(argTypes[key] || 'string');
   }
   return out;
+}
+
+function slugify(input: string) {
+  return String(input || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function parsePackageList(input: string): string[] {
+  const validPackage = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i;
+  return Array.from(
+    new Set(
+      String(input || '')
+        .split(/[\n,]/g)
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0 && validPackage.test(item))
+    )
+  );
+}
+
+function isBuiltInTool(tool?: Pick<Tool, 'type' | 'name'> | null) {
+  if (!tool) return false;
+  return tool.type === 'internal';
+}
+
+function getBuiltInToolHint(tool?: Pick<Tool, 'name' | 'type'> | null) {
+  if (!tool || tool.type !== 'internal') return '';
+  if (tool.name === 'generate_attachment_public_url') {
+    return 'Creates a temporary public link for an uploaded attachment so external MCP packages or APIs can fetch it.';
+  }
+  if (tool.name === 'curl_request') {
+    return 'Makes a direct HTTP request and returns status, headers, and body for quick inspection or orchestration checks.';
+  }
+  if (tool.name === 'delegate_to_agent') {
+    return 'Hands a subtask to another agent and returns the delegated child result to the current run.';
+  }
+  return 'Built-in platform tool maintained by the runtime.';
+}
+
+function parseSchemaInputValue(type: string | undefined, raw: string) {
+  const value = raw.trim();
+  if (value === '') return undefined;
+  if (type === 'number' || type === 'integer') {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) throw new Error(`Expected a number, received "${raw}"`);
+    return parsed;
+  }
+  if (type === 'boolean') {
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    throw new Error(`Expected true or false, received "${raw}"`);
+  }
+  if (type === 'object' || type === 'array') {
+    return JSON.parse(value);
+  }
+  return raw;
 }
 
 function parseCurlCommand(command: string): {
@@ -294,6 +399,10 @@ export default function ToolsPage() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteDependencyError, setDeleteDependencyError] = useState<string | null>(null);
   const [restoringVersionId, setRestoringVersionId] = useState<number | null>(null);
+  const [selectedToolIdsForDelete, setSelectedToolIdsForDelete] = useState<number[]>([]);
+  const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
+  const [bulkDeleteError, setBulkDeleteError] = useState<string | null>(null);
+  const [bulkDeleteLoading, setBulkDeleteLoading] = useState(false);
   
   const [formData, setFormData] = useState({
     name: '',
@@ -325,9 +434,17 @@ export default function ToolsPage() {
   const [autoBuildAgentIds, setAutoBuildAgentIds] = useState<number[]>([]);
   const [isBuilding, setIsBuilding] = useState(false);
   const [buildError, setBuildError] = useState('');
+  const [buildEvents, setBuildEvents] = useState<ToolAutoBuildEvent[]>([]);
   
   // Dynamic config states
-  const [pythonCode, setPythonCode] = useState('print("Hello World")');
+  const [pythonCode, setPythonCode] = useState('result = "Hello World"');
+  const [javascriptPackages, setJavascriptPackages] = useState('');
+  const [jsPackagesInstalling, setJsPackagesInstalling] = useState(false);
+  const [jsPackagesNotice, setJsPackagesNotice] = useState<string | null>(null);
+  const [jsTestArgs, setJsTestArgs] = useState('{}');
+  const [jsTestResult, setJsTestResult] = useState<string | null>(null);
+  const [jsTestError, setJsTestError] = useState<string | null>(null);
+  const [jsTestLoading, setJsTestLoading] = useState(false);
   const [httpConfig, setHttpConfig] = useState({ method: 'GET', url: '', body: '' });
   const [httpHeaders, setHttpHeaders] = useState<HttpHeader[]>([{ key: '', value: '', isVariable: false }]);
   const [httpFormData, setHttpFormData] = useState<HttpHeader[]>([{ key: '', value: '', isVariable: false }]);
@@ -351,6 +468,19 @@ export default function ToolsPage() {
   const [mcpImportError, setMcpImportError] = useState<string | null>(null);
   const [mcpImportLoading, setMcpImportLoading] = useState(false);
   const [mcpImportSuccess, setMcpImportSuccess] = useState<string | null>(null);
+  const [mcpPackageName, setMcpPackageName] = useState('');
+  const [mcpPackageCommand, setMcpPackageCommand] = useState('npx');
+  const [mcpPackageArgs, setMcpPackageArgs] = useState('');
+  const [mcpPackageEnv, setMcpPackageEnv] = useState('{\n  "META_ACCESS_TOKEN": ""\n}');
+  const [mcpPackagePrefix, setMcpPackagePrefix] = useState('');
+  const [mcpPackageBundleName, setMcpPackageBundleName] = useState('');
+  const [mcpPackageBundleSlug, setMcpPackageBundleSlug] = useState('');
+  const [mcpPackageCreateBundle, setMcpPackageCreateBundle] = useState(true);
+  const [mcpPackageExposeTools, setMcpPackageExposeTools] = useState(true);
+  const [mcpPackageExposeBundle, setMcpPackageExposeBundle] = useState(true);
+  const [mcpPackageImportLoading, setMcpPackageImportLoading] = useState(false);
+  const [mcpPackageImportError, setMcpPackageImportError] = useState<string | null>(null);
+  const [mcpPackageImportResult, setMcpPackageImportResult] = useState<McpPackageImportResult | null>(null);
   const [httpTestArgs, setHttpTestArgs] = useState('{"query":"example"}');
   const [httpTestResult, setHttpTestResult] = useState<string | null>(null);
   const [httpTestError, setHttpTestError] = useState<string | null>(null);
@@ -362,16 +492,45 @@ export default function ToolsPage() {
     customHeaders: '', // JSON string of extra headers
     credentialId: ''
   });
+  const [mcpStdioConfig, setMcpStdioConfig] = useState({
+    packageName: '',
+    rawCommand: '',
+    rawArgs: '',
+    command: '',
+    args: '',
+    env: '',
+    mcpToolName: '',
+    timeoutMs: '45000',
+  });
+  const [mcpStdioSchema, setMcpStdioSchema] = useState<McpInputSchema | null>(null);
+  const [mcpStdioTestValues, setMcpStdioTestValues] = useState<Record<string, string>>({});
+  const [mcpStdioTestResult, setMcpStdioTestResult] = useState<string | null>(null);
+  const [mcpStdioTestError, setMcpStdioTestError] = useState<string | null>(null);
+  const [mcpStdioTestLoading, setMcpStdioTestLoading] = useState(false);
   const [mcpTestStatus, setMcpTestStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
   const [mcpTestMessage, setMcpTestMessage] = useState('');
   const [mcpUrlWarning, setMcpUrlWarning] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>('All');
   const [typeFilter, setTypeFilter] = useState<string>('All');
+  const [quickFilter, setQuickFilter] = useState<'all' | 'http' | 'javascript' | 'mcp' | 'exposed'>('all');
   
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [saveNotice, setSaveNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [stateReady, setStateReady] = useState(false);
+  const [resourceAccess, setResourceAccess] = useState<ResourceAccessPayload | null>(null);
+  const [resourceAccessLoading, setResourceAccessLoading] = useState(false);
+  const [resourceAccessSaving, setResourceAccessSaving] = useState(false);
+  const [resourceAccessError, setResourceAccessError] = useState<string | null>(null);
+  const [resourceVisibility, setResourceVisibility] = useState<'private' | 'org'>('private');
+  const [sharedUserIdsText, setSharedUserIdsText] = useState('');
+  const [sharedOrgIdsText, setSharedOrgIdsText] = useState('');
+
+  const normalizeEditorType = (type: string): string => {
+    if (type === 'python') return 'javascript';
+    if (type === 'search' || type === 'calculator') return 'custom';
+    return type;
+  };
 
   useEffect(() => {
     const persisted = loadPersisted<any>(TOOLS_UI_KEY, {});
@@ -380,10 +539,14 @@ export default function ToolsPage() {
       if (typeof persisted.toolsPage === 'number') setToolsPage(persisted.toolsPage);
       if (typeof persisted.toolsPageSize === 'number') setToolsPageSize(persisted.toolsPageSize);
       if (typeof persisted.toolSearch === 'string') setToolSearch(persisted.toolSearch);
-      if (typeof persisted.categoryFilter === 'string') setCategoryFilter(persisted.categoryFilter);
-      if (typeof persisted.typeFilter === 'string') setTypeFilter(persisted.typeFilter);
+      // Always start with "All" filters for predictable first-load behavior.
+      setCategoryFilter('All');
+      setTypeFilter('All');
+      setQuickFilter('all');
       if (persisted.formData) setFormData((prev) => ({ ...prev, ...persisted.formData }));
       if (typeof persisted.pythonCode === 'string') setPythonCode(persisted.pythonCode);
+      if (typeof persisted.javascriptPackages === 'string') setJavascriptPackages(persisted.javascriptPackages);
+      if (typeof persisted.jsTestArgs === 'string') setJsTestArgs(persisted.jsTestArgs);
       if (persisted.httpConfig) setHttpConfig((prev) => ({ ...prev, ...persisted.httpConfig }));
       if (Array.isArray(persisted.httpHeaders)) setHttpHeaders(persisted.httpHeaders);
       if (Array.isArray(persisted.httpFormData)) setHttpFormData(persisted.httpFormData);
@@ -407,8 +570,11 @@ export default function ToolsPage() {
       toolSearch,
       categoryFilter,
       typeFilter,
+      quickFilter,
       formData,
       pythonCode,
+      javascriptPackages,
+      jsTestArgs,
       httpConfig,
       httpHeaders,
       httpFormData,
@@ -420,7 +586,7 @@ export default function ToolsPage() {
       httpTestArgs,
       curlImportText,
     });
-  }, [stateReady, selectedToolId, toolsPage, toolsPageSize, toolSearch, categoryFilter, typeFilter, formData, pythonCode, httpConfig, httpHeaders, httpFormData, httpBodyMode, httpRequiredArgs, httpArgTypes, httpAuth, mcpConfig, httpTestArgs, curlImportText]);
+  }, [stateReady, selectedToolId, toolsPage, toolsPageSize, toolSearch, categoryFilter, typeFilter, quickFilter, formData, pythonCode, javascriptPackages, jsTestArgs, httpConfig, httpHeaders, httpFormData, httpBodyMode, httpRequiredArgs, httpArgTypes, httpAuth, mcpConfig, httpTestArgs, curlImportText]);
 
   useEffect(() => {
     fetchTools();
@@ -458,11 +624,11 @@ export default function ToolsPage() {
 
   useEffect(() => {
     setToolsPage(1);
-  }, [tools.length]);
+  }, [toolSearch, categoryFilter, typeFilter, quickFilter]);
 
   useEffect(() => {
-    setToolsPage(1);
-  }, [toolSearch, categoryFilter, typeFilter]);
+    setSelectedToolIdsForDelete((prev) => prev.filter((id) => tools.some((t) => t.id === id)));
+  }, [tools]);
 
   useEffect(() => {
     setHttpArgTypes((prev) => {
@@ -480,6 +646,39 @@ export default function ToolsPage() {
     if (formData.type !== 'http') return;
     setHttpTestArgs(JSON.stringify(buildArgsTemplate(httpRequiredArgs, httpArgTypes), null, 2));
   }, [formData.type, httpRequiredArgs, httpArgTypes]);
+
+  useEffect(() => {
+    const toolId = typeof selectedToolId === 'number' ? selectedToolId : null;
+    if (!toolId || formData.type !== 'mcp_stdio_proxy') return;
+    const loadSchema = async () => {
+      try {
+        const res = await fetch(`/api/tools/${toolId}/mcp-schema`);
+        const data = await safeJson(res) as any;
+        if (!res.ok) throw new Error(data?.error || 'Failed to load MCP schema');
+        setMcpStdioSchema(data?.inputSchema || { type: 'object', properties: {}, required: [] });
+      } catch (e: any) {
+        setMcpStdioSchema({ type: 'object', properties: {}, required: [] });
+      }
+    };
+    void loadSchema();
+  }, [selectedToolId, formData.type]);
+
+  useEffect(() => {
+    const trimmed = mcpPackageName.trim();
+    if (!trimmed) return;
+    if (!mcpPackagePrefix.trim()) {
+      setMcpPackagePrefix(`npm_${slugify(trimmed.replace(/^@/, '').replace(/[\\/]/g, '_'))}`);
+    }
+    if (!mcpPackageBundleName.trim()) {
+      setMcpPackageBundleName(`${trimmed} Bundle`);
+    }
+    if (!mcpPackageBundleSlug.trim()) {
+      setMcpPackageBundleSlug(`${slugify(trimmed.replace(/^@/, '').replace(/[\\/]/g, '_'))}_bundle`);
+    }
+    if (!mcpPackageArgs.trim()) {
+      setMcpPackageArgs(`-y ${trimmed}`);
+    }
+  }, [mcpPackageName]);
 
   const categories = useMemo(() => {
     const cats = new Set(tools.map(t => t.category || 'General'));
@@ -501,11 +700,23 @@ export default function ToolsPage() {
           .some((value) => String(value).toLowerCase().includes(query))
       );
     }
-    if (categoryFilter !== 'All') {
+    if (categoryFilter && categoryFilter.toLowerCase() !== 'all') {
       list = list.filter(t => (t.category || 'General') === categoryFilter);
     }
-    if (typeFilter !== 'All') {
+    if (typeFilter && typeFilter.toLowerCase() !== 'all') {
       list = list.filter(t => (t.type || 'custom') === typeFilter);
+    }
+    if (quickFilter === 'http') {
+      list = list.filter((t) => String(t.type || '').toLowerCase() === 'http');
+    }
+    if (quickFilter === 'javascript') {
+      list = list.filter((t) => String(t.type || '').toLowerCase() === 'javascript');
+    }
+    if (quickFilter === 'mcp') {
+      list = list.filter((t) => ['mcp', 'mcp_stdio_proxy'].includes(String(t.type || '').toLowerCase()));
+    }
+    if (quickFilter === 'exposed') {
+      list = list.filter((t) => Boolean(t.linkages?.mcp_exposed));
     }
     return [...list].sort((a, b) => {
       const catA = (a.category || 'General').toLowerCase();
@@ -514,7 +725,12 @@ export default function ToolsPage() {
       if (catA > catB) return 1;
       return a.name.localeCompare(b.name);
     });
-  }, [tools, categoryFilter]);
+  }, [tools, toolSearch, categoryFilter, typeFilter, quickFilter]);
+
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(filteredTools.length / toolsPageSize));
+    if (toolsPage > maxPage) setToolsPage(maxPage);
+  }, [filteredTools.length, toolsPage, toolsPageSize]);
 
   const pagedTools = useMemo(() => {
     const start = (toolsPage - 1) * toolsPageSize;
@@ -525,6 +741,43 @@ export default function ToolsPage() {
     if (typeof selectedToolId !== 'number') return null;
     return tools.find((t) => t.id === selectedToolId) || null;
   }, [tools, selectedToolId]);
+
+  useEffect(() => {
+    const toolId = typeof selectedToolId === 'number' ? selectedToolId : null;
+    if (!toolId) {
+      setResourceAccess(null);
+      setResourceAccessError(null);
+      setResourceVisibility('private');
+      setSharedUserIdsText('');
+      setSharedOrgIdsText('');
+      return;
+    }
+    let canceled = false;
+    const loadResourceAccess = async () => {
+      setResourceAccessLoading(true);
+      setResourceAccessError(null);
+      try {
+        const res = await fetch(`/api/resource-access/tool/${toolId}`);
+        const data = await safeJson(res) as ResourceAccessPayload | { error?: string } | null;
+        if (!res.ok) throw new Error((data as any)?.error || 'Failed to load access');
+        if (canceled) return;
+        const next = (data || {}) as ResourceAccessPayload;
+        setResourceAccess(next);
+        setResourceVisibility(next.owner?.visibility === 'org' ? 'org' : 'private');
+        setSharedUserIdsText((next.shares || []).map((row) => String(row.shared_with_user_id || '').trim()).filter(Boolean).join(', '));
+        setSharedOrgIdsText((next.shares || []).map((row) => String(row.shared_with_org_id || '').trim()).filter(Boolean).join(', '));
+      } catch (e: any) {
+        if (!canceled) {
+          setResourceAccess(null);
+          setResourceAccessError(e.message || 'Failed to load access');
+        }
+      } finally {
+        if (!canceled) setResourceAccessLoading(false);
+      }
+    };
+    void loadResourceAccess();
+    return () => { canceled = true; };
+  }, [selectedToolId]);
 
   useEffect(() => {
     const toolId = typeof selectedToolId === 'number' ? selectedToolId : null;
@@ -621,32 +874,81 @@ export default function ToolsPage() {
   };
 
   const autoBuildTools = async () => {
-    if (!autoBuildGoal) return;
+    const normalizedGoal = autoBuildGoal.trim();
+    if (!normalizedGoal) return;
+    if (normalizedGoal.length > 4000) {
+      setBuildError('Goal is too long (max 4000 characters).');
+      return;
+    }
     setIsBuilding(true);
     setBuildError('');
+    setBuildEvents([]);
     try {
       const res = await fetch('/api/tools/autobuild', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          goal: autoBuildGoal,
+          goal: normalizedGoal,
           provider: autoBuildProvider,
           model: autoBuildModel,
-          agent_ids: autoBuildAgentIds
+          agent_ids: autoBuildAgentIds,
+          stream: true,
         })
       });
-      const text = await res.text();
-      let data: any = {};
-      try {
-        data = text ? JSON.parse(text) : {};
-      } catch {
-        data = {};
+      if (!res.ok) {
+        const text = await res.text();
+        let data: any = {};
+        try {
+          data = text ? JSON.parse(text) : {};
+        } catch {
+          data = {};
+        }
+        throw new Error(data.error || text || 'Failed to auto-build tools');
       }
-      if (!res.ok) throw new Error(data.error || text || 'Failed to auto-build tools');
-      setShowAutoBuild(false);
-      setAutoBuildGoal('');
-      setAutoBuildAgentIds([]);
-      fetchTools();
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('Streaming is not available in this browser');
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+            setBuildEvents((prev) => [...prev, { ...event, received_at: new Date().toISOString() }]);
+            if (event.type === 'error') {
+              throw new Error(event.message || 'Failed to auto-build tools');
+            }
+            if (event.type === 'done') {
+              setShowAutoBuild(false);
+              setAutoBuildGoal('');
+              setAutoBuildAgentIds([]);
+              fetchTools();
+            }
+          } catch (e: any) {
+            if (e instanceof Error) throw e;
+          }
+        }
+      }
+      const finalLine = buffer.trim();
+      if (finalLine.startsWith('data: ')) {
+        const event = JSON.parse(finalLine.slice(6));
+        setBuildEvents((prev) => [...prev, { ...event, received_at: new Date().toISOString() }]);
+        if (event.type === 'error') {
+          throw new Error(event.message || 'Failed to auto-build tools');
+        }
+        if (event.type === 'done') {
+          setShowAutoBuild(false);
+          setAutoBuildGoal('');
+          setAutoBuildAgentIds([]);
+          fetchTools();
+        }
+      }
     } catch (e: any) {
       setBuildError(e.message || 'Failed to auto-build tools');
     } finally {
@@ -654,13 +956,47 @@ export default function ToolsPage() {
     }
   };
 
+  const runMcpStdioTest = async () => {
+    const toolId = typeof selectedToolId === 'number' ? selectedToolId : null;
+    if (!toolId) return;
+    setMcpStdioTestError(null);
+    setMcpStdioTestResult(null);
+    setMcpStdioTestLoading(true);
+    try {
+      const properties = mcpStdioSchema?.properties || {};
+      const required = new Set((mcpStdioSchema?.required || []).map((key) => String(key)));
+      const args: Record<string, any> = {};
+      for (const [key, property] of Object.entries(properties)) {
+        const rawValue = mcpStdioTestValues[key] ?? '';
+        if (!rawValue.trim()) {
+          if (required.has(key)) throw new Error(`"${key}" is required`);
+          continue;
+        }
+        args[key] = parseSchemaInputValue((property as McpSchemaProperty)?.type, rawValue);
+      }
+      const res = await fetch(`/api/tools/${toolId}/test-run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ args }),
+      });
+      const data = await safeJson(res) as any;
+      if (!res.ok) throw new Error(data?.error || 'Failed to execute MCP stdio tool');
+      setMcpStdioTestResult(String(data?.result || ''));
+    } catch (e: any) {
+      setMcpStdioTestError(e.message || 'Failed to execute MCP stdio tool');
+    } finally {
+      setMcpStdioTestLoading(false);
+    }
+  };
+
   const handleSelectTool = (tool: Tool) => {
       setSelectedToolId(tool.id);
+      const normalizedType = normalizeEditorType(tool.type || 'custom');
       setFormData({
           name: tool.name,
           description: tool.description,
           category: tool.category || 'General',
-          type: tool.type,
+          type: normalizedType,
           config: tool.config
       });
       setJsonError(null);
@@ -668,8 +1004,12 @@ export default function ToolsPage() {
 
       try {
           const cfg = JSON.parse(tool.config);
-          if (tool.type === 'python') {
+          if (tool.type === 'python' || tool.type === 'javascript') {
               setPythonCode(cfg.code || '');
+              setJavascriptPackages(Array.isArray(cfg.packages) ? cfg.packages.join(', ') : '');
+              setJsPackagesNotice(null);
+              setJsTestResult(null);
+              setJsTestError(null);
           } else if (tool.type === 'http') {
               setHttpConfig({ method: cfg.method || 'GET', url: cfg.url || '', body: cfg.body || '' });
               const formObj = cfg.formData || {};
@@ -719,6 +1059,21 @@ export default function ToolsPage() {
                   customHeaders: cfg.customHeaders ? JSON.stringify(cfg.customHeaders, null, 2) : '',
                   credentialId: cfg.credentialId != null ? String(cfg.credentialId) : '',
               });
+          } else if (tool.type === 'mcp_stdio_proxy') {
+              setMcpStdioConfig({
+                  packageName: cfg.packageName || '',
+                  rawCommand: cfg.rawCommand || '',
+                  rawArgs: Array.isArray(cfg.rawArgs) ? cfg.rawArgs.join(' ') : '',
+                  command: cfg.command || '',
+                  args: Array.isArray(cfg.args) ? cfg.args.join(' ') : '',
+                  env: cfg.env ? JSON.stringify(cfg.env, null, 2) : '{}',
+                  mcpToolName: cfg.mcpToolName || '',
+                  timeoutMs: String(cfg.timeoutMs || 45000),
+              });
+              setMcpStdioSchema(null);
+              setMcpStdioTestValues({});
+              setMcpStdioTestResult(null);
+              setMcpStdioTestError(null);
           }
       } catch (e) {
           // Fallback if config is invalid JSON
@@ -728,7 +1083,12 @@ export default function ToolsPage() {
   const handleCreateNew = () => {
       setSelectedToolId('new');
       setFormData({ name: '', description: '', category: 'General', type: 'custom', config: '{}' });
-      setPythonCode('print("Hello World")');
+      setPythonCode('result = "Hello World"');
+      setJavascriptPackages('');
+      setJsPackagesNotice(null);
+      setJsTestArgs('{}');
+      setJsTestResult(null);
+      setJsTestError(null);
       setHttpConfig({ method: 'GET', url: '', body: '' });
       setHttpHeaders([{ key: '', value: '', isVariable: false }]);
       setHttpFormData([{ key: '', value: '', isVariable: false }]);
@@ -746,6 +1106,11 @@ export default function ToolsPage() {
         credentialId: '',
       });
       setMcpConfig({ serverUrl: '', apiKey: '', transportType: 'auto', customHeaders: '', credentialId: '' });
+      setMcpStdioConfig({ packageName: '', rawCommand: '', rawArgs: '', command: '', args: '', env: '{}', mcpToolName: '', timeoutMs: '45000' });
+      setMcpStdioSchema(null);
+      setMcpStdioTestValues({});
+      setMcpStdioTestResult(null);
+      setMcpStdioTestError(null);
       setMcpTestStatus('idle');
       setMcpTestMessage('');
       setJsonError(null);
@@ -831,8 +1196,11 @@ export default function ToolsPage() {
     let finalConfig = {};
     
     try {
-        if (formData.type === 'python') {
-            finalConfig = { code: pythonCode };
+        if (formData.type === 'javascript') {
+            finalConfig = {
+              code: pythonCode,
+              packages: parsePackageList(javascriptPackages),
+            };
         } else if (formData.type === 'http') {
             const headersObj: Record<string, string> = {};
             httpHeaders.forEach(h => {
@@ -912,6 +1280,23 @@ export default function ToolsPage() {
                 customHeaders: extraHeaders,
                 credentialId: mcpConfig.credentialId ? Number(mcpConfig.credentialId) : undefined,
             };
+        } else if (formData.type === 'mcp_stdio_proxy') {
+            let parsedEnv = {};
+            if (mcpStdioConfig.env.trim()) {
+                try { parsedEnv = JSON.parse(mcpStdioConfig.env); } catch { throw new Error('Environment Variables must be valid JSON'); }
+            }
+            const rawArgs = mcpStdioConfig.rawArgs.trim() ? tokenizeCurl(`cmd ${mcpStdioConfig.rawArgs}`).slice(1) : [];
+            const wrappedArgs = mcpStdioConfig.args.trim() ? tokenizeCurl(`cmd ${mcpStdioConfig.args}`).slice(1) : [];
+            finalConfig = {
+                packageName: mcpStdioConfig.packageName,
+                rawCommand: mcpStdioConfig.rawCommand,
+                rawArgs,
+                command: mcpStdioConfig.command,
+                args: wrappedArgs,
+                env: parsedEnv,
+                mcpToolName: mcpStdioConfig.mcpToolName,
+                timeoutMs: Number(mcpStdioConfig.timeoutMs || 45000),
+            };
         } else {
             finalConfig = JSON.parse(formData.config);
         }
@@ -964,11 +1349,70 @@ export default function ToolsPage() {
         if (selectedToolId === id) {
             setSelectedToolId(null);
         }
+        setSelectedToolIdsForDelete((prev) => prev.filter((toolId) => toolId !== id));
         setShowDeleteConfirm(false);
         setDeleteDependencyError(null);
         fetchTools();
     } catch (e: any) {
         alert(e.message);
+    }
+  };
+
+  const toggleToolRowSelection = (id: number) => {
+    setSelectedToolIdsForDelete((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const togglePageSelection = () => {
+    const idsOnPage = pagedTools.map((t) => t.id);
+    if (!idsOnPage.length) return;
+    const allSelected = idsOnPage.every((id) => selectedToolIdsForDelete.includes(id));
+    if (allSelected) {
+      setSelectedToolIdsForDelete((prev) => prev.filter((id) => !idsOnPage.includes(id)));
+      return;
+    }
+    setSelectedToolIdsForDelete((prev) => Array.from(new Set([...prev, ...idsOnPage])));
+  };
+
+  const toggleFilteredSelection = () => {
+    const idsInFilter = filteredTools.map((t) => t.id);
+    if (!idsInFilter.length) return;
+    const allSelected = idsInFilter.every((id) => selectedToolIdsForDelete.includes(id));
+    if (allSelected) {
+      setSelectedToolIdsForDelete((prev) => prev.filter((id) => !idsInFilter.includes(id)));
+      return;
+    }
+    setSelectedToolIdsForDelete((prev) => Array.from(new Set([...prev, ...idsInFilter])));
+  };
+
+  const deleteSelectedTools = async () => {
+    const ids = [...selectedToolIdsForDelete];
+    if (!ids.length) return;
+    setBulkDeleteLoading(true);
+    setBulkDeleteError(null);
+    try {
+      let deletedCount = 0;
+      const failedIds: number[] = [];
+      for (const id of ids) {
+        const res = await fetch(`/api/tools/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          deletedCount += 1;
+          continue;
+        }
+        failedIds.push(id);
+      }
+
+      if (selectedToolId && ids.includes(Number(selectedToolId))) setSelectedToolId(null);
+      setSelectedToolIdsForDelete(failedIds);
+      if (failedIds.length) {
+        setBulkDeleteError(`Deleted ${deletedCount}. Could not delete ${failedIds.length} tool(s); they may have dependencies.`);
+      } else {
+        setShowBulkDeleteConfirm(false);
+      }
+      await fetchTools();
+    } catch (e: any) {
+      setBulkDeleteError(e.message || 'Failed to delete selected tools');
+    } finally {
+      setBulkDeleteLoading(false);
     }
   };
 
@@ -986,6 +1430,36 @@ export default function ToolsPage() {
     } finally {
       setRestoringVersionId(null);
       setTimeout(() => setSaveNotice(null), 2500);
+    }
+  };
+
+  const saveResourceAccess = async () => {
+    const toolId = typeof selectedToolId === 'number' ? selectedToolId : null;
+    if (!toolId) return;
+    setResourceAccessSaving(true);
+    setResourceAccessError(null);
+    try {
+      const shared_user_ids = sharedUserIdsText.split(',').map((value) => value.trim()).filter(Boolean);
+      const shared_org_ids = sharedOrgIdsText.split(',').map((value) => value.trim()).filter(Boolean);
+      const res = await fetch(`/api/resource-access/tool/${toolId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          visibility: resourceVisibility,
+          shared_user_ids,
+          shared_org_ids,
+        }),
+      });
+      const data = await safeJson(res) as ResourceAccessPayload | { error?: string } | null;
+      if (!res.ok) throw new Error((data as any)?.error || 'Failed to save access');
+      const next = (data || {}) as ResourceAccessPayload;
+      setResourceAccess(next);
+      setSaveNotice({ type: 'success', message: 'Tool access updated.' });
+      setTimeout(() => setSaveNotice(null), 2500);
+    } catch (e: any) {
+      setResourceAccessError(e.message || 'Failed to save access');
+    } finally {
+      setResourceAccessSaving(false);
     }
   };
 
@@ -1044,10 +1518,66 @@ export default function ToolsPage() {
     }
   };
 
+  const importMcpPackage = async () => {
+    setMcpPackageImportError(null);
+    setMcpPackageImportResult(null);
+    setMcpPackageImportLoading(true);
+    try {
+      const packageName = mcpPackageName.trim();
+      if (!packageName) throw new Error('Package name is required');
+
+      let env: Record<string, string> = {};
+      if (mcpPackageEnv.trim()) {
+        const parsedEnv = JSON.parse(mcpPackageEnv);
+        if (!parsedEnv || typeof parsedEnv !== 'object' || Array.isArray(parsedEnv)) {
+          throw new Error('Environment must be a JSON object');
+        }
+        env = Object.fromEntries(
+          Object.entries(parsedEnv).map(([key, value]) => [String(key), String(value ?? '')])
+        );
+      }
+
+      const args = mcpPackageArgs.trim()
+        ? tokenizeCurl(`cmd ${mcpPackageArgs}`).slice(1)
+        : ['-y', packageName];
+
+      const res = await fetch('/api/tools/import-mcp-package', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          packageName,
+          packageCommand: mcpPackageCommand.trim() || 'npx',
+          packageArgs: args,
+          env,
+          namePrefix: mcpPackagePrefix.trim(),
+          bundleName: mcpPackageBundleName.trim(),
+          bundleSlug: mcpPackageBundleSlug.trim(),
+          createBundle: mcpPackageCreateBundle,
+          exposeTools: mcpPackageExposeTools,
+          exposeBundle: mcpPackageExposeBundle,
+        }),
+      });
+      const data = await safeJson(res) as McpPackageImportResult | { error?: string } | null;
+      if (!res.ok) throw new Error((data as any)?.error || 'Failed to import MCP package');
+      const result = data as McpPackageImportResult;
+      setMcpPackageImportResult(result);
+      const list = await fetchTools();
+      if (Array.isArray(list) && result.tools.length > 0) {
+        const first = list.find((tool: any) => Number(tool.id) === Number(result.tools[0].id));
+        if (first) handleSelectTool(first);
+      }
+    } catch (e: any) {
+      setMcpPackageImportError(e.message || 'Failed to import MCP package');
+    } finally {
+      setMcpPackageImportLoading(false);
+    }
+  };
+
   const getToolIcon = (type: string) => {
       switch (type) {
           case 'http': return <Globe size={18} />;
-          case 'python': return <Terminal size={18} />;
+          case 'javascript':
+            return <Terminal size={18} />;
           case 'mcp': return <Server size={18} />;
           default: return <Wrench size={18} />;
       }
@@ -1065,15 +1595,19 @@ export default function ToolsPage() {
     };
   }, [tools]);
 
+  const hasListFilters = toolSearch.trim().length > 0 || categoryFilter !== 'All' || typeFilter !== 'All' || quickFilter !== 'all';
+  const resetListFilters = () => {
+    setToolSearch('');
+    setCategoryFilter('All');
+    setTypeFilter('All');
+    setQuickFilter('all');
+  };
+
   return (
     <div className="h-[calc(100vh-8rem)] flex flex-col">
       <div className="swarm-hero p-6 mb-6">
       <div className="flex justify-between items-center">
         <div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-100 mb-3">
-            <Sparkles size={12} />
-            Capability Layer
-          </div>
           <h1 className="text-3xl font-black text-white">Tools</h1>
           <p className="text-slate-300 mt-1">Design, connect, and operationalize the capabilities your agents can call.</p>
         </div>
@@ -1118,6 +1652,34 @@ export default function ToolsPage() {
               <div className="p-4 border-b border-slate-100 bg-slate-50 flex flex-col gap-3">
                   <div className="flex items-center justify-between">
                       <span className="font-medium text-slate-700">Available Tools ({filteredTools.length})</span>
+                      <span className="text-[11px] text-slate-500">{tools.length} total</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={togglePageSelection}
+                      disabled={!pagedTools.length}
+                      className="text-[11px] px-2 py-1 rounded border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                    >
+                      {pagedTools.length > 0 && pagedTools.every((tool) => selectedToolIdsForDelete.includes(tool.id))
+                        ? 'Unselect Page'
+                        : 'Select Page'}
+                    </button>
+                    <button
+                      onClick={toggleFilteredSelection}
+                      disabled={!filteredTools.length}
+                      className="text-[11px] px-2 py-1 rounded border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                    >
+                      {filteredTools.length > 0 && filteredTools.every((tool) => selectedToolIdsForDelete.includes(tool.id))
+                        ? 'Unselect Filtered'
+                        : 'Select Filtered'}
+                    </button>
+                    <button
+                      onClick={() => { setShowBulkDeleteConfirm(true); setBulkDeleteError(null); }}
+                      disabled={!selectedToolIdsForDelete.length}
+                      className="text-[11px] px-2 py-1 rounded border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 disabled:opacity-40"
+                    >
+                      Delete Selected ({selectedToolIdsForDelete.length})
+                    </button>
                   </div>
                   <div className="relative">
                     <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -1144,6 +1706,34 @@ export default function ToolsPage() {
                           {toolTypes.map(t => <option key={t} value={t}>{t}</option>)}
                       </select>
                   </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {[
+                      { key: 'all', label: 'All' },
+                      { key: 'http', label: 'HTTP' },
+                      { key: 'javascript', label: 'JavaScript' },
+                      { key: 'mcp', label: 'MCP' },
+                      { key: 'exposed', label: 'Exposed' },
+                    ].map((chip) => (
+                      <button
+                        key={chip.key}
+                        onClick={() => setQuickFilter(chip.key as 'all' | 'http' | 'javascript' | 'mcp' | 'exposed')}
+                        className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] transition-colors ${
+                          quickFilter === chip.key
+                            ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                            : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                        }`}
+                      >
+                        {chip.label}
+                      </button>
+                    ))}
+                    <button
+                      onClick={resetListFilters}
+                      disabled={!hasListFilters}
+                      className="ml-auto rounded-md border border-slate-200 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500 hover:bg-slate-100 disabled:opacity-40"
+                    >
+                      Reset
+                    </button>
+                  </div>
               </div>
               <div className="flex-1 overflow-y-auto p-2 space-y-1">
                   {pagedTools.map((tool, idx) => {
@@ -1162,13 +1752,25 @@ export default function ToolsPage() {
                             className={`p-3 rounded-lg cursor-pointer flex items-center justify-between group transition-colors ${selectedToolId === tool.id ? 'bg-indigo-50 border border-indigo-100' : 'hover:bg-slate-50 border border-transparent'}`}
                           >
                               <div className="flex items-center gap-3 overflow-hidden">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedToolIdsForDelete.includes(tool.id)}
+                                    onChange={() => toggleToolRowSelection(tool.id)}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                                  />
                                   <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${selectedToolId === tool.id ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>
                                       {getToolIcon(tool.type)}
                                   </div>
                                   <div className="truncate">
                                       <h4 className={`font-medium truncate ${selectedToolId === tool.id ? 'text-indigo-900' : 'text-slate-700'}`}>{tool.name}</h4>
                                       <div className="flex items-center gap-1.5 mt-0.5">
-                                        <p className="text-xs text-slate-400 uppercase tracking-wide">{tool.type}</p>
+                                        <p className="text-xs text-slate-400 uppercase tracking-wide">{tool.type === 'internal' ? 'built-in' : tool.type}</p>
+                                        {isBuiltInTool(tool) && (
+                                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">
+                                            Built-in
+                                          </span>
+                                        )}
                                         {(tool.linkages?.agents_count || 0) > 0 && (
                                           <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700">
                                             A:{tool.linkages?.agents_count}
@@ -1231,9 +1833,16 @@ export default function ToolsPage() {
               ) : (
                   <div className="flex-1 flex flex-col overflow-hidden">
                       <div className="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
-                          <h2 className="font-semibold text-slate-800 flex items-center gap-2">
-                              {selectedToolId === 'new' ? 'Create New Tool' : 'Edit Tool'}
-                          </h2>
+                          <div className="flex items-center gap-3">
+                            <h2 className="font-semibold text-slate-800 flex items-center gap-2">
+                                {selectedToolId === 'new' ? 'Create New Tool' : 'Edit Tool'}
+                            </h2>
+                            {selectedTool && isBuiltInTool(selectedTool) && (
+                              <span className="rounded-full bg-amber-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-700">
+                                Built-in
+                              </span>
+                            )}
+                          </div>
                           {selectedToolId !== 'new' && (
                               <span className="text-xs font-mono text-slate-400 bg-slate-200 px-2 py-1 rounded">ID: {selectedToolId}</span>
                           )}
@@ -1269,11 +1878,10 @@ export default function ToolsPage() {
                                           onChange={e => setFormData({...formData, type: e.target.value})}
                                       >
                                           <option value="custom">Custom Function</option>
-                                          <option value="search">Search</option>
-                                          <option value="calculator">Calculator</option>
-                                          <option value="python">Python Code</option>
+                                          <option value="javascript">JavaScript Code</option>
                                           <option value="http">HTTP Request</option>
                                           <option value="mcp">MCP Server</option>
+                                          <option value="mcp_stdio_proxy">Local MCP Runtime Tool</option>
                                       </select>
                                   </div>
                               </div>
@@ -1289,9 +1897,30 @@ export default function ToolsPage() {
                                   />
                               </div>
 
+                              {selectedTool && isBuiltInTool(selectedTool) && (
+                                <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                                  <div className="flex items-center gap-2">
+                                    <Sparkles size={15} className="text-amber-600" />
+                                    <div className="text-sm font-semibold text-amber-900">Built-in Platform Tool</div>
+                                  </div>
+                                  <div className="mt-1 text-sm text-amber-800">{getBuiltInToolHint(selectedTool)}</div>
+                                  <div className="mt-2 text-xs text-amber-700">
+                                    These tools are maintained by the runtime. You can assign them to agents like other tools, but their execution behavior is provided by the platform.
+                                  </div>
+                                </div>
+                              )}
+
                               {selectedToolId !== 'new' && selectedTool && (
                                 <div className="bg-indigo-50/70 border border-indigo-100 rounded-xl p-4 space-y-4">
-                                  <div className="text-xs font-bold text-indigo-700 uppercase tracking-wider mb-2">Link Insights</div>
+                                  <div className="flex items-start justify-between gap-4">
+                                    <div>
+                                      <div className="text-xs font-bold text-indigo-700 uppercase tracking-wider mb-1">Tool Snapshot</div>
+                                      <div className="text-sm text-slate-600">Operational summary for linked agents, exposure status, recent usage, and delete impact.</div>
+                                    </div>
+                                    <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-700">
+                                      Summary
+                                    </span>
+                                  </div>
                                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                                     <div className="rounded-lg bg-white border border-indigo-100 px-3 py-2">
                                       <div className="text-[11px] text-slate-500">Linked Agents</div>
@@ -1346,76 +1975,168 @@ export default function ToolsPage() {
                               )}
 
                               {selectedToolId !== 'new' && selectedTool && (
-                                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                                  <div className="border border-slate-200 rounded-xl p-4 bg-white">
-                                    <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Version History</div>
-                                    <div className="space-y-2 max-h-56 overflow-y-auto">
-                                      {toolVersions.map((version) => (
-                                        <div key={version.id} className="rounded-lg border border-slate-200 px-3 py-2 bg-slate-50/70">
-                                          <div className="flex items-center justify-between gap-2">
-                                            <div className="text-sm font-semibold text-slate-900">v{version.version_number}</div>
-                                            <div className="flex items-center gap-2">
-                                              <div className="text-[11px] uppercase tracking-wider text-slate-500">{version.change_kind}</div>
-                                              {selectedTool && version.version_number !== Number(selectedTool.version || 1) && (
-                                                <button
-                                                  type="button"
-                                                  onClick={() => void restoreToolVersion(selectedTool.id, version.id)}
-                                                  disabled={restoringVersionId === version.id}
-                                                  className="text-[11px] px-2 py-1 rounded-md border border-indigo-200 text-indigo-700 hover:bg-indigo-50 disabled:opacity-60"
-                                                >
-                                                  {restoringVersionId === version.id ? 'Restoring...' : 'Rollback'}
-                                                </button>
-                                              )}
-                                            </div>
-                                          </div>
-                                          <div className="text-[11px] text-slate-500 mt-1">{new Date(version.created_at).toLocaleString()}</div>
-                                          <div className="text-xs text-slate-600 mt-1">{version.name} • {version.type}</div>
-                                        </div>
-                                      ))}
-                                      {toolVersions.length === 0 && <div className="text-sm text-slate-500">No version history yet.</div>}
+                                <details className="border border-slate-200 rounded-xl p-4 bg-white group">
+                                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                                    <div>
+                                      <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Sharing</div>
+                                      <div className="text-sm text-slate-600 mt-1">Control who can view and manage this tool.</div>
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                      {resourceAccessLoading && <div className="text-xs text-slate-500">Loading…</div>}
+                                      <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 group-open:bg-slate-900 group-open:text-white">
+                                        Expand
+                                      </span>
+                                    </div>
+                                  </summary>
+                                  <div className="mt-4 space-y-4">
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                        <div className="text-[11px] text-slate-500">Owner User</div>
+                                        <div className="text-sm font-semibold text-slate-900 mt-1">{resourceAccess?.owner?.owner_user_id || 'Unknown'}</div>
+                                      </div>
+                                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                        <div className="text-[11px] text-slate-500">Owner Org</div>
+                                        <div className="text-sm font-semibold text-slate-900 mt-1">{resourceAccess?.owner?.owner_org_id || 'None'}</div>
+                                      </div>
+                                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                        <div className="text-[11px] text-slate-500">Visibility</div>
+                                        <select
+                                          value={resourceVisibility}
+                                          onChange={(e) => setResourceVisibility(e.target.value === 'org' ? 'org' : 'private')}
+                                          className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                                        >
+                                          <option value="private">Private</option>
+                                          <option value="org">Organization</option>
+                                        </select>
+                                      </div>
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">Shared User IDs</label>
+                                        <textarea
+                                          value={sharedUserIdsText}
+                                          onChange={(e) => setSharedUserIdsText(e.target.value)}
+                                          placeholder="user_123, user_456"
+                                          className="w-full min-h-[84px] rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                                        />
+                                        <div className="text-[11px] text-slate-500 mt-1">Comma-separated user ids with direct access.</div>
+                                      </div>
+                                      <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">Shared Org IDs</label>
+                                        <textarea
+                                          value={sharedOrgIdsText}
+                                          onChange={(e) => setSharedOrgIdsText(e.target.value)}
+                                          placeholder="org_123, org_456"
+                                          className="w-full min-h-[84px] rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                                        />
+                                        <div className="text-[11px] text-slate-500 mt-1">Comma-separated org ids that should see this tool.</div>
+                                      </div>
+                                    </div>
+                                    {resourceAccessError && <div className="text-sm text-red-600">{resourceAccessError}</div>}
+                                    <div className="flex justify-end">
+                                      <button
+                                        type="button"
+                                        onClick={() => void saveResourceAccess()}
+                                        disabled={resourceAccessSaving || resourceAccessLoading}
+                                        className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-60"
+                                      >
+                                        {resourceAccessSaving ? 'Saving Sharing…' : 'Save Sharing'}
+                                      </button>
                                     </div>
                                   </div>
-                                  <div className="border border-slate-200 rounded-xl p-4 bg-white">
-                                    <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Recent Usage</div>
-                                    <div className="space-y-2 max-h-56 overflow-y-auto">
-                                      {(toolUsage?.recent_executions || []).map((run) => (
-                                        <div key={run.id} className="rounded-lg border border-slate-200 px-3 py-2 bg-slate-50/70">
-                                          <div className="flex items-center justify-between gap-2">
-                                            <div className="text-sm font-semibold text-slate-900">{run.agent_name || run.tool_name}</div>
-                                            <div className={`text-[11px] px-2 py-0.5 rounded-full ${
-                                              run.status === 'failed' ? 'bg-red-100 text-red-700' : run.status === 'running' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
-                                            }`}>
-                                              {run.status}
+                                </details>
+                              )}
+
+                              {selectedToolId !== 'new' && selectedTool && (
+                                <details className="border border-slate-200 rounded-xl p-4 bg-white group">
+                                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                                    <div>
+                                      <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Versions And Usage</div>
+                                      <div className="text-sm text-slate-600 mt-1">Historical changes, rollback points, and recent execution activity.</div>
+                                    </div>
+                                    <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 group-open:bg-slate-900 group-open:text-white">
+                                      Expand
+                                    </span>
+                                  </summary>
+                                  <div className="mt-4 grid grid-cols-1 xl:grid-cols-2 gap-4">
+                                    <div className="border border-slate-200 rounded-xl p-4 bg-white">
+                                      <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Version History</div>
+                                      <div className="space-y-2 max-h-56 overflow-y-auto">
+                                        {toolVersions.map((version) => (
+                                          <div key={version.id} className="rounded-lg border border-slate-200 px-3 py-2 bg-slate-50/70">
+                                            <div className="flex items-center justify-between gap-2">
+                                              <div className="text-sm font-semibold text-slate-900">v{version.version_number}</div>
+                                              <div className="flex items-center gap-2">
+                                                <div className="text-[11px] uppercase tracking-wider text-slate-500">{version.change_kind}</div>
+                                                {selectedTool && version.version_number !== Number(selectedTool.version || 1) && (
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => void restoreToolVersion(selectedTool.id, version.id)}
+                                                    disabled={restoringVersionId === version.id}
+                                                    className="text-[11px] px-2 py-1 rounded-md border border-indigo-200 text-indigo-700 hover:bg-indigo-50 disabled:opacity-60"
+                                                  >
+                                                    {restoringVersionId === version.id ? 'Restoring...' : 'Rollback'}
+                                                  </button>
+                                                )}
+                                              </div>
                                             </div>
+                                            <div className="text-[11px] text-slate-500 mt-1">{new Date(version.created_at).toLocaleString()}</div>
+                                            <div className="text-xs text-slate-600 mt-1">{version.name} • {version.type}</div>
                                           </div>
-                                          <div className="text-[11px] text-slate-500 mt-1">
-                                            {new Date(run.created_at).toLocaleString()}
-                                            {run.duration_ms != null ? ` • ${run.duration_ms}ms` : ''}
+                                        ))}
+                                        {toolVersions.length === 0 && <div className="text-sm text-slate-500">No version history yet.</div>}
+                                      </div>
+                                    </div>
+                                    <div className="border border-slate-200 rounded-xl p-4 bg-white">
+                                      <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Recent Usage</div>
+                                      <div className="space-y-2 max-h-56 overflow-y-auto">
+                                        {(toolUsage?.recent_executions || []).map((run) => (
+                                          <div key={run.id} className="rounded-lg border border-slate-200 px-3 py-2 bg-slate-50/70">
+                                            <div className="flex items-center justify-between gap-2">
+                                              <div className="text-sm font-semibold text-slate-900">{run.agent_name || run.tool_name}</div>
+                                              <div className={`text-[11px] px-2 py-0.5 rounded-full ${
+                                                run.status === 'failed' ? 'bg-red-100 text-red-700' : run.status === 'running' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
+                                              }`}>
+                                                {run.status}
+                                              </div>
+                                            </div>
+                                            <div className="text-[11px] text-slate-500 mt-1">
+                                              {new Date(run.created_at).toLocaleString()}
+                                              {run.duration_ms != null ? ` • ${run.duration_ms}ms` : ''}
+                                            </div>
+                                            {run.error ? <div className="text-[11px] text-red-600 mt-1 truncate">{run.error}</div> : null}
                                           </div>
-                                          {run.error ? <div className="text-[11px] text-red-600 mt-1 truncate">{run.error}</div> : null}
-                                        </div>
-                                      ))}
-                                      {!(toolUsage?.recent_executions || []).length && <div className="text-sm text-slate-500">No usage history yet.</div>}
+                                        ))}
+                                        {!(toolUsage?.recent_executions || []).length && <div className="text-sm text-slate-500">No usage history yet.</div>}
+                                      </div>
                                     </div>
                                   </div>
-                                </div>
+                                </details>
                               )}
 
                               {/* Dynamic Config Sections */}
                               <div className="bg-slate-50 p-5 rounded-xl border border-slate-200">
-                                  <h4 className="text-sm font-semibold text-slate-800 mb-4 flex items-center gap-2">
-                                      <Code size={16} className="text-indigo-500" /> Configuration
-                                  </h4>
-                                  
-                                  {formData.type === 'python' && (
+                                  <div className="flex items-start justify-between gap-4 mb-4">
                                       <div>
-                                          <label className="block text-sm font-medium text-slate-700 mb-2">Python Script</label>
+                                        <h4 className="text-sm font-semibold text-slate-800 flex items-center gap-2">
+                                            <Code size={16} className="text-indigo-500" /> Configuration
+                                        </h4>
+                                        <p className="text-xs text-slate-500 mt-1">Keep the primary tool definition visible here. Advanced import and protocol helpers are tucked behind expandable sections below.</p>
+                                      </div>
+                                      <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                                        Core Edit
+                                      </span>
+                                  </div>
+                                  
+                                  {formData.type === 'javascript' && (
+                                      <div>
+                                          <label className="block text-sm font-medium text-slate-700 mb-2">JavaScript Script</label>
                                           <div className="rounded-lg overflow-hidden border border-slate-300 focus-within:ring-2 focus-within:ring-indigo-500">
                                               <div className="bg-slate-800 px-4 py-2 flex items-center gap-2">
                                                   <div className="w-3 h-3 rounded-full bg-red-500"></div>
                                                   <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
                                                   <div className="w-3 h-3 rounded-full bg-green-500"></div>
-                                                  <span className="text-xs text-slate-400 ml-2 font-mono">script.py</span>
+                                                  <span className="text-xs text-slate-400 ml-2 font-mono">script.js</span>
                                               </div>
                                               <textarea
                                                   className="w-full px-4 py-3 bg-slate-900 text-green-400 outline-none h-64 font-mono text-sm resize-y"
@@ -1424,7 +2145,109 @@ export default function ToolsPage() {
                                                   spellCheck={false}
                                               />
                                           </div>
-                                          <p className="text-xs text-slate-500 mt-2">The script will be executed in a secure sandbox. Print the final output you want returned to the agent.</p>
+                                          <p className="text-xs text-slate-500 mt-2">Set a value in <code className="bg-white px-1 rounded">result</code> (for example: <code className="bg-white px-1 rounded">result = new Date().toISOString()</code>). Tool inputs are available in <code className="bg-white px-1 rounded">args</code>. You can use <code className="bg-white px-1 rounded">require('package-name')</code> for installed npm packages.</p>
+
+                                          <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+                                              <label className="block text-sm font-medium text-slate-700">npm Packages (optional)</label>
+                                              <input
+                                                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-sm"
+                                                  value={javascriptPackages}
+                                                  onChange={e => setJavascriptPackages(e.target.value)}
+                                                  placeholder="dayjs, lodash, @google-cloud/storage"
+                                              />
+                                              <div className="flex items-center gap-3">
+                                                  <button
+                                                      type="button"
+                                                      className="px-3 py-1.5 text-xs rounded-md bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
+                                                      disabled={jsPackagesInstalling}
+                                                      onClick={async () => {
+                                                          setJsPackagesNotice(null);
+                                                          const packages = parsePackageList(javascriptPackages);
+                                                          if (!packages.length) {
+                                                            setJsPackagesNotice('Enter at least one valid package name.');
+                                                            return;
+                                                          }
+                                                          setJsPackagesInstalling(true);
+                                                          try {
+                                                            const res = await fetch('/api/tools/javascript-packages/install', {
+                                                              method: 'POST',
+                                                              headers: { 'Content-Type': 'application/json' },
+                                                              body: JSON.stringify({ packages }),
+                                                            });
+                                                            const data = await safeJson(res) as any;
+                                                            if (!res.ok) throw new Error(data?.error || 'Failed to install packages');
+                                                            setJsPackagesNotice(`Installed: ${(data?.installed || packages).join(', ')}`);
+                                                          } catch (e: any) {
+                                                            setJsPackagesNotice(e?.message || 'Failed to install packages');
+                                                          } finally {
+                                                            setJsPackagesInstalling(false);
+                                                          }
+                                                      }}
+                                                  >
+                                                      {jsPackagesInstalling ? 'Installing...' : 'Install Packages'}
+                                                  </button>
+                                                  {jsPackagesNotice && (
+                                                      <span className={`text-xs ${jsPackagesNotice.startsWith('Installed:') ? 'text-emerald-700' : 'text-red-600'}`}>
+                                                          {jsPackagesNotice}
+                                                      </span>
+                                                  )}
+                                              </div>
+                                          </div>
+
+                                          <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+                                              <label className="block text-sm font-medium text-slate-700 mb-1">Test Invoke (Args JSON)</label>
+                                              <textarea
+                                                  className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none h-28 font-mono text-sm"
+                                                  value={jsTestArgs}
+                                                  onChange={e => setJsTestArgs(e.target.value)}
+                                                  placeholder='{"input":"hello"}'
+                                              />
+                                              <div className="flex items-center justify-between mt-2">
+                                                  <button
+                                                      type="button"
+                                                      className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60"
+                                                      disabled={jsTestLoading || typeof selectedToolId !== 'number'}
+                                                      onClick={async () => {
+                                                          setJsTestError(null);
+                                                          setJsTestResult(null);
+                                                          let args: any = {};
+                                                          try {
+                                                            args = jsTestArgs.trim() ? JSON.parse(jsTestArgs) : {};
+                                                          } catch {
+                                                            setJsTestError('Invalid JSON in args.');
+                                                            return;
+                                                          }
+                                                          if (typeof selectedToolId !== 'number') {
+                                                            setJsTestError('Save the tool first, then run test invoke.');
+                                                            return;
+                                                          }
+                                                          setJsTestLoading(true);
+                                                          try {
+                                                            const res = await fetch(`/api/tools/${selectedToolId}/test-run`, {
+                                                              method: 'POST',
+                                                              headers: { 'Content-Type': 'application/json' },
+                                                              body: JSON.stringify({ args }),
+                                                            });
+                                                            const data = await safeJson(res) as any;
+                                                            if (!res.ok) throw new Error(data?.error || 'Test invoke failed');
+                                                            setJsTestResult(String(data?.result || ''));
+                                                          } catch (e: any) {
+                                                            setJsTestError(e?.message || 'Test invoke failed');
+                                                          } finally {
+                                                            setJsTestLoading(false);
+                                                          }
+                                                      }}
+                                                  >
+                                                      {jsTestLoading ? 'Running...' : 'Run Test Invoke'}
+                                                  </button>
+                                                  {jsTestError && <span className="text-xs text-red-600">{jsTestError}</span>}
+                                              </div>
+                                              {jsTestResult && (
+                                                  <pre className="mt-3 text-xs bg-slate-900 text-slate-100 p-3 rounded-lg overflow-x-auto whitespace-pre-wrap">
+                                                      {jsTestResult}
+                                                  </pre>
+                                              )}
+                                          </div>
                                       </div>
                                   )}
 
@@ -1887,32 +2710,174 @@ export default function ToolsPage() {
 
                                   {formData.type === 'mcp' && (
                                       <div className="space-y-4">
-                                          <div>
-                                              <label className="block text-sm font-medium text-slate-700 mb-1">Import from MCP Config (claude_desktop_config.json)</label>
-                                              <textarea
-                                                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none h-24 font-mono text-xs"
-                                                  value={mcpImportText}
-                                                  onChange={e => setMcpImportText(e.target.value)}
-                                                  placeholder={`{\n  \"mcpServers\": {\n    \"tool_currentdatetimetool\": {\n      \"command\": \"npx\",\n      \"args\": [\"-y\", \"@modelcontextprotocol/server-sse\", \"--url\", \"http://localhost:3000/mcp/sse\"]\n    }\n  }\n}`}
-                                              />
-                                              <div className="flex items-center justify-between mt-2">
+                                          <details className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-4 group">
+                                              <summary className="flex cursor-pointer list-none items-start justify-between gap-3">
+                                                  <div>
+                                                      <label className="block text-sm font-medium text-slate-800 mb-1">Import from npm MCP package</label>
+                                                      <p className="text-xs text-slate-600">
+                                                          Paste a package like <code className="bg-white px-1 rounded">meta-ads-mcp</code> and the app will run it over stdio, discover its MCP tools, register local proxy tools, and optionally create an exposed MCP bundle.
+                                                      </p>
+                                                  </div>
+                                                  <div className="text-[11px] px-2 py-1 rounded-full bg-white border border-emerald-200 text-emerald-700 font-medium group-open:bg-emerald-600 group-open:text-white group-open:border-emerald-600">
+                                                      Automated
+                                                  </div>
+                                              </summary>
+
+                                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                                                  <div>
+                                                      <label className="block text-sm font-medium text-slate-700 mb-1">Package Name</label>
+                                                      <input
+                                                          type="text"
+                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none font-mono text-sm"
+                                                          value={mcpPackageName}
+                                                          onChange={e => setMcpPackageName(e.target.value)}
+                                                          placeholder="meta-ads-mcp"
+                                                      />
+                                                  </div>
+                                                  <div>
+                                                      <label className="block text-sm font-medium text-slate-700 mb-1">Command</label>
+                                                      <input
+                                                          type="text"
+                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none font-mono text-sm"
+                                                          value={mcpPackageCommand}
+                                                          onChange={e => setMcpPackageCommand(e.target.value)}
+                                                          placeholder="npx"
+                                                      />
+                                                  </div>
+                                                  <div className="md:col-span-2">
+                                                      <label className="block text-sm font-medium text-slate-700 mb-1">Command Args</label>
+                                                      <input
+                                                          type="text"
+                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none font-mono text-sm"
+                                                          value={mcpPackageArgs}
+                                                          onChange={e => setMcpPackageArgs(e.target.value)}
+                                                          placeholder="-y meta-ads-mcp"
+                                                      />
+                                                      <p className="text-xs text-slate-500 mt-1">The backend will launch <code className="bg-white px-1 rounded">{mcpPackageCommand || 'npx'}</code> with these args to discover MCP tools.</p>
+                                                  </div>
+                                                  <div>
+                                                      <label className="block text-sm font-medium text-slate-700 mb-1">Local Tool Prefix</label>
+                                                      <input
+                                                          type="text"
+                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none font-mono text-sm"
+                                                          value={mcpPackagePrefix}
+                                                          onChange={e => setMcpPackagePrefix(e.target.value)}
+                                                          placeholder="npm_meta_ads_mcp"
+                                                      />
+                                                  </div>
+                                                  <div>
+                                                      <label className="block text-sm font-medium text-slate-700 mb-1">Bundle Name</label>
+                                                      <input
+                                                          type="text"
+                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none text-sm"
+                                                          value={mcpPackageBundleName}
+                                                          onChange={e => setMcpPackageBundleName(e.target.value)}
+                                                          placeholder="meta-ads-mcp Bundle"
+                                                      />
+                                                  </div>
+                                                  <div className="md:col-span-2">
+                                                      <label className="block text-sm font-medium text-slate-700 mb-1">Bundle Slug</label>
+                                                      <input
+                                                          type="text"
+                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none font-mono text-sm"
+                                                          value={mcpPackageBundleSlug}
+                                                          onChange={e => setMcpPackageBundleSlug(e.target.value)}
+                                                          placeholder="meta_ads_mcp_bundle"
+                                                      />
+                                                  </div>
+                                                  <div className="md:col-span-2">
+                                                      <label className="block text-sm font-medium text-slate-700 mb-1">Environment Variables (JSON)</label>
+                                                      <textarea
+                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none h-28 font-mono text-xs"
+                                                          value={mcpPackageEnv}
+                                                          onChange={e => setMcpPackageEnv(e.target.value)}
+                                                          placeholder={"{\n  \"META_ACCESS_TOKEN\": \"...\",\n  \"META_APP_SECRET\": \"...\"\n}"}
+                                                      />
+                                                  </div>
+                                              </div>
+
+                                              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                                                  <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                                                      <input type="checkbox" checked={mcpPackageCreateBundle} onChange={e => setMcpPackageCreateBundle(e.target.checked)} />
+                                                      <span>Create MCP bundle</span>
+                                                  </label>
+                                                  <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                                                      <input type="checkbox" checked={mcpPackageExposeTools} onChange={e => setMcpPackageExposeTools(e.target.checked)} />
+                                                      <span>Publish individual tools</span>
+                                                  </label>
+                                                  <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                                                      <input type="checkbox" checked={mcpPackageExposeBundle} onChange={e => setMcpPackageExposeBundle(e.target.checked)} disabled={!mcpPackageCreateBundle} />
+                                                      <span>Publish bundle endpoint</span>
+                                                  </label>
+                                              </div>
+
+                                              <div className="flex items-center justify-between gap-3 flex-wrap">
                                                   <button
                                                       type="button"
-                                                      className="px-3 py-1.5 text-xs rounded-md bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
-                                                      onClick={importMcpConfig}
-                                                      disabled={!mcpImportText.trim() || mcpImportLoading}
+                                                      className="px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60"
+                                                      onClick={importMcpPackage}
+                                                      disabled={!mcpPackageName.trim() || mcpPackageImportLoading}
                                                   >
-                                                      {mcpImportLoading ? 'Importing...' : 'Import MCP Config'}
+                                                      {mcpPackageImportLoading ? 'Importing package...' : 'Import npm MCP Package'}
                                                   </button>
-                                                  {mcpImportError && (
-                                                      <span className="text-xs text-red-600">{mcpImportError}</span>
-                                                  )}
-                                                  {mcpImportSuccess && (
-                                                      <span className="text-xs text-emerald-600">{mcpImportSuccess}</span>
+                                                  {mcpPackageImportError && (
+                                                      <span className="text-xs text-red-600">{mcpPackageImportError}</span>
                                                   )}
                                               </div>
-                                              <p className="text-xs text-slate-500 mt-2">This will create MCP tools for each entry in <code className="bg-slate-100 px-1 rounded">mcpServers</code>.</p>
-                                          </div>
+
+                                              {mcpPackageImportResult && (
+                                                  <div className="rounded-lg border border-emerald-200 bg-white px-3 py-3 text-sm text-slate-700 space-y-2">
+                                                      <div className="font-medium text-emerald-700">
+                                                          Imported {mcpPackageImportResult.discoveredCount} MCP tool{mcpPackageImportResult.discoveredCount === 1 ? '' : 's'} from <code className="bg-emerald-50 px-1 rounded">{mcpPackageImportResult.packageName}</code>.
+                                                      </div>
+                                                      <div className="text-xs text-slate-600">
+                                                          Local proxies: {mcpPackageImportResult.tools.map(tool => tool.name).join(', ')}
+                                                      </div>
+                                                      {mcpPackageImportResult.bundle && (
+                                                          <div className="text-xs text-slate-600">
+                                                              Bundle ready at <code className="bg-emerald-50 px-1 rounded">/mcp/bundle/{mcpPackageImportResult.bundle.slug}</code>.
+                                                          </div>
+                                                      )}
+                                                  </div>
+                                              )}
+                                          </details>
+
+                                          <details className="rounded-xl border border-slate-200 bg-white p-4 group">
+                                              <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                                                  <div>
+                                                      <div className="text-sm font-medium text-slate-700">Import from MCP Config</div>
+                                                      <p className="text-xs text-slate-500 mt-1">Use a `claude_desktop_config.json` style config to create MCP tool entries in bulk.</p>
+                                                  </div>
+                                                  <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 group-open:bg-slate-900 group-open:text-white">
+                                                      Expand
+                                                  </span>
+                                              </summary>
+                                              <div className="mt-4">
+                                                  <textarea
+                                                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none h-24 font-mono text-xs"
+                                                      value={mcpImportText}
+                                                      onChange={e => setMcpImportText(e.target.value)}
+                                                      placeholder={`{\n  \"mcpServers\": {\n    \"tool_currentdatetimetool\": {\n      \"command\": \"npx\",\n      \"args\": [\"-y\", \"@modelcontextprotocol/server-sse\", \"--url\", \"http://localhost:3000/mcp/sse\"]\n    }\n  }\n}`}
+                                                  />
+                                                  <div className="flex items-center justify-between mt-2">
+                                                      <button
+                                                          type="button"
+                                                          className="px-3 py-1.5 text-xs rounded-md bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
+                                                          onClick={importMcpConfig}
+                                                          disabled={!mcpImportText.trim() || mcpImportLoading}
+                                                      >
+                                                          {mcpImportLoading ? 'Importing...' : 'Import MCP Config'}
+                                                      </button>
+                                                      {mcpImportError && (
+                                                          <span className="text-xs text-red-600">{mcpImportError}</span>
+                                                      )}
+                                                      {mcpImportSuccess && (
+                                                          <span className="text-xs text-emerald-600">{mcpImportSuccess}</span>
+                                                      )}
+                                                  </div>
+                                                  <p className="text-xs text-slate-500 mt-2">This will create MCP tools for each entry in <code className="bg-slate-100 px-1 rounded">mcpServers</code>.</p>
+                                              </div>
+                                          </details>
                                           <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
                                               <strong>MCP (Model Context Protocol)</strong> — connects your agent to an external tool server.
                                               The <code className="font-mono bg-blue-100 px-1 rounded">serverUrl</code> should point to the MCP endpoint.
@@ -2074,7 +3039,162 @@ export default function ToolsPage() {
                                       </div>
                                   )}
 
-                                  {['custom', 'search', 'calculator'].includes(formData.type) && (
+                                  {formData.type === 'mcp_stdio_proxy' && (
+                                      <div className="space-y-5">
+                                          <div className="p-3 bg-cyan-50 border border-cyan-200 rounded-lg text-xs text-cyan-800">
+                                              <strong>Local MCP Runtime Tool</strong> - this tool is part of an npm-installed MCP package that runs on this server. The platform invokes it locally over stdio, can expose it through MCP bundles, and can attach those bundles to agents.
+                                          </div>
+
+                                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                              <div>
+                                                  <label className="block text-sm font-medium text-slate-700 mb-1">Package Name</label>
+                                                  <input
+                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-cyan-500 outline-none font-mono text-sm"
+                                                      value={mcpStdioConfig.packageName}
+                                                      onChange={e => setMcpStdioConfig(prev => ({ ...prev, packageName: e.target.value }))}
+                                                      placeholder="meta-ads-mcp"
+                                                  />
+                                              </div>
+                                              <div>
+                                                  <label className="block text-sm font-medium text-slate-700 mb-1">Target MCP Tool Name</label>
+                                                  <input
+                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-cyan-500 outline-none font-mono text-sm"
+                                                      value={mcpStdioConfig.mcpToolName}
+                                                      onChange={e => setMcpStdioConfig(prev => ({ ...prev, mcpToolName: e.target.value }))}
+                                                      placeholder="get_ad_accounts"
+                                                  />
+                                              </div>
+                                              <div>
+                                                  <label className="block text-sm font-medium text-slate-700 mb-1">Raw Command</label>
+                                                  <input
+                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-cyan-500 outline-none font-mono text-sm"
+                                                      value={mcpStdioConfig.rawCommand}
+                                                      onChange={e => setMcpStdioConfig(prev => ({ ...prev, rawCommand: e.target.value }))}
+                                                      placeholder="npx"
+                                                  />
+                                              </div>
+                                              <div>
+                                                  <label className="block text-sm font-medium text-slate-700 mb-1">Raw Args</label>
+                                                  <input
+                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-cyan-500 outline-none font-mono text-sm"
+                                                      value={mcpStdioConfig.rawArgs}
+                                                      onChange={e => setMcpStdioConfig(prev => ({ ...prev, rawArgs: e.target.value }))}
+                                                      placeholder="-y meta-ads-mcp"
+                                                  />
+                                              </div>
+                                              <div>
+                                                  <label className="block text-sm font-medium text-slate-700 mb-1">Wrapped Runtime Command</label>
+                                                  <input
+                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg bg-slate-50 outline-none font-mono text-sm"
+                                                      value={mcpStdioConfig.command}
+                                                      onChange={e => setMcpStdioConfig(prev => ({ ...prev, command: e.target.value }))}
+                                                  />
+                                              </div>
+                                              <div>
+                                                  <label className="block text-sm font-medium text-slate-700 mb-1">Wrapped Runtime Args</label>
+                                                  <input
+                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg bg-slate-50 outline-none font-mono text-sm"
+                                                      value={mcpStdioConfig.args}
+                                                      onChange={e => setMcpStdioConfig(prev => ({ ...prev, args: e.target.value }))}
+                                                  />
+                                              </div>
+                                              <div>
+                                                  <label className="block text-sm font-medium text-slate-700 mb-1">Timeout (ms)</label>
+                                                  <input
+                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-cyan-500 outline-none font-mono text-sm"
+                                                      value={mcpStdioConfig.timeoutMs}
+                                                      onChange={e => setMcpStdioConfig(prev => ({ ...prev, timeoutMs: e.target.value }))}
+                                                      placeholder="45000"
+                                                  />
+                                              </div>
+                                          </div>
+
+                                          <div>
+                                              <label className="block text-sm font-medium text-slate-700 mb-1">Environment Variables (JSON)</label>
+                                              <textarea
+                                                  className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-cyan-500 outline-none h-32 font-mono text-sm"
+                                                  value={mcpStdioConfig.env}
+                                                  onChange={e => setMcpStdioConfig(prev => ({ ...prev, env: e.target.value }))}
+                                                  placeholder='{"META_ACCESS_TOKEN":"..."}'
+                                              />
+                                          </div>
+
+                                          <div className="border-t border-slate-200 pt-4 space-y-4">
+                                              <div>
+                                                  <div className="text-sm font-medium text-slate-700 mb-2">Discovered Input Schema</div>
+                                                  {Object.entries(mcpStdioSchema?.properties || {}).length > 0 ? (
+                                                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                          {(Object.entries(mcpStdioSchema?.properties || {}) as Array<[string, McpSchemaProperty]>).map(([key, property]) => (
+                                                              <div key={key} className="rounded-lg border border-slate-200 bg-white p-3">
+                                                                  <div className="text-sm font-semibold text-slate-900">
+                                                                      {key}
+                                                                      {(mcpStdioSchema?.required || []).includes(key) && <span className="text-red-500 ml-1">*</span>}
+                                                                  </div>
+                                                                  <div className="text-xs text-slate-500 mt-1">{property.type || 'string'}{property.description ? ` · ${property.description}` : ''}</div>
+                                                              </div>
+                                                          ))}
+                                                      </div>
+                                                  ) : (
+                                                      <div className="text-sm text-slate-500 border border-dashed border-slate-200 rounded-lg p-4">
+                                                          No structured schema was returned for this tool.
+                                                      </div>
+                                                  )}
+                                              </div>
+
+                                              <div>
+                                                  <div className="text-sm font-medium text-slate-700 mb-2">Test Execution Inputs</div>
+                                                  {Object.entries(mcpStdioSchema?.properties || {}).length > 0 ? (
+                                                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                          {(Object.entries(mcpStdioSchema?.properties || {}) as Array<[string, McpSchemaProperty]>).map(([key, property]) => (
+                                                              <div key={`test-${key}`}>
+                                                                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                                                                      {key}
+                                                                      {(mcpStdioSchema?.required || []).includes(key) && <span className="text-red-500 ml-1">*</span>}
+                                                                  </label>
+                                                                  <input
+                                                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-cyan-500 outline-none font-mono text-sm"
+                                                                      value={mcpStdioTestValues[key] || ''}
+                                                                      onChange={e => setMcpStdioTestValues(prev => ({ ...prev, [key]: e.target.value }))}
+                                                                      placeholder={
+                                                                          property.type === 'object' ? '{"key":"value"}'
+                                                                          : property.type === 'array' ? '["item"]'
+                                                                          : property.type === 'boolean' ? 'true'
+                                                                          : property.type === 'number' || property.type === 'integer' ? '123'
+                                                                          : `Enter ${key}`
+                                                                      }
+                                                                  />
+                                                              </div>
+                                                          ))}
+                                                      </div>
+                                                  ) : (
+                                                      <div className="text-sm text-slate-500 border border-dashed border-slate-200 rounded-lg p-4">
+                                                          This tool can be tested without predefined schema fields, or its schema could not be discovered.
+                                                      </div>
+                                                  )}
+
+                                                  <div className="flex items-center gap-3 mt-4">
+                                                      <button
+                                                          type="button"
+                                                          onClick={runMcpStdioTest}
+                                                          disabled={mcpStdioTestLoading || selectedToolId === 'new'}
+                                                          className="px-4 py-2 text-sm font-medium bg-cyan-600 text-white rounded-lg hover:bg-cyan-700 disabled:opacity-60"
+                                                      >
+                                                          {mcpStdioTestLoading ? 'Running Test...' : 'Run MCP Tool Test'}
+                                                      </button>
+                                                      {mcpStdioTestError && <span className="text-sm text-red-600">{mcpStdioTestError}</span>}
+                                                  </div>
+
+                                                  {mcpStdioTestResult && (
+                                                      <pre className="mt-3 text-xs bg-slate-900 text-slate-100 p-3 rounded-lg overflow-x-auto whitespace-pre-wrap">
+                                                          {mcpStdioTestResult}
+                                                      </pre>
+                                                  )}
+                                              </div>
+                                          </div>
+                                      </div>
+                                  )}
+
+                                  {formData.type === 'custom' && (
                                       <div>
                                           <label className="block text-sm font-medium text-slate-700 mb-1">Raw JSON Config</label>
                                           <textarea
@@ -2248,6 +3368,17 @@ export default function ToolsPage() {
                 <p className="text-xs text-slate-500 mt-2">If none selected, tools are created unassigned.</p>
               </div>
 
+              {buildEvents.length > 0 && (
+                <div className="rounded-xl border border-slate-200 bg-slate-900 p-3 font-mono text-xs max-h-48 overflow-y-auto space-y-2">
+                  {buildEvents.map((event, index) => (
+                    <div key={`${event.type}-${index}`} className={event.type === 'error' ? 'text-red-300' : event.type === 'done' ? 'text-emerald-300' : 'text-slate-200'}>
+                      <span className="text-slate-500 mr-2">[{new Date(event.timestamp || event.received_at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}]</span>
+                      <span>{event.message || (event.type === 'done' ? 'Build completed.' : event.type)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {buildError && (
                 <div className="text-sm text-red-600">{buildError}</div>
               )}
@@ -2261,7 +3392,7 @@ export default function ToolsPage() {
               </button>
               <button
                 onClick={autoBuildTools}
-                disabled={isBuilding || !autoBuildGoal}
+                disabled={isBuilding || !autoBuildGoal.trim() || autoBuildGoal.trim().length > 4000}
                 className="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
               >
                 {isBuilding ? 'Building...' : 'Build Tools'}
@@ -2316,6 +3447,46 @@ export default function ToolsPage() {
                 className="px-4 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700"
               >
                 Force Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showBulkDeleteConfirm && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[70] p-4">
+          <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl border border-red-100 overflow-hidden">
+            <div className="p-5 border-b border-red-100 bg-red-50">
+              <div className="text-lg font-semibold text-red-900">Delete Selected Tools</div>
+              <div className="text-sm text-red-800 mt-1">
+                Delete {selectedToolIdsForDelete.length} selected tool(s)? This action cannot be undone.
+              </div>
+            </div>
+            <div className="p-5 text-sm text-slate-700">
+              {bulkDeleteError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-red-700">{bulkDeleteError}</div>
+              ) : (
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                  Dependencies may block some tools from deletion. Blocked items will remain selected.
+                </div>
+              )}
+            </div>
+            <div className="p-4 border-t border-slate-100 flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  if (bulkDeleteLoading) return;
+                  setShowBulkDeleteConfirm(false);
+                  setBulkDeleteError(null);
+                }}
+                className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void deleteSelectedTools()}
+                disabled={bulkDeleteLoading || !selectedToolIdsForDelete.length}
+                className="px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-60"
+              >
+                {bulkDeleteLoading ? 'Deleting...' : 'Confirm Delete'}
               </button>
             </div>
           </div>

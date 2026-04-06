@@ -13,7 +13,9 @@ vi.mock('motion/react', () => ({
   motion: new Proxy(
     {},
     {
-      get: () => ({ children, ...rest }: any) => <div {...rest}>{children}</div>,
+      get: () => ({ children, whileHover, whileTap, whileInView, whileFocus, whileDrag, initial, animate, exit, variants, transition, layout, layoutId, drag, dragConstraints, ...rest }: any) => (
+        <div {...rest}>{children}</div>
+      ),
     }
   ),
 }));

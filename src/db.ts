@@ -39,6 +39,7 @@ export function initDb() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       description TEXT,
+      platform_project_id TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -323,6 +324,7 @@ export function initDb() {
       name TEXT NOT NULL,
       slug TEXT NOT NULL UNIQUE,
       description TEXT,
+      is_exposed INTEGER DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -441,6 +443,11 @@ export function initDb() {
 
   // Migrations
   try {
+    const projectColumns = db.prepare("PRAGMA table_info(projects)").all() as any[];
+    const projectColumnNames = projectColumns.map(col => col.name);
+    if (!projectColumnNames.includes('platform_project_id')) {
+      db.exec("ALTER TABLE projects ADD COLUMN platform_project_id TEXT");
+    }
     const hasProjectLinks = (db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get('project_links') as any)?.name;
     if (!hasProjectLinks) {
       db.exec(`
@@ -453,14 +460,32 @@ export function initDb() {
         );
       `);
     }
+    db.exec(`
+      UPDATE projects
+      SET platform_project_id = (
+        SELECT platform_project_id
+        FROM project_links
+        WHERE project_links.project_id = projects.id
+      )
+      WHERE (platform_project_id IS NULL OR platform_project_id = '')
+        AND EXISTS (
+          SELECT 1 FROM project_links WHERE project_links.project_id = projects.id
+        );
+    `);
 
     // Helper to apply ALTER TABLE columns with debug logs
     const applyColumn = (sql: string) => {
       try {
         db.exec(sql);
-      } catch (e) {
-        console.error('Failed to apply SQL:', sql, 'error:', e);
-        throw e;
+      } catch (e: any) {
+        // Column already exists is not a fatal error - just log and continue
+        const errorMsg = String(e?.message || '');
+        if (errorMsg.includes('duplicate column') || errorMsg.includes('already exists')) {
+          console.info('Column migration already applied:', sql);
+        } else {
+          console.error('Failed to apply SQL:', sql, 'error:', e);
+          throw e;
+        }
       }
     };
 
@@ -704,11 +729,115 @@ export function initDb() {
           status TEXT DEFAULT 'pending',
           result TEXT,
           error TEXT,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          started_at DATETIME,
-          finished_at DATETIME
-        );
-      `);
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      started_at DATETIME,
+      finished_at DATETIME
+    );
+
+    CREATE TABLE IF NOT EXISTS voice_sessions (
+      id TEXT PRIMARY KEY,
+      agent_id INTEGER NOT NULL,
+      status TEXT DEFAULT 'idle',
+      transport TEXT DEFAULT 'websocket',
+      voice_provider TEXT DEFAULT 'elevenlabs',
+      voice_id TEXT,
+      tts_model_id TEXT,
+      stt_model_id TEXT,
+      transcript TEXT,
+      reply_text TEXT,
+      meta TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS voice_session_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      payload TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (session_id) REFERENCES voice_sessions(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_voice_profiles (
+      agent_id INTEGER PRIMARY KEY,
+      voice_provider TEXT DEFAULT 'elevenlabs',
+      voice_id TEXT,
+      tts_model_id TEXT,
+      stt_model_id TEXT,
+      output_format TEXT,
+      sample_rate INTEGER DEFAULT 16000,
+      language_code TEXT DEFAULT 'en',
+      auto_tts INTEGER DEFAULT 1,
+      meta TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS crew_voice_profiles (
+      crew_id INTEGER PRIMARY KEY,
+      voice_provider TEXT DEFAULT 'elevenlabs',
+      voice_id TEXT,
+      tts_model_id TEXT,
+      stt_model_id TEXT,
+      output_format TEXT,
+      sample_rate INTEGER DEFAULT 16000,
+      language_code TEXT DEFAULT 'en',
+      auto_tts INTEGER DEFAULT 1,
+      meta TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (crew_id) REFERENCES crews(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS voice_config_presets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      voice_provider TEXT DEFAULT 'elevenlabs',
+      voice_id TEXT,
+      tts_model_id TEXT,
+      stt_model_id TEXT,
+      output_format TEXT,
+      sample_rate INTEGER DEFAULT 16000,
+      language_code TEXT DEFAULT 'en',
+      auto_tts INTEGER DEFAULT 1,
+      notes TEXT,
+      meta TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS resource_owners (
+      resource_type TEXT NOT NULL,
+      resource_id INTEGER NOT NULL,
+      owner_user_id TEXT NOT NULL,
+      owner_org_id TEXT,
+      visibility TEXT DEFAULT 'private',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (resource_type, resource_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS resource_shares (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      resource_type TEXT NOT NULL,
+      resource_id INTEGER NOT NULL,
+      shared_with_user_id TEXT,
+      shared_with_org_id TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_resource_owners_owner_lookup
+      ON resource_owners(resource_type, owner_user_id, owner_org_id, visibility);
+
+    CREATE INDEX IF NOT EXISTS idx_resource_shares_resource_lookup
+      ON resource_shares(resource_type, resource_id);
+
+    CREATE INDEX IF NOT EXISTS idx_resource_shares_subject_lookup
+      ON resource_shares(resource_type, shared_with_user_id, shared_with_org_id);
+  `);
     }
 
     const hasMcpExposedTools = (db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get('mcp_exposed_tools') as any)?.name;
@@ -733,6 +862,7 @@ export function initDb() {
           name TEXT NOT NULL,
           slug TEXT NOT NULL UNIQUE,
           description TEXT,
+          is_exposed INTEGER DEFAULT 1,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
@@ -963,6 +1093,289 @@ export function initDb() {
     `);
   } catch (e) {
     console.error("Migration error:", e);
+  }
+}
+
+export function ensureVoiceTables() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS voice_sessions (
+        id TEXT PRIMARY KEY,
+        agent_id INTEGER NOT NULL,
+        status TEXT DEFAULT 'idle',
+        transport TEXT DEFAULT 'websocket',
+        voice_provider TEXT DEFAULT 'elevenlabs',
+        voice_id TEXT,
+        tts_model_id TEXT,
+        stt_model_id TEXT,
+        transcript TEXT,
+        reply_text TEXT,
+        meta TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS voice_session_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        payload TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (session_id) REFERENCES voice_sessions(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_voice_profiles (
+        agent_id INTEGER PRIMARY KEY,
+        voice_provider TEXT DEFAULT 'elevenlabs',
+        voice_id TEXT,
+        tts_model_id TEXT,
+        stt_model_id TEXT,
+        output_format TEXT,
+        sample_rate INTEGER DEFAULT 16000,
+        language_code TEXT DEFAULT 'en',
+        auto_tts INTEGER DEFAULT 1,
+        meta TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS crew_voice_profiles (
+        crew_id INTEGER PRIMARY KEY,
+        voice_provider TEXT DEFAULT 'elevenlabs',
+        voice_id TEXT,
+        tts_model_id TEXT,
+        stt_model_id TEXT,
+        output_format TEXT,
+        sample_rate INTEGER DEFAULT 16000,
+        language_code TEXT DEFAULT 'en',
+        auto_tts INTEGER DEFAULT 1,
+        meta TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (crew_id) REFERENCES crews(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS voice_config_presets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        voice_provider TEXT DEFAULT 'elevenlabs',
+        voice_id TEXT,
+        tts_model_id TEXT,
+        stt_model_id TEXT,
+        output_format TEXT,
+        sample_rate INTEGER DEFAULT 16000,
+        language_code TEXT DEFAULT 'en',
+        auto_tts INTEGER DEFAULT 1,
+        notes TEXT,
+        meta TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS resource_owners (
+        resource_type TEXT NOT NULL,
+        resource_id INTEGER NOT NULL,
+        owner_user_id TEXT NOT NULL,
+        owner_org_id TEXT,
+        visibility TEXT DEFAULT 'private',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (resource_type, resource_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS resource_shares (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        resource_type TEXT NOT NULL,
+        resource_id INTEGER NOT NULL,
+        shared_with_user_id TEXT,
+        shared_with_org_id TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_resource_owners_owner_lookup
+        ON resource_owners(resource_type, owner_user_id, owner_org_id, visibility);
+
+      CREATE INDEX IF NOT EXISTS idx_resource_shares_resource_lookup
+        ON resource_shares(resource_type, resource_id);
+
+      CREATE INDEX IF NOT EXISTS idx_resource_shares_subject_lookup
+        ON resource_shares(resource_type, shared_with_user_id, shared_with_org_id);
+    `);
+    const voicePresetColumns = db.prepare("PRAGMA table_info(voice_config_presets)").all() as Array<{ name: string }>;
+    if (!voicePresetColumns.some((column) => column.name === 'meta')) {
+      db.exec('ALTER TABLE voice_config_presets ADD COLUMN meta TEXT');
+    }
+  } catch (e) {
+    console.error('Voice table migration error:', e);
+    throw e;
+  }
+}
+
+export function ensureAttachmentTables() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS attachments (
+        id TEXT PRIMARY KEY,
+        scope_type TEXT,
+        scope_id TEXT,
+        agent_id INTEGER,
+        crew_id INTEGER,
+        uploader_user_id TEXT,
+        uploader_org_id TEXT,
+        kind TEXT DEFAULT 'file',
+        original_name TEXT NOT NULL,
+        mime_type TEXT,
+        size_bytes INTEGER,
+        storage_provider TEXT DEFAULT 'gcs',
+        storage_key TEXT NOT NULL,
+        file_url TEXT NOT NULL,
+        local_path TEXT,
+        metadata TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+        FOREIGN KEY (crew_id) REFERENCES crews(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_attachments_scope_lookup
+        ON attachments(scope_type, scope_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_attachments_agent_lookup
+        ON attachments(agent_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_attachments_crew_lookup
+        ON attachments(crew_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_attachments_uploader_lookup
+        ON attachments(uploader_user_id, uploader_org_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS attachment_public_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        attachment_id TEXT NOT NULL,
+        token TEXT NOT NULL UNIQUE,
+        expires_at DATETIME NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (attachment_id) REFERENCES attachments(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_attachment_public_links_attachment_lookup
+        ON attachment_public_links(attachment_id, expires_at);
+
+      CREATE INDEX IF NOT EXISTS idx_attachment_public_links_token_lookup
+        ON attachment_public_links(token, expires_at);
+    `);
+    const attachmentColumns = db.prepare("PRAGMA table_info(attachments)").all() as Array<{ name: string }>;
+    if (!attachmentColumns.some((column) => column.name === 'local_path')) {
+      db.exec('ALTER TABLE attachments ADD COLUMN local_path TEXT');
+    }
+  } catch (e) {
+    console.error('Attachment table migration error:', e);
+    throw e;
+  }
+}
+
+export function ensureLearningTables() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS user_agent_preferences (
+        user_id TEXT NOT NULL,
+        agent_id INTEGER NOT NULL,
+        preference_text TEXT NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, agent_id),
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS run_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        execution_id INTEGER NOT NULL,
+        agent_id INTEGER NOT NULL,
+        user_id TEXT,
+        session_id TEXT,
+        rating TEXT,
+        solved INTEGER,
+        feedback_text TEXT,
+        task_signature TEXT,
+        tool_sequence TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_learning_lessons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id INTEGER NOT NULL,
+        user_id TEXT,
+        lesson_kind TEXT NOT NULL,
+        task_signature TEXT,
+        guidance TEXT NOT NULL,
+        weight INTEGER DEFAULT 50,
+        source_feedback_id INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+        FOREIGN KEY (source_feedback_id) REFERENCES run_feedback(id) ON DELETE SET NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_run_feedback_execution_lookup
+        ON run_feedback(execution_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_run_feedback_agent_lookup
+        ON run_feedback(agent_id, user_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_agent_learning_lessons_lookup
+        ON agent_learning_lessons(agent_id, user_id, task_signature, lesson_kind, updated_at);
+
+      CREATE TABLE IF NOT EXISTS crew_run_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        execution_id INTEGER NOT NULL,
+        crew_id INTEGER NOT NULL,
+        user_id TEXT,
+        rating TEXT,
+        solved INTEGER,
+        feedback_text TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (crew_id) REFERENCES crews(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_crew_run_feedback_execution_lookup
+        ON crew_run_feedback(execution_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_crew_run_feedback_crew_lookup
+        ON crew_run_feedback(crew_id, user_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS workflow_run_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workflow_run_id INTEGER NOT NULL,
+        workflow_id INTEGER NOT NULL,
+        user_id TEXT,
+        rating TEXT,
+        solved INTEGER,
+        feedback_text TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_run_feedback_run_lookup
+        ON workflow_run_feedback(workflow_run_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_run_feedback_workflow_lookup
+        ON workflow_run_feedback(workflow_id, user_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS entity_learning_settings (
+        resource_type TEXT NOT NULL,
+        resource_id INTEGER NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (resource_type, resource_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_entity_learning_settings_lookup
+        ON entity_learning_settings(resource_type, resource_id, updated_at);
+    `);
+  } catch (e) {
+    console.error('Learning table migration error:', e);
+    throw e;
   }
 }
 
