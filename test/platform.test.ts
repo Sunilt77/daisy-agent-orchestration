@@ -144,7 +144,13 @@ describe('platform', () => {
     const loginAgain = await request(app)
       .post('/api/auth/login')
       .send({ email: 'owner@acme.com', password: 'Password123!' });
-    expect(loginAgain.status).toBe(429);
-    expect(String(loginAgain.body.error || '')).toContain('session limit');
+    expect(loginAgain.status).toBe(200);
+
+    const user = await prisma.user.findFirst({ where: { email: 'owner@acme.com' } });
+    expect(user).toBeTruthy();
+    const activeSessionCount = await prisma.session.count({
+      where: { userId: user!.id, revokedAt: null, expiresAt: { gt: new Date() } },
+    });
+    expect(activeSessionCount).toBe(1);
   });
 });

@@ -128,6 +128,28 @@ function getPlatformSettings() {
   };
 }
 
+async function reclaimUserSessionSlot(userId: string, maxActiveSessionsPerUser: number): Promise<void> {
+  if (!Number.isFinite(maxActiveSessionsPerUser) || maxActiveSessionsPerUser <= 0) return;
+
+  const prisma = getPrisma();
+  const now = new Date();
+  const keepCount = Math.max(maxActiveSessionsPerUser - 1, 0);
+  const activeSessions = await prisma.session.findMany({
+    where: { userId, revokedAt: null, expiresAt: { gt: now } },
+    orderBy: { createdAt: 'asc' },
+    select: { id: true },
+  });
+
+  const revokeCount = activeSessions.length - keepCount;
+  if (revokeCount <= 0) return;
+
+  const sessionIdsToRevoke = activeSessions.slice(0, revokeCount).map((s) => s.id);
+  await prisma.session.updateMany({
+    where: { id: { in: sessionIdsToRevoke }, revokedAt: null },
+    data: { revokedAt: now },
+  });
+}
+
 function sanitizeIdList(input: any): number[] {
   if (!Array.isArray(input)) return [];
   return Array.from(new Set(input.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0)));
@@ -661,6 +683,10 @@ export function registerPlatformRoutes(app: Express) {
       }
 
       const policy = await getResolvedOrgPolicy(user.orgId);
+      if (policy.max_active_sessions_per_user && policy.max_active_sessions_per_user > 0) {
+        // Keep session limits strict while avoiding permanent lockout when a client fails to call /logout.
+        await reclaimUserSessionSlot(user.id, policy.max_active_sessions_per_user);
+      }
       if (policy.max_active_sessions_org && policy.max_active_sessions_org > 0) {
         const orgActiveSessions = await prisma.session.count({
           where: {
