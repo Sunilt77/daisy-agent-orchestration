@@ -143,35 +143,48 @@ function slugifyValue(input: string) {
     .replace(/^_+|_+$/g, '');
 }
 
+function dedupeAdjacentTokens(tokens: string[]) {
+  const out: string[] = [];
+  for (const token of tokens) {
+    if (!token) continue;
+    if (!out.length || out[out.length - 1] !== token) out.push(token);
+  }
+  return out;
+}
+
+function normalizeMcpIdentifier(input: string) {
+  const base = slugifyValue(input);
+  if (!base) return '';
+  const tokens = dedupeAdjacentTokens(base.split('_').map((t) => t.trim()).filter(Boolean));
+  return tokens.join('_');
+}
+
 function packageToBaseName(input: string) {
   const cleaned = String(input || '')
     .trim()
     .replace(/^@/, '')
     .replace(/[\\/]/g, '_')
     .replace(/[^a-zA-Z0-9_-]+/g, '_');
-  return slugifyValue(cleaned);
+  return normalizeMcpIdentifier(cleaned);
 }
 
 function compactMcpPackageAlias(input: string) {
-  const base = packageToBaseName(input)
-    .replace(/^npm_/, '')
-    .replace(/_cloud_api$/i, '')
-    .replace(/_cloud$/i, '')
-    .replace(/_api$/i, '')
-    .replace(/_mcp_server$/i, '')
-    .replace(/_mcp$/i, '')
-    .replace(/_server$/i, '');
-  return slugifyValue(base) || 'mcp';
+  const base = packageToBaseName(input).replace(/^npm_/, '');
+  const tokens = base.split('_').filter(Boolean);
+  const removableTail = new Set(['mcp', 'server', 'api', 'cloud']);
+  while (tokens.length > 1 && removableTail.has(tokens[tokens.length - 1])) tokens.pop();
+  const compact = normalizeMcpIdentifier(tokens.join('_'));
+  return compact || 'mcp';
 }
 
 function buildImportedMcpPrefix(packageName: string, namePrefix?: string) {
-  const explicit = slugifyValue(String(namePrefix || ''));
+  const explicit = normalizeMcpIdentifier(String(namePrefix || ''));
   if (explicit) return explicit;
   return compactMcpPackageAlias(packageName);
 }
 
 function splitSlugTokens(input: string): string[] {
-  return slugifyValue(input).split('_').map((token) => token.trim()).filter(Boolean);
+  return normalizeMcpIdentifier(input).split('_').map((token) => token.trim()).filter(Boolean);
 }
 
 function stripLeadingPrefixTokens(tokens: string[], prefix: string): string[] {
@@ -190,10 +203,7 @@ function stripLeadingPrefixTokens(tokens: string[], prefix: string): string[] {
 function normalizeImportedMcpToolSlug(prefix: string, mcpToolName: string) {
   const rawTokens = splitSlugTokens(mcpToolName);
   const withoutPrefix = stripLeadingPrefixTokens(rawTokens, prefix);
-  const deduped: string[] = [];
-  for (const token of withoutPrefix) {
-    if (!deduped.length || deduped[deduped.length - 1] !== token) deduped.push(token);
-  }
+  const deduped = dedupeAdjacentTokens(withoutPrefix);
   return deduped.length ? deduped.join('_') : 'tool';
 }
 
@@ -204,13 +214,13 @@ function humanizeSlug(input: string): string {
 }
 
 function buildImportedMcpExposedName(prefix: string, mcpToolName: string) {
-  const cleanPrefix = slugifyValue(prefix) || 'mcp';
+  const cleanPrefix = normalizeMcpIdentifier(prefix) || 'mcp';
   const cleanToolName = normalizeImportedMcpToolSlug(cleanPrefix, mcpToolName);
   return `${cleanPrefix}_${cleanToolName}`;
 }
 
 function buildExposedMcpToolAlias(exposedName: string) {
-  const value = String(exposedName || '').trim();
+  const value = normalizeMcpIdentifier(String(exposedName || '').trim());
   if (!value) return 'tool';
   return value.startsWith('tool_') ? value : `tool_${value}`;
 }
@@ -7320,8 +7330,9 @@ app.get('/api/voice/sessions/:id', requireUser, async (req, res) => {
 const mcpTransports = new Map<string, { transport: StreamableHTTPServerTransport | SSEServerTransport; scope: string }>();
 
 function normalizeMcpName(name: string, prefix = ''): string {
-    const base = name.toLowerCase().replace(/\s+/g, '_');
-    return prefix ? `${prefix}${base}` : base;
+    const normalizedPrefix = normalizeMcpIdentifier(prefix);
+    const base = normalizeMcpIdentifier(name);
+    return normalizedPrefix ? `${normalizedPrefix}${base}` : base;
 }
 
 function buildMcpServer(options?: { toolExposedName?: string; bundleSlug?: string }) {
