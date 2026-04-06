@@ -23,7 +23,11 @@ RUN npm run prisma:generate
 FROM node:20-slim AS runtime
 
 WORKDIR /app
-ENV NODE_ENV=production
+ENV NODE_ENV=production \
+    HOME=/tmp/.home \
+    NPM_CONFIG_CACHE=/tmp/.npm \
+    npm_config_cache=/tmp/.npm \
+    XDG_CACHE_HOME=/tmp/.cache
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends openssl ca-certificates \
@@ -43,7 +47,9 @@ COPY --chown=appuser:nodejs --from=build /app/src ./src
 COPY --chown=appuser:nodejs --from=build /app/scripts ./scripts
 COPY --chown=appuser:nodejs docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+RUN mkdir -p /app/.mcp-packages /tmp/.home /tmp/.npm /tmp/.cache \
+  && chown -R appuser:nodejs /app /tmp/.home /tmp/.npm /tmp/.cache \
+  && chmod +x /usr/local/bin/docker-entrypoint.sh
 
 USER appuser
 

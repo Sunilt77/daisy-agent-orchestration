@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=Exo+2:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Mona+Sans:ital,wght@0,200..900;1,200..900&display=swap');
 @import "tailwindcss";
 
 @theme {
@@ -102,7 +102,7 @@
   body {
     @apply text-slate-900 selection:bg-brand-200 selection:text-brand-900;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
-    font-family: "Exo 2", "Segoe UI", sans-serif;
+    font-family: "Mona Sans", "Segoe UI", sans-serif;
     background:
       radial-gradient(1200px 720px at 88% -12%, color-mix(in oklab, var(--color-brand-200) 80%, transparent) 0%, transparent 58%),
       radial-gradient(900px 560px at -8% 112%, color-mix(in oklab, var(--color-accent-200) 76%, transparent) 0%, transparent 60%),
@@ -112,12 +112,12 @@
   }
 
   h1, h2, h3, .brand-headline {
-    font-family: "Orbitron", "Exo 2", sans-serif;
+    font-family: "Mona Sans", "Segoe UI", sans-serif;
     letter-spacing: 0.02em;
   }
 
   input, select, textarea, button {
-    font-family: "Exo 2", "Segoe UI", sans-serif;
+    font-family: "Mona Sans", "Segoe UI", sans-serif;
   }
 }
 

@@ -74,7 +74,7 @@ import { subscribeAgentExecution, subscribeCrewExecution, subscribeWorkflowRun }
 import { spawn } from 'child_process';
 import rateLimit from 'express-rate-limit';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, unlink } from 'node:fs/promises';
+import { readFile, unlink } from 'node:fs/promises';
 import * as z from 'zod/v4';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -82,6 +82,14 @@ import * as internalTools from './src/orchestrator/internalTools.js';
 import { registerOrchestratorConfigRoutes } from './src/server/registerOrchestratorConfigRoutes';
 import { registerMcpAdminRoutes } from './src/server/registerMcpAdminRoutes';
 import { registerRuntimeControlRoutes } from './src/server/registerRuntimeControlRoutes';
+import {
+  buildMcpRuntimeEnv,
+  ensureMcpRuntimeDirectories,
+  resolveImportedMcpInvocation,
+  resolveMcpPackagePrefix,
+  resolveSpawnCommand,
+  resolveSpawnInvocation,
+} from './src/server/mcpPackageRuntime';
 import { getNextCronOccurrenceUtc, parseCronExpression } from './src/server/cron';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createRequire } from 'node:module';
@@ -182,14 +190,21 @@ function getKnownMcpPackageConfigError(packageName: string, env?: Record<string,
     }
   }
 
+  if (normalizedPackage === '@daisyintel/whatsapp-cloud-mcp' || normalizedPackage === 'whatsapp-cloud-mcp') {
+    if (!hasValue('WHATSAPP_ACCESS_TOKEN')) {
+      return 'whatsapp-cloud-mcp requires WHATSAPP_ACCESS_TOKEN. Add it in the Environment Variables JSON before importing or using this MCP.';
+    }
+  }
+
   return null;
 }
 
 function buildWrappedStdioCommand(command: string, args: string[]) {
   const wrapperPath = path.resolve(process.cwd(), 'scripts', 'mcp-stdio-wrapper.mjs');
+  const resolvedInvocation = resolveSpawnInvocation(String(command || '').trim(), Array.isArray(args) ? args : []);
   return {
     command: 'node',
-    args: [wrapperPath, '--command', String(command || '').trim(), '--args-json', JSON.stringify(args || [])],
+    args: [wrapperPath, '--command', resolvedInvocation.command, '--args-json', JSON.stringify(resolvedInvocation.args)],
   };
 }
 
@@ -201,7 +216,6 @@ type CommandRunResult = {
 
 const mcpPackageInstallLocks = new Map<string, Promise<boolean>>();
 const mcpPackageReady = new Set<string>();
-const MCP_PACKAGE_PREFIX = path.resolve(process.cwd(), '.mcp-packages');
 
 function normalizeNpmPackageName(value: string) {
   return String(value || '').trim().toLowerCase();
@@ -211,13 +225,20 @@ function shellSingleQuote(value: string) {
   return `'${String(value || '').replace(/'/g, `'\\''`)}'`;
 }
 
-async function runCommandCapture(command: string, args: string[], timeoutMs = 30000): Promise<CommandRunResult> {
+async function runCommandCapture(
+  command: string,
+  args: string[],
+  timeoutMs = 30000,
+  options: { env?: NodeJS.ProcessEnv; cwd?: string } = {},
+): Promise<CommandRunResult> {
   return await new Promise<CommandRunResult>((resolve) => {
     let stdout = '';
     let stderr = '';
     let finished = false;
-    const child = spawn(command, args, {
-      env: process.env,
+    const resolvedInvocation = resolveSpawnInvocation(command, args);
+    const child = spawn(resolvedInvocation.command, resolvedInvocation.args, {
+      env: options.env || process.env,
+      cwd: options.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const timer = setTimeout(() => {
@@ -242,8 +263,12 @@ async function runCommandCapture(command: string, args: string[], timeoutMs = 30
 }
 
 async function commandExists(command: string) {
-  const normalized = String(command || '').trim();
+  const normalized = resolveSpawnCommand(String(command || '').trim());
   if (!normalized) return false;
+  if (process.platform === 'win32') {
+    const result = await runCommandCapture('where.exe', [normalized], 10000);
+    return result.code === 0;
+  }
   const result = await runCommandCapture('sh', ['-lc', `command -v ${shellSingleQuote(normalized)} >/dev/null 2>&1`], 10000);
   return result.code === 0;
 }
@@ -256,36 +281,47 @@ async function ensureGlobalNpmPackageInstalled(packageName: string, reason = 'ru
   if (inflight) return await inflight;
 
   const installer = (async () => {
-    await mkdir(MCP_PACKAGE_PREFIX, { recursive: true }).catch(() => undefined);
+    const { prefix } = await ensureMcpRuntimeDirectories();
+    const npmEnv = buildMcpRuntimeEnv();
 
-    const lsLocal = await runCommandCapture('npm', ['ls', '--prefix', MCP_PACKAGE_PREFIX, '--depth=0', normalized], 30000);
+    const lsLocal = await runCommandCapture(
+      'npm',
+      ['ls', '--prefix', prefix, '--depth=0', normalized],
+      30000,
+      { env: npmEnv },
+    );
     if (lsLocal.code === 0) {
       mcpPackageReady.add(normalized);
       return true;
     }
 
-    const installLocal = await runCommandCapture('npm', ['install', '--prefix', MCP_PACKAGE_PREFIX, normalized], 180000);
+    const installLocal = await runCommandCapture(
+      'npm',
+      ['install', '--prefix', prefix, normalized],
+      180000,
+      { env: npmEnv },
+    );
     if (installLocal.code === 0) {
-      console.log(`[mcp-package] ensured ${normalized} in local prefix (${reason})`);
+      console.log(`[mcp-package] ensured ${normalized} in local prefix ${prefix} (${reason})`);
       mcpPackageReady.add(normalized);
       return true;
     }
 
-    const lsGlobal = await runCommandCapture('npm', ['ls', '-g', '--depth=0', normalized], 30000);
+    const lsGlobal = await runCommandCapture(
+      'npm',
+      ['ls', '-g', '--depth=0', normalized],
+      30000,
+      { env: npmEnv },
+    );
     if (lsGlobal.code === 0) {
       mcpPackageReady.add(normalized);
       return true;
     }
-    const installGlobal = await runCommandCapture('npm', ['install', '-g', normalized], 180000);
-    if (installGlobal.code !== 0) {
-      console.warn(
-        `[mcp-package] failed to install ${normalized} (${reason}): ${installLocal.stderr || installLocal.stdout || installGlobal.stderr || installGlobal.stdout || 'unknown error'}`
-      );
-      return false;
-    }
-    console.log(`[mcp-package] ensured ${normalized} globally (${reason})`);
-    mcpPackageReady.add(normalized);
-    return true;
+
+    console.warn(
+      `[mcp-package] failed to prepare ${normalized} (${reason}) in prefix ${prefix}: ${installLocal.stderr || installLocal.stdout || lsGlobal.stderr || lsGlobal.stdout || 'unknown error'}`
+    );
+    return false;
   })().finally(() => {
     mcpPackageInstallLocks.delete(normalized);
   });
@@ -311,8 +347,10 @@ async function removeGlobalNpmPackageIfUnused(packageName: string) {
     }
   });
   if (stillReferenced) return;
-  await runCommandCapture('npm', ['uninstall', '--prefix', MCP_PACKAGE_PREFIX, normalized], 120000);
-  const result = await runCommandCapture('npm', ['uninstall', '-g', normalized], 120000);
+  const prefix = await resolveMcpPackagePrefix();
+  const npmEnv = buildMcpRuntimeEnv();
+  await runCommandCapture('npm', ['uninstall', '--prefix', prefix, normalized], 120000, { env: npmEnv });
+  const result = await runCommandCapture('npm', ['uninstall', '-g', normalized], 120000, { env: npmEnv });
   if (result.code === 0 || result.code === 1) {
     mcpPackageReady.delete(normalized);
     console.log(`[mcp-package] removed ${normalized} (no remaining tools)`);
@@ -337,14 +375,41 @@ async function resolveMcpRawInvocationFromConfig(config: any) {
 
   if (!rawCommand) return { command: '', args: rawArgs, packageName };
 
+  if (packageName) {
+    const prepared = await ensureGlobalNpmPackageInstalled(packageName, 'tool-restore');
+    if (!prepared) {
+      throw new Error(`Failed to prepare npm MCP package "${packageName}" for execution.`);
+    }
+    const resolvedImported = await resolveImportedMcpInvocation({
+      packageName,
+      command: rawCommand,
+      args: rawArgs,
+    });
+    if (resolvedImported.usedLocalPrefix) {
+      return {
+        command: resolvedImported.command,
+        args: resolvedImported.args,
+        packageName,
+      };
+    }
+  }
+
   const existsBefore = await commandExists(rawCommand);
   if (existsBefore) return { command: rawCommand, args: rawArgs, packageName };
 
   if (packageName) {
-    await ensureGlobalNpmPackageInstalled(packageName, 'tool-restore');
     const existsAfterInstall = await commandExists(rawCommand);
     if (existsAfterInstall) return { command: rawCommand, args: rawArgs, packageName };
-    return { command: 'npx', args: ['--yes', '--prefix', MCP_PACKAGE_PREFIX, packageName], packageName };
+    const resolvedImported = await resolveImportedMcpInvocation({
+      packageName,
+      command: rawCommand,
+      args: rawArgs,
+    });
+    return {
+      command: resolvedImported.command,
+      args: resolvedImported.args,
+      packageName,
+    };
   }
 
   return { command: rawCommand, args: rawArgs, packageName };
@@ -376,13 +441,26 @@ async function discoverMcpPackageTools(params: {
   packageName?: string;
   timeoutMs?: number;
 }) {
-  const command = String(params.command || '').trim();
-  const args = Array.isArray(params.args) ? params.args.map((value) => String(value)) : [];
+  let command = String(params.command || '').trim();
+  let args = Array.isArray(params.args) ? params.args.map((value) => String(value)) : [];
   const timeoutMs = Number(params.timeoutMs || 45000);
-  const env = {
-    ...process.env,
-    ...(params.env || {}),
-  };
+  const normalizedPackageName = String(params.packageName || '').trim();
+  if (normalizedPackageName) {
+    const prepared = await ensureGlobalNpmPackageInstalled(normalizedPackageName, 'discovery');
+    if (!prepared) {
+      throw new Error(`Failed to prepare npm MCP package "${normalizedPackageName}" for discovery.`);
+    }
+    const resolvedImported = await resolveImportedMcpInvocation({
+      packageName: normalizedPackageName,
+      command,
+      args,
+    });
+    if (resolvedImported.usedLocalPrefix) {
+      command = resolvedImported.command;
+      args = resolvedImported.args;
+    }
+  }
+  const env = buildMcpRuntimeEnv(params.env || {});
   if (!command) throw new Error('command is required');
   const knownConfigError = getKnownMcpPackageConfigError(String(params.packageName || ''), params.env);
   if (knownConfigError) throw new Error(knownConfigError);
@@ -4449,7 +4527,14 @@ app.post('/api/tools/import-mcp-package', requireUser, async (req, res) => {
 
     const normalizedPackageName = String(packageName || '').trim();
     if (!normalizedPackageName) return res.status(400).json({ error: 'packageName is required' });
-    await ensureGlobalNpmPackageInstalled(normalizedPackageName, 'import-mcp-package');
+    const prepared = await ensureGlobalNpmPackageInstalled(normalizedPackageName, 'import-mcp-package');
+    if (!prepared) {
+      const prefix = await resolveMcpPackagePrefix();
+      const npmEnv = buildMcpRuntimeEnv();
+      return res.status(400).json({
+        error: `Failed to prepare npm MCP package "${normalizedPackageName}" for import. Runtime prefix=${prefix} HOME=${npmEnv.HOME} cache=${npmEnv.NPM_CONFIG_CACHE}.`,
+      });
+    }
 
     const command = String(packageCommand || 'npx').trim();
     const args = Array.isArray(packageArgs) && packageArgs.length
@@ -8793,7 +8878,8 @@ async function installJavascriptPackages(packages: string[]): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     let output = '';
     let finished = false;
-    const proc = spawn('npm', ['install', '--no-save', '--omit=dev', ...packages], {
+    const resolvedInvocation = resolveSpawnInvocation('npm', ['install', '--no-save', '--omit=dev', ...packages]);
+    const proc = spawn(resolvedInvocation.command, resolvedInvocation.args, {
       cwd: process.cwd(),
       env: {
         ...process.env,
@@ -9282,7 +9368,7 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
     if (knownConfigError) {
       return `[MCP Stdio Error] ${knownConfigError}`;
     }
-    const env = { ...process.env, ...envFromConfig };
+    const env = buildMcpRuntimeEnv(envFromConfig);
 
     const client = new Client({ name: 'agentic-orchestrator', version: '1.0.0' }, { capabilities: {} });
     const transport = new StdioClientTransport({

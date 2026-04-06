@@ -386,6 +386,55 @@ async function safeJson(res: Response) {
     }
 }
 
+function formatJsonParseError(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) return error.message.trim();
+  return 'Invalid JSON';
+}
+
+function compileJsonObjectInput(value: string): {
+  parsed: Record<string, unknown>;
+  error: string | null;
+  isEmpty: boolean;
+  keyCount: number;
+} {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) {
+    return {
+      parsed: {},
+      error: null,
+      isEmpty: true,
+      keyCount: 0,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {
+        parsed: {},
+        error: 'Environment Variables must be a JSON object like {"KEY":"value"}.',
+        isEmpty: false,
+        keyCount: 0,
+      };
+    }
+
+    const record = parsed as Record<string, unknown>;
+    return {
+      parsed: record,
+      error: null,
+      isEmpty: false,
+      keyCount: Object.keys(record).length,
+    };
+  } catch (error) {
+    return {
+      parsed: {},
+      error: formatJsonParseError(error),
+      isEmpty: false,
+      keyCount: 0,
+    };
+  }
+}
+
 export default function ToolsPage() {
   const TOOLS_UI_KEY = 'tools_ui_state_v1';
   const [tools, setTools] = useState<Tool[]>([]);
@@ -525,6 +574,18 @@ export default function ToolsPage() {
   const [resourceVisibility, setResourceVisibility] = useState<'private' | 'org'>('private');
   const [sharedUserIdsText, setSharedUserIdsText] = useState('');
   const [sharedOrgIdsText, setSharedOrgIdsText] = useState('');
+
+  const mcpPackageEnvCompiler = useMemo(() => compileJsonObjectInput(mcpPackageEnv), [mcpPackageEnv]);
+  const mcpPackageEnvStatusLabel = useMemo(() => {
+    if (mcpPackageEnvCompiler.error) return 'Invalid JSON';
+    if (mcpPackageEnvCompiler.isEmpty) return 'Empty object';
+    return 'Valid JSON object';
+  }, [mcpPackageEnvCompiler.error, mcpPackageEnvCompiler.isEmpty]);
+  const mcpPackageEnvCountLabel = useMemo(() => {
+    if (mcpPackageEnvCompiler.isEmpty) return 'No variables set yet';
+    if (mcpPackageEnvCompiler.error) return 'Fix the JSON before importing';
+    return `${mcpPackageEnvCompiler.keyCount} variable${mcpPackageEnvCompiler.keyCount === 1 ? '' : 's'} ready`;
+  }, [mcpPackageEnvCompiler.error, mcpPackageEnvCompiler.isEmpty, mcpPackageEnvCompiler.keyCount]);
 
   const normalizeEditorType = (type: string): string => {
     if (type === 'python') return 'javascript';
@@ -1528,12 +1589,10 @@ export default function ToolsPage() {
 
       let env: Record<string, string> = {};
       if (mcpPackageEnv.trim()) {
-        const parsedEnv = JSON.parse(mcpPackageEnv);
-        if (!parsedEnv || typeof parsedEnv !== 'object' || Array.isArray(parsedEnv)) {
-          throw new Error('Environment must be a JSON object');
-        }
+        const parsedEnv = compileJsonObjectInput(mcpPackageEnv);
+        if (parsedEnv.error) throw new Error(parsedEnv.error);
         env = Object.fromEntries(
-          Object.entries(parsedEnv).map(([key, value]) => [String(key), String(value ?? '')])
+          Object.entries(parsedEnv.parsed).map(([key, value]) => [String(key), String(value ?? '')])
         );
       }
 
@@ -1571,6 +1630,32 @@ export default function ToolsPage() {
     } finally {
       setMcpPackageImportLoading(false);
     }
+  };
+
+  const formatMcpPackageEnv = (style: 'pretty' | 'compact') => {
+    const compiled = compileJsonObjectInput(mcpPackageEnv);
+    if (compiled.error) return;
+    const nextValue = style === 'pretty'
+      ? JSON.stringify(compiled.parsed, null, 2)
+      : JSON.stringify(compiled.parsed);
+    setMcpPackageEnv(nextValue);
+  };
+
+  const loadMcpPackageEnvExample = () => {
+    setMcpPackageEnv('{\n  "META_ACCESS_TOKEN": "",\n  "META_APP_SECRET": ""\n}');
+  };
+
+  const handleMcpPackageEnvKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== 'Tab') return;
+    event.preventDefault();
+    const target = event.currentTarget;
+    const start = target.selectionStart;
+    const end = target.selectionEnd;
+    const nextValue = `${mcpPackageEnv.slice(0, start)}  ${mcpPackageEnv.slice(end)}`;
+    setMcpPackageEnv(nextValue);
+    window.requestAnimationFrame(() => {
+      target.setSelectionRange(start + 2, start + 2);
+    });
   };
 
   const getToolIcon = (type: string) => {
@@ -2787,12 +2872,57 @@ export default function ToolsPage() {
                                                   </div>
                                                   <div className="md:col-span-2">
                                                       <label className="block text-sm font-medium text-slate-700 mb-1">Environment Variables (JSON)</label>
-                                                      <textarea
-                                                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none h-28 font-mono text-xs"
-                                                          value={mcpPackageEnv}
-                                                          onChange={e => setMcpPackageEnv(e.target.value)}
-                                                          placeholder={"{\n  \"META_ACCESS_TOKEN\": \"...\",\n  \"META_APP_SECRET\": \"...\"\n}"}
-                                                      />
+                                                      <div className={`rounded-xl border overflow-hidden ${mcpPackageEnvCompiler.error ? 'border-red-300 bg-red-50/60' : 'border-slate-300 bg-white'}`}>
+                                                          <div className={`flex items-center justify-between gap-3 px-3 py-2 border-b ${mcpPackageEnvCompiler.error ? 'border-red-200 bg-red-50/80' : 'border-slate-200 bg-slate-50/80'}`}>
+                                                              <div className="flex items-center gap-2 flex-wrap text-[11px]">
+                                                                  <span className={`px-2 py-1 rounded-full font-medium ${mcpPackageEnvCompiler.error ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                                                                      {mcpPackageEnvStatusLabel}
+                                                                  </span>
+                                                                  <span className="text-slate-500">{mcpPackageEnvCountLabel}</span>
+                                                              </div>
+                                                              <div className="flex items-center gap-2 flex-wrap">
+                                                                  <button
+                                                                      type="button"
+                                                                      className="px-2 py-1 rounded-md border border-slate-200 bg-white text-[11px] font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                                                                      onClick={() => formatMcpPackageEnv('pretty')}
+                                                                      disabled={Boolean(mcpPackageEnvCompiler.error)}
+                                                                  >
+                                                                      Format
+                                                                  </button>
+                                                                  <button
+                                                                      type="button"
+                                                                      className="px-2 py-1 rounded-md border border-slate-200 bg-white text-[11px] font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                                                                      onClick={() => formatMcpPackageEnv('compact')}
+                                                                      disabled={Boolean(mcpPackageEnvCompiler.error)}
+                                                                  >
+                                                                      Minify
+                                                                  </button>
+                                                                  <button
+                                                                      type="button"
+                                                                      className="px-2 py-1 rounded-md border border-slate-200 bg-white text-[11px] font-medium text-slate-600 hover:bg-slate-50"
+                                                                      onClick={loadMcpPackageEnvExample}
+                                                                  >
+                                                                      Load Example
+                                                                  </button>
+                                                              </div>
+                                                          </div>
+                                                          <textarea
+                                                              className="w-full min-h-[180px] px-3 py-3 outline-none resize-y font-mono text-xs leading-6 bg-transparent"
+                                                              value={mcpPackageEnv}
+                                                              onChange={e => setMcpPackageEnv(e.target.value)}
+                                                              onKeyDown={handleMcpPackageEnvKeyDown}
+                                                              placeholder={"{\n  \"META_ACCESS_TOKEN\": \"...\",\n  \"META_APP_SECRET\": \"...\"\n}"}
+                                                              spellCheck={false}
+                                                              wrap="off"
+                                                          />
+                                                      </div>
+                                                      {mcpPackageEnvCompiler.error ? (
+                                                          <p className="text-xs text-red-600 mt-2">{mcpPackageEnvCompiler.error}</p>
+                                                      ) : (
+                                                          <p className="text-xs text-slate-500 mt-2">
+                                                              Use a JSON object only. The importer sends every value as a string environment variable. Press <code className="bg-white px-1 rounded">Tab</code> to indent.
+                                                          </p>
+                                                      )}
                                                   </div>
                                               </div>
 
@@ -2816,7 +2946,7 @@ export default function ToolsPage() {
                                                       type="button"
                                                       className="px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60"
                                                       onClick={importMcpPackage}
-                                                      disabled={!mcpPackageName.trim() || mcpPackageImportLoading}
+                                                      disabled={!mcpPackageName.trim() || mcpPackageImportLoading || Boolean(mcpPackageEnvCompiler.error)}
                                                   >
                                                       {mcpPackageImportLoading ? 'Importing package...' : 'Import npm MCP Package'}
                                                   </button>
