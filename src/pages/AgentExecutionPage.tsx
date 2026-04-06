@@ -43,6 +43,18 @@ type TimelineStep = {
   child_job_id?: number | null;
 };
 
+type ToolActivityRow = {
+  id: number;
+  tool_name?: string;
+  tool_type?: string | null;
+  status?: string;
+  duration_ms?: number | null;
+  created_at?: string;
+  error?: string | null;
+  args?: string | null;
+  result?: string | null;
+};
+
 function statusPillClass(status?: string) {
   return status === 'failed' || status === 'canceled'
     ? 'bg-red-100 text-red-700'
@@ -73,13 +85,24 @@ async function safeJson(res: Response) {
   try { return text ? JSON.parse(text) : null; } catch { return null; }
 }
 
+function formatTracePayload(raw?: string | null) {
+  if (!raw || !String(raw).trim()) return 'No data recorded.';
+  const text = String(raw);
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
 export default function AgentExecutionPage() {
   const { id } = useParams<{ id: string }>();
   const execId = Number(id);
   const [execution, setExecution] = useState<Execution | null>(null);
   const [timeline, setTimeline] = useState<TimelineStep[]>([]);
   const [delegations, setDelegations] = useState<Delegation[]>([]);
-  const [tools, setTools] = useState<any[]>([]);
+  const [tools, setTools] = useState<ToolActivityRow[]>([]);
+  const [activeToolTrace, setActiveToolTrace] = useState<ToolActivityRow | null>(null);
   const [live, setLive] = useState(false);
   const [error, setError] = useState('');
   const [timelineStatusFilter, setTimelineStatusFilter] = useState<'all' | 'running' | 'completed' | 'failed'>('all');
@@ -499,18 +522,76 @@ export default function AgentExecutionPage() {
             </div>
             <div className="p-4 space-y-2">
               {filteredTools.length ? filteredTools.map((tool: any) => (
-                <div key={tool.id} className="flex items-center justify-between text-xs border border-slate-100 rounded-lg px-3 py-2">
+                <button
+                  key={tool.id}
+                  type="button"
+                  onClick={() => setActiveToolTrace(tool)}
+                  className="w-full text-left flex items-center justify-between text-xs border border-slate-100 rounded-lg px-3 py-2 hover:border-indigo-200 hover:bg-indigo-50/40 transition-colors"
+                >
                   <div className="text-slate-700">{tool.tool_name}</div>
                   <div className="flex items-center gap-2">
                     <span className={`px-2 py-0.5 rounded-full ${statusPillClass(tool.status)}`}>{tool.status}</span>
                     <span className="font-mono text-slate-500">{tool.duration_ms != null ? `${tool.duration_ms}ms` : '-'}</span>
                   </div>
-                </div>
+                </button>
               )) : <div className="text-sm text-slate-500">No tool activity matches current filters.</div>}
             </div>
           </div>
         </div>
       </div>
+      {activeToolTrace && (
+        <div className="fixed inset-0 z-[80] bg-black/45 p-4 flex items-center justify-center">
+          <div className="w-full max-w-5xl max-h-[88vh] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-start justify-between gap-4">
+              <div>
+                <div className="text-lg font-semibold text-slate-900">{activeToolTrace.tool_name || 'Tool Trace'}</div>
+                <div className="text-xs text-slate-500 mt-1">
+                  #{activeToolTrace.id}
+                  {activeToolTrace.tool_type ? ` · ${activeToolTrace.tool_type}` : ''}
+                  {activeToolTrace.created_at ? ` · ${new Date(activeToolTrace.created_at).toLocaleString()}` : ''}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveToolTrace(null)}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100"
+              >
+                Exit
+              </button>
+            </div>
+            <div className="p-5 overflow-y-auto max-h-[calc(88vh-72px)] space-y-4">
+              <div className="flex items-center gap-2 text-xs">
+                <span className={`px-2 py-0.5 rounded-full ${statusPillClass(activeToolTrace.status)}`}>{activeToolTrace.status || 'unknown'}</span>
+                <span className="font-mono text-slate-500">{activeToolTrace.duration_ms != null ? `${activeToolTrace.duration_ms}ms` : '-'}</span>
+              </div>
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                <div className="rounded-xl border border-slate-200 overflow-hidden">
+                  <div className="px-3 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 border-b border-slate-200 bg-slate-50">
+                    Tool Input
+                  </div>
+                  <pre className="p-3 text-xs text-slate-800 whitespace-pre-wrap font-mono max-h-[45vh] overflow-y-auto">
+                    {formatTracePayload(activeToolTrace.args)}
+                  </pre>
+                </div>
+                <div className="rounded-xl border border-slate-200 overflow-hidden">
+                  <div className="px-3 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 border-b border-slate-200 bg-slate-50">
+                    Tool Output
+                  </div>
+                  <pre className="p-3 text-xs text-slate-800 whitespace-pre-wrap font-mono max-h-[45vh] overflow-y-auto">
+                    {formatTracePayload(activeToolTrace.result)}
+                  </pre>
+                </div>
+              </div>
+              {activeToolTrace.error ? (
+                <div className="rounded-xl border border-red-200 bg-red-50 p-3">
+                  <div className="text-xs font-semibold uppercase tracking-[0.16em] text-red-700">Error</div>
+                  <pre className="mt-2 text-xs text-red-700 whitespace-pre-wrap font-mono">{activeToolTrace.error}</pre>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

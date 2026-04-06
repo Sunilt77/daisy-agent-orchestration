@@ -12124,7 +12124,17 @@ app.get('/api/agent-executions/:id/timeline', async (req, res) => {
   const toolRows = (await getPrisma().orchestratorToolExecution.findMany({
     where: { agentExecutionId: execId },
     orderBy: { id: 'asc' },
-    select: { id: true, toolName: true, status: true, durationMs: true, createdAt: true, error: true },
+    select: {
+      id: true,
+      toolName: true,
+      status: true,
+      durationMs: true,
+      createdAt: true,
+      error: true,
+      args: true,
+      result: true,
+      toolType: true,
+    },
   })).map((row) => ({
     id: row.id,
     tool_name: row.toolName,
@@ -12132,6 +12142,9 @@ app.get('/api/agent-executions/:id/timeline', async (req, res) => {
     duration_ms: row.durationMs,
     created_at: row.createdAt,
     error: row.error,
+    args: row.args,
+    result: row.result,
+    tool_type: row.toolType,
   }));
   const delegationRows = await getDelegationRows(execId);
   const orchestration = await buildDelegationOrchestrationEvents(execId, delegationRows, String(exec.status || 'unknown'));
