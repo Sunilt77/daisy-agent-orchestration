@@ -399,6 +399,10 @@ export default function ToolsPage() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteDependencyError, setDeleteDependencyError] = useState<string | null>(null);
   const [restoringVersionId, setRestoringVersionId] = useState<number | null>(null);
+  const [selectedToolIdsForDelete, setSelectedToolIdsForDelete] = useState<number[]>([]);
+  const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
+  const [bulkDeleteError, setBulkDeleteError] = useState<string | null>(null);
+  const [bulkDeleteLoading, setBulkDeleteLoading] = useState(false);
   
   const [formData, setFormData] = useState({
     name: '',
@@ -620,11 +624,11 @@ export default function ToolsPage() {
 
   useEffect(() => {
     setToolsPage(1);
-  }, [tools.length]);
+  }, [toolSearch, categoryFilter, typeFilter, quickFilter]);
 
   useEffect(() => {
-    setToolsPage(1);
-  }, [toolSearch, categoryFilter, typeFilter, quickFilter]);
+    setSelectedToolIdsForDelete((prev) => prev.filter((id) => tools.some((t) => t.id === id)));
+  }, [tools]);
 
   useEffect(() => {
     setHttpArgTypes((prev) => {
@@ -722,6 +726,11 @@ export default function ToolsPage() {
       return a.name.localeCompare(b.name);
     });
   }, [tools, toolSearch, categoryFilter, typeFilter, quickFilter]);
+
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(filteredTools.length / toolsPageSize));
+    if (toolsPage > maxPage) setToolsPage(maxPage);
+  }, [filteredTools.length, toolsPage, toolsPageSize]);
 
   const pagedTools = useMemo(() => {
     const start = (toolsPage - 1) * toolsPageSize;
@@ -1340,11 +1349,59 @@ export default function ToolsPage() {
         if (selectedToolId === id) {
             setSelectedToolId(null);
         }
+        setSelectedToolIdsForDelete((prev) => prev.filter((toolId) => toolId !== id));
         setShowDeleteConfirm(false);
         setDeleteDependencyError(null);
         fetchTools();
     } catch (e: any) {
         alert(e.message);
+    }
+  };
+
+  const toggleToolRowSelection = (id: number) => {
+    setSelectedToolIdsForDelete((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const togglePageSelection = () => {
+    const idsOnPage = pagedTools.map((t) => t.id);
+    if (!idsOnPage.length) return;
+    const allSelected = idsOnPage.every((id) => selectedToolIdsForDelete.includes(id));
+    if (allSelected) {
+      setSelectedToolIdsForDelete((prev) => prev.filter((id) => !idsOnPage.includes(id)));
+      return;
+    }
+    setSelectedToolIdsForDelete((prev) => Array.from(new Set([...prev, ...idsOnPage])));
+  };
+
+  const deleteSelectedTools = async () => {
+    const ids = [...selectedToolIdsForDelete];
+    if (!ids.length) return;
+    setBulkDeleteLoading(true);
+    setBulkDeleteError(null);
+    try {
+      let deletedCount = 0;
+      const failedIds: number[] = [];
+      for (const id of ids) {
+        const res = await fetch(`/api/tools/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          deletedCount += 1;
+          continue;
+        }
+        failedIds.push(id);
+      }
+
+      if (selectedToolId && ids.includes(Number(selectedToolId))) setSelectedToolId(null);
+      setSelectedToolIdsForDelete(failedIds);
+      if (failedIds.length) {
+        setBulkDeleteError(`Deleted ${deletedCount}. Could not delete ${failedIds.length} tool(s); they may have dependencies.`);
+      } else {
+        setShowBulkDeleteConfirm(false);
+      }
+      await fetchTools();
+    } catch (e: any) {
+      setBulkDeleteError(e.message || 'Failed to delete selected tools');
+    } finally {
+      setBulkDeleteLoading(false);
     }
   };
 
@@ -1586,6 +1643,24 @@ export default function ToolsPage() {
                       <span className="font-medium text-slate-700">Available Tools ({filteredTools.length})</span>
                       <span className="text-[11px] text-slate-500">{tools.length} total</span>
                   </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={togglePageSelection}
+                      disabled={!pagedTools.length}
+                      className="text-[11px] px-2 py-1 rounded border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                    >
+                      {pagedTools.length > 0 && pagedTools.every((tool) => selectedToolIdsForDelete.includes(tool.id))
+                        ? 'Unselect Page'
+                        : 'Select Page'}
+                    </button>
+                    <button
+                      onClick={() => { setShowBulkDeleteConfirm(true); setBulkDeleteError(null); }}
+                      disabled={!selectedToolIdsForDelete.length}
+                      className="text-[11px] px-2 py-1 rounded border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 disabled:opacity-40"
+                    >
+                      Delete Selected ({selectedToolIdsForDelete.length})
+                    </button>
+                  </div>
                   <div className="relative">
                     <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input
@@ -1657,6 +1732,13 @@ export default function ToolsPage() {
                             className={`p-3 rounded-lg cursor-pointer flex items-center justify-between group transition-colors ${selectedToolId === tool.id ? 'bg-indigo-50 border border-indigo-100' : 'hover:bg-slate-50 border border-transparent'}`}
                           >
                               <div className="flex items-center gap-3 overflow-hidden">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedToolIdsForDelete.includes(tool.id)}
+                                    onChange={() => toggleToolRowSelection(tool.id)}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                                  />
                                   <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${selectedToolId === tool.id ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>
                                       {getToolIcon(tool.type)}
                                   </div>
@@ -3345,6 +3427,46 @@ export default function ToolsPage() {
                 className="px-4 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700"
               >
                 Force Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showBulkDeleteConfirm && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[70] p-4">
+          <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl border border-red-100 overflow-hidden">
+            <div className="p-5 border-b border-red-100 bg-red-50">
+              <div className="text-lg font-semibold text-red-900">Delete Selected Tools</div>
+              <div className="text-sm text-red-800 mt-1">
+                Delete {selectedToolIdsForDelete.length} selected tool(s)? This action cannot be undone.
+              </div>
+            </div>
+            <div className="p-5 text-sm text-slate-700">
+              {bulkDeleteError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-red-700">{bulkDeleteError}</div>
+              ) : (
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                  Dependencies may block some tools from deletion. Blocked items will remain selected.
+                </div>
+              )}
+            </div>
+            <div className="p-4 border-t border-slate-100 flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  if (bulkDeleteLoading) return;
+                  setShowBulkDeleteConfirm(false);
+                  setBulkDeleteError(null);
+                }}
+                className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void deleteSelectedTools()}
+                disabled={bulkDeleteLoading || !selectedToolIdsForDelete.length}
+                className="px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-60"
+              >
+                {bulkDeleteLoading ? 'Deleting...' : 'Confirm Delete'}
               </button>
             </div>
           </div>
