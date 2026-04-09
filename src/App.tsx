@@ -22,6 +22,7 @@ const ProvidersPage = lazy(() => import('./pages/ProvidersPage'));
 const PricingPage = lazy(() => import('./pages/PricingPage'));
 const McpPage = lazy(() => import('./pages/McpPage'));
 const PlatformPage = lazy(() => import('./pages/PlatformPage'));
+const RuntimeAccessPage = lazy(() => import('./pages/RuntimeAccessPage'));
 const AuthPage = lazy(() => import('./pages/AuthPage'));
 const TracesPage = lazy(() => import('./pages/TracesPage'));
 const TraceDetailPage = lazy(() => import('./pages/TraceDetailPage'));
@@ -72,6 +73,7 @@ export default function App() {
                         <Route path="/traces" element={<TracesPage />} />
                         <Route path="/traces/:runId" element={<TraceDetailPage />} />
                         <Route path="/platform" element={<PlatformPage />} />
+                        <Route path="/runtime-access" element={<RuntimeAccessPage />} />
                         <Route path="/agents" element={<AgentsPage />} />
                         <Route path="/agent-executions" element={<AgentExecutionsPage />} />
                         <Route path="/agent-executions/:id" element={<AgentExecutionPage />} />
