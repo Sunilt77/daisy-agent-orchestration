@@ -127,6 +127,11 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const runtimeRequire = createRequire(import.meta.url);
 const jsPackageInstallInFlight = new Map<string, Promise<void>>();
+const mcpManifestCache = new Map<string, { expiresAt: number; resolvedTransport: string; tools: Array<{ name: string; description?: string; inputSchema?: any }> }>();
+const MCP_MANIFEST_CACHE_TTL_MS = Math.max(10_000, Number(process.env.MCP_MANIFEST_CACHE_TTL_MS || 120_000));
+const MCP_MANIFEST_PREWARM_ENABLED = String(process.env.MCP_MANIFEST_PREWARM_ENABLED || 'true').trim().toLowerCase() !== 'false';
+const MCP_MANIFEST_PREWARM_INTERVAL_MS = Math.max(10_000, Number(process.env.MCP_MANIFEST_PREWARM_INTERVAL_MS || 60_000));
+const MCP_MANIFEST_PREWARM_MAX_ENDPOINTS = Math.max(1, Number(process.env.MCP_MANIFEST_PREWARM_MAX_ENDPOINTS || 40));
 
 // Test suites import `app` without calling `startServer()`, so the local mirror
 // schema must be ready at module load time as well.
@@ -259,6 +264,180 @@ function buildWrappedStdioCommand(command: string, args: string[]) {
     command: 'node',
     args: [wrapperPath, '--command', resolvedInvocation.command, '--args-json', JSON.stringify(resolvedInvocation.args)],
   };
+}
+
+function buildMcpManifestCacheKey(toolName: string, config: any): string {
+  return JSON.stringify({
+    toolName: String(toolName || ''),
+    serverUrl: String(config?.serverUrl || ''),
+    transportType: String(config?.transportType || 'auto'),
+    apiKey: String(config?.apiKey || ''),
+    customHeaders: config?.customHeaders && typeof config.customHeaders === 'object' ? config.customHeaders : {},
+  });
+}
+
+function readMcpManifestCache(cacheKey: string): { resolvedTransport: string; tools: Array<{ name: string; description?: string; inputSchema?: any }> } | null {
+  const entry = mcpManifestCache.get(cacheKey);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    mcpManifestCache.delete(cacheKey);
+    return null;
+  }
+  return { resolvedTransport: entry.resolvedTransport, tools: entry.tools };
+}
+
+function writeMcpManifestCache(cacheKey: string, resolvedTransport: string, tools: Array<{ name: string; description?: string; inputSchema?: any }>) {
+  mcpManifestCache.set(cacheKey, {
+    expiresAt: Date.now() + MCP_MANIFEST_CACHE_TTL_MS,
+    resolvedTransport,
+    tools,
+  });
+}
+
+async function connectMcpClientForTool(tool: any): Promise<{ client: Client; config: any; transportType: string; resolvedTransport: string }> {
+  const config = tool?.config ? JSON.parse(String(tool.config)) : {};
+  const serverUrl = config.serverUrl || '';
+  const apiKey = config.apiKey || '';
+  const transportType = config.transportType || 'auto';
+  const customHeaders = config.customHeaders || {};
+
+  if (!serverUrl) {
+    throw new Error(`MCP tool ${tool?.name || '(unknown)'} has no serverUrl configured`);
+  }
+  if (transportType !== 'sse' && transportType !== 'streamable' && transportType !== 'auto') {
+    throw new Error(`MCP tool ${tool?.name || '(unknown)'} uses unsupported transport "${transportType}"`);
+  }
+
+  const url = new URL(serverUrl);
+  const transportOpts: any = {};
+  let headers: Record<string, string> = {};
+  if (customHeaders && typeof customHeaders === 'object') {
+    headers = { ...(customHeaders as Record<string, string>) };
+  }
+  if (apiKey) {
+    if (!headers.Authorization && !(headers as any).authorization) headers.Authorization = `Bearer ${apiKey}`;
+    if (!headers['X-API-Key'] && !(headers as any)['x-api-key']) headers['X-API-Key'] = apiKey;
+  }
+  if (Object.keys(headers).length) {
+    transportOpts.eventSourceInit = { headers };
+    transportOpts.requestInit = { headers };
+  }
+
+  let resolvedTransport = transportType;
+  let transport: any;
+  let client: Client | null = null;
+  const hasMcpPath = serverUrl.endsWith('/mcp') || serverUrl.includes('/mcp?');
+  const hasSsePath = serverUrl.endsWith('/sse') || serverUrl.includes('/sse?');
+  const candidates = transportType === 'auto'
+    ? (hasMcpPath ? ['streamable'] : (hasSsePath ? ['sse'] : ['streamable', 'sse']))
+    : [transportType];
+  let lastErr: any = null;
+  for (const candidate of candidates) {
+    try {
+      transport = candidate === 'streamable'
+        ? new StreamableHTTPClientTransport(url, { requestInit: transportOpts.requestInit })
+        : new SSEClientTransport(url, transportOpts);
+      client = new Client({ name: 'voice-orchestrator', version: '0.3.0' }, { capabilities: {} });
+      await withTimeout(client.connect(transport), 8000, 'MCP connect');
+      resolvedTransport = candidate as any;
+      break;
+    } catch (e: any) {
+      lastErr = e;
+      try { await client?.close(); } catch {}
+      client = null;
+    }
+  }
+  if (!client) throw lastErr || new Error('MCP connect failed');
+  return { client, config, transportType, resolvedTransport };
+}
+
+async function prewarmMcpManifestForTool(tool: any): Promise<{ cacheHit: boolean; toolCount: number }> {
+  try {
+    const parsedConfig = tool?.config ? JSON.parse(String(tool.config)) : {};
+    const cacheKey = buildMcpManifestCacheKey(String(tool?.name || ''), parsedConfig);
+    const cached = readMcpManifestCache(cacheKey);
+    if (cached) return { cacheHit: true, toolCount: cached.tools.length };
+
+    const { client, resolvedTransport } = await connectMcpClientForTool(tool);
+    try {
+      const mcpTools = await withTimeout(client.listTools(), 8000, 'MCP listTools');
+      const normalizedTools = (mcpTools.tools || []).map((entry: any) => ({
+        name: String(entry?.name || ''),
+        description: String(entry?.description || ''),
+        inputSchema: normalizeToolInputSchema(entry?.inputSchema),
+      }));
+      writeMcpManifestCache(cacheKey, resolvedTransport, normalizedTools);
+      return { cacheHit: false, toolCount: normalizedTools.length };
+    } finally {
+      try { await client.close(); } catch {}
+    }
+  } catch {
+    return { cacheHit: false, toolCount: 0 };
+  }
+}
+
+async function collectMcpToolsForPrewarm(): Promise<any[]> {
+  const toolsFromAgentBindings = db.prepare(`
+    SELECT DISTINCT t.*
+    FROM tools t
+    JOIN agent_tools at ON at.tool_id = t.id
+    WHERE lower(COALESCE(t.type, '')) = 'mcp'
+    ORDER BY t.updated_at DESC
+    LIMIT ?
+  `).all(MCP_MANIFEST_PREWARM_MAX_ENDPOINTS) as any[];
+
+  const mcpToken = getSetting(SETTINGS_KEY_MCP_AUTH_TOKEN) || '';
+  const localBaseUrl = `http://127.0.0.1:${PORT}`;
+  const directMcpTools = db.prepare(`
+    SELECT DISTINCT e.exposed_name, t.name as tool_name
+    FROM agent_mcp_tools amt
+    JOIN tools t ON t.id = amt.tool_id
+    JOIN mcp_exposed_tools e ON e.tool_id = t.id
+    LIMIT ?
+  `).all(MCP_MANIFEST_PREWARM_MAX_ENDPOINTS) as any[];
+  const mcpBundles = db.prepare(`
+    SELECT DISTINCT b.slug, b.name
+    FROM agent_mcp_bundles amb
+    JOIN mcp_bundles b ON b.id = amb.bundle_id
+    LIMIT ?
+  `).all(MCP_MANIFEST_PREWARM_MAX_ENDPOINTS) as any[];
+
+  const syntheticTools: any[] = [];
+  for (const row of directMcpTools) {
+    const exposedName = String(row.exposed_name || row.tool_name || '').trim();
+    if (!exposedName) continue;
+    syntheticTools.push({
+      id: null,
+      name: `mcp_${normalizeMcpName(exposedName)}`,
+      config: JSON.stringify({
+        serverUrl: `${localBaseUrl}/mcp/tool/${encodeURIComponent(exposedName)}`,
+        transportType: 'streamable',
+        apiKey: mcpToken,
+      }),
+    });
+  }
+  for (const row of mcpBundles) {
+    const slug = String(row.slug || '').trim();
+    if (!slug) continue;
+    syntheticTools.push({
+      id: null,
+      name: `bundle_${normalizeMcpName(String(slug || row.name || 'bundle'))}`,
+      config: JSON.stringify({
+        serverUrl: `${localBaseUrl}/mcp/bundle/${encodeURIComponent(slug)}`,
+        transportType: 'streamable',
+        apiKey: mcpToken,
+      }),
+    });
+  }
+
+  const merged = [...toolsFromAgentBindings, ...syntheticTools];
+  const deduped = new Map<string, any>();
+  for (const tool of merged) {
+    const parsedConfig = tool?.config ? JSON.parse(String(tool.config)) : {};
+    const key = buildMcpManifestCacheKey(String(tool?.name || ''), parsedConfig);
+    if (!deduped.has(key)) deduped.set(key, tool);
+  }
+  return Array.from(deduped.values()).slice(0, MCP_MANIFEST_PREWARM_MAX_ENDPOINTS);
 }
 
 type CommandRunResult = {
@@ -916,6 +1095,8 @@ const JOB_PRIORITY = {
 } as const;
 let workerTimer: NodeJS.Timeout | null = null;
 let cronSchedulerTimer: NodeJS.Timeout | null = null;
+let mcpManifestPrewarmTimer: NodeJS.Timeout | null = null;
+let mcpManifestPrewarmRunning = false;
 let workerRunning = 0;
 const agentCancelTokens = new Map<number, CancelToken>();
 const crewCancelTokens = new Map<number, CancelToken>();
@@ -10166,11 +10347,41 @@ async function runCalculatorTool(args: any): Promise<string> {
   }
 }
 
-async function executeTool(toolName: string, args: any, mcpClients?: Map<string, Client>, toolRecord?: any, execContext?: ToolExecutionContext): Promise<string> {
+async function executeTool(
+  toolName: string,
+  args: any,
+  mcpClients?: Map<string, Client>,
+  toolRecord?: any,
+  execContext?: ToolExecutionContext,
+  ensureMcpClient?: (toolName: string) => Promise<Client | null>,
+): Promise<string> {
   args = enrichArgsWithAttachments(args);
   console.log(`Executing tool ${toolName} with args:`, args);
 
   if (mcpClients) {
+    const matchingPrefix = Array.from(mcpClients.keys()).find((prefix) => toolName.startsWith(prefix + '_')) || null;
+    if (!matchingPrefix && ensureMcpClient) {
+      try {
+        const lazyClient = await ensureMcpClient(toolName);
+        if (lazyClient) {
+          const lazyPrefix = Array.from(mcpClients.keys()).find((prefix) => toolName.startsWith(prefix + '_')) || null;
+          if (lazyPrefix) {
+            const actualToolName = toolName.substring(lazyPrefix.length + 1);
+            const result = await lazyClient.callTool({
+              name: actualToolName,
+              arguments: args,
+            });
+            if (result.isError) {
+              return `[Error] ${(result.content as any[]).map(c => c.type === 'text' ? c.text : '').join('\n')}`;
+            }
+            return (result.content as any[]).map(c => c.type === 'text' ? c.text : JSON.stringify(c)).join('\n');
+          }
+        }
+      } catch (e: any) {
+        return `[Error executing MCP tool] ${e?.message || String(e)}`;
+      }
+    }
+
     for (const [prefix, client] of mcpClients.entries()) {
       if (toolName.startsWith(prefix + '_')) {
         const actualToolName = toolName.substring(prefix.length + 1);
@@ -10966,6 +11177,38 @@ function startAgentCronScheduler() {
   void run();
 }
 
+async function runMcpManifestPrewarm() {
+  if (!MCP_MANIFEST_PREWARM_ENABLED) return;
+  if (mcpManifestPrewarmRunning) return;
+  mcpManifestPrewarmRunning = true;
+  const startedAt = Date.now();
+  try {
+    const tools = await collectMcpToolsForPrewarm();
+    if (!tools.length) return;
+    const results = await Promise.all(tools.map((tool) => prewarmMcpManifestForTool(tool)));
+    const cacheHits = results.filter((x) => x.cacheHit).length;
+    const totalMethods = results.reduce((sum, x) => sum + Number(x.toolCount || 0), 0);
+    const durationMs = Date.now() - startedAt;
+    console.log(
+      `[mcp-prewarm] ready in ${durationMs}ms endpoints=${tools.length} methods=${totalMethods} cache_hits=${cacheHits}`,
+    );
+  } catch (error: any) {
+    console.warn('[mcp-prewarm] failed:', error?.message || error);
+  } finally {
+    mcpManifestPrewarmRunning = false;
+  }
+}
+
+function startMcpManifestPrewarmScheduler() {
+  if (!MCP_MANIFEST_PREWARM_ENABLED) return;
+  if (mcpManifestPrewarmTimer) return;
+  const tick = () => {
+    void runMcpManifestPrewarm();
+  };
+  mcpManifestPrewarmTimer = setInterval(tick, MCP_MANIFEST_PREWARM_INTERVAL_MS);
+  tick();
+}
+
 interface RunResult {
     exec_id?: number;
     text: string;
@@ -11230,6 +11473,7 @@ async function runAgent(
     };
 
     try {
+        const prepStartedAt = Date.now();
         logCallback({ type: 'status', agent: agent.name, message: 'Preparing tools and execution context...' });
         // Fetch agent tools
         const tools = toolsEnabled
@@ -11324,102 +11568,113 @@ async function runAgent(
         const toolByName = new Map<string, any>();
         const mcpToolByPrefix = new Map<string, any>();
         const toolSchemaByName = new Map<string, any>();
+        const mcpConnectPromises = new Map<string, Promise<Client>>();
         for (const tool of scopedTools) {
             toolByName.set(tool.name, tool);
-        }
-
-        for (const tool of scopedTools) {
             if (tool.type === 'mcp') {
-                try {
-                    const config = JSON.parse(tool.config);
-                    const serverUrl = config.serverUrl || '';
-                    const apiKey = config.apiKey || '';
-                    const transportType = config.transportType || 'auto';
-                    const customHeaders = config.customHeaders || {};
-
-                    if (!serverUrl) {
-                        console.warn(`MCP tool ${tool.name} has no serverUrl configured, skipping.`);
-                        continue;
-                    }
-                    if (transportType !== 'sse' && transportType !== 'streamable' && transportType !== 'auto') {
-                        console.warn(`MCP tool ${tool.name} uses unsupported transport "${transportType}". Only sse or streamable are supported.`);
-                        continue;
-                    }
-
-                    const url = new URL(serverUrl);
-
-                    // Build SSEClientTransportOptions with auth if API key is provided
-                    const transportOpts: any = {};
-                    let headers: Record<string, string> = {};
-                    if (customHeaders && typeof customHeaders === 'object') {
-                        headers = { ...(customHeaders as Record<string, string>) };
-                    }
-                    if (apiKey) {
-                        if (!headers.Authorization && !(headers as any).authorization) headers.Authorization = `Bearer ${apiKey}`;
-                        if (!headers['X-API-Key'] && !(headers as any)['x-api-key']) headers['X-API-Key'] = apiKey;
-                    }
-                    if (Object.keys(headers).length) {
-                        // eventSourceInit = for the SSE GET request (stream initiation)
-                        transportOpts.eventSourceInit = { headers };
-                        // requestInit = for POST messages sent over the transport
-                        transportOpts.requestInit = { headers };
-                    }
-
-                    let resolvedTransport = transportType;
-                    let transport: any;
-                    let client: Client | null = null;
-                    const hasMcpPath = serverUrl.endsWith('/mcp') || serverUrl.includes('/mcp?');
-                    const hasSsePath = serverUrl.endsWith('/sse') || serverUrl.includes('/sse?');
-                    const candidates = transportType === 'auto'
-                      ? (hasMcpPath ? ['streamable'] : (hasSsePath ? ['sse'] : ['streamable', 'sse']))
-                      : [transportType];
-
-                    let lastErr: any = null;
-                    for (const candidate of candidates) {
-                        try {
-                            transport = candidate === 'streamable'
-                                ? new StreamableHTTPClientTransport(url, { requestInit: transportOpts.requestInit })
-                                : new SSEClientTransport(url, transportOpts);
-                            client = new Client({ name: 'voice-orchestrator', version: '0.3.0' }, { capabilities: {} });
-                            await withTimeout(client.connect(transport), 8000, 'MCP connect');
-                            resolvedTransport = candidate as any;
-                            break;
-                        } catch (e: any) {
-                            lastErr = e;
-                            try { await client?.close(); } catch {}
-                            client = null;
-                        }
-                    }
-                    if (!client) throw lastErr || new Error('MCP connect failed');
-
-                    const prefix = tool.name.toLowerCase().replace(/[^a-z0-9]/g, '_');
-                    mcpClients.set(prefix, client);
-                    mcpToolByPrefix.set(prefix, tool);
-                    
-                    const mcpTools = await withTimeout(client.listTools(), 8000, 'MCP listTools');
-                    for (const mcpTool of mcpTools.tools) {
-                        const aliasedName = `${prefix}_${mcpTool.name}`;
-                        const inputSchema = normalizeToolInputSchema(mcpTool.inputSchema);
-                        toolSchemaByName.set(aliasedName, inputSchema);
-                        mcpToolDescriptions += `${describeToolForPrompt({
-                          name: aliasedName,
-                          description: mcpTool.description || 'MCP tool',
-                        }, inputSchema)}\n`;
-                    }
-                    console.log(`✓ Connected to MCP tool ${tool.name}, found ${mcpTools.tools.length} tools`);
-
-                    if (resolvedTransport !== transportType && tool.id) {
-                        try {
-                            const nextConfig = { ...config, transportType: resolvedTransport };
-                            db.prepare('UPDATE tools SET config = ? WHERE id = ?').run(JSON.stringify(nextConfig), tool.id);
-                        } catch {}
-                    }
-                } catch (e: any) {
-                    const detail = e?.code ? ` (HTTP ${e.code})` : '';
-                    console.error(`Failed to connect to MCP tool ${tool.name}${detail}:`, e?.message || e);
-                }
+              const prefix = String(tool.name || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
+              mcpToolByPrefix.set(prefix, tool);
             }
         }
+
+        const mcpSetupResults = await Promise.all(
+          scopedTools
+            .filter((tool) => tool.type === 'mcp')
+            .map(async (tool) => {
+              try {
+                const prefix = tool.name.toLowerCase().replace(/[^a-z0-9]/g, '_');
+                const parsedConfig = tool?.config ? JSON.parse(String(tool.config)) : {};
+                const cacheKey = buildMcpManifestCacheKey(String(tool.name || ''), parsedConfig);
+                const cachedManifest = readMcpManifestCache(cacheKey);
+                if (cachedManifest) {
+                  const mcpDescriptions: string[] = [];
+                  for (const cachedTool of cachedManifest.tools) {
+                    const aliasedName = `${prefix}_${cachedTool.name}`;
+                    const inputSchema = normalizeToolInputSchema(cachedTool.inputSchema);
+                    toolSchemaByName.set(aliasedName, inputSchema);
+                    mcpDescriptions.push(
+                      describeToolForPrompt(
+                        {
+                          name: aliasedName,
+                          description: cachedTool.description || 'MCP tool',
+                        },
+                        inputSchema,
+                      ),
+                    );
+                  }
+                  return { mcpDescriptions, mcpToolCount: cachedManifest.tools.length, cacheHit: true };
+                }
+
+                const { client, config, transportType, resolvedTransport } = await connectMcpClientForTool(tool);
+                const mcpTools = await withTimeout(client.listTools(), 8000, 'MCP listTools');
+                const mcpDescriptions: string[] = [];
+                const manifestTools: Array<{ name: string; description?: string; inputSchema?: any }> = [];
+                for (const mcpTool of mcpTools.tools) {
+                  const aliasedName = `${prefix}_${mcpTool.name}`;
+                  const inputSchema = normalizeToolInputSchema(mcpTool.inputSchema);
+                  toolSchemaByName.set(aliasedName, inputSchema);
+                  manifestTools.push({
+                    name: String(mcpTool.name || ''),
+                    description: mcpTool.description || 'MCP tool',
+                    inputSchema,
+                  });
+                  mcpDescriptions.push(
+                    describeToolForPrompt(
+                      {
+                        name: aliasedName,
+                        description: mcpTool.description || 'MCP tool',
+                      },
+                      inputSchema,
+                    ),
+                  );
+                }
+                writeMcpManifestCache(cacheKey, resolvedTransport, manifestTools);
+                console.log(`✓ Prefetched MCP tool manifest ${tool.name}, found ${mcpTools.tools.length} tools`);
+
+                if (resolvedTransport !== transportType && tool.id) {
+                  try {
+                    const nextConfig = { ...config, transportType: resolvedTransport };
+                    db.prepare('UPDATE tools SET config = ? WHERE id = ?').run(JSON.stringify(nextConfig), tool.id);
+                  } catch {}
+                }
+                try { await client.close(); } catch {}
+
+                return { mcpDescriptions, mcpToolCount: mcpTools.tools.length, cacheHit: false };
+              } catch (e: any) {
+                const detail = e?.code ? ` (HTTP ${e.code})` : '';
+                console.error(`Failed to connect to MCP tool ${tool.name}${detail}:`, e?.message || e);
+                return { mcpDescriptions: [] as string[], mcpToolCount: 0, cacheHit: false };
+              }
+            }),
+        );
+        mcpToolDescriptions = mcpSetupResults.flatMap((result) => result.mcpDescriptions).join('\n');
+        const ensureMcpClient = async (requestedToolName: string): Promise<Client | null> => {
+          const prefix = Array.from(mcpToolByPrefix.keys()).find((p) => requestedToolName.startsWith(p + '_')) || null;
+          if (!prefix) return null;
+          const connected = mcpClients.get(prefix);
+          if (connected) return connected;
+          const inFlight = mcpConnectPromises.get(prefix);
+          if (inFlight) return await inFlight;
+          const tool = mcpToolByPrefix.get(prefix);
+          if (!tool) return null;
+          const connectPromise = (async () => {
+            const { client, config, transportType, resolvedTransport } = await connectMcpClientForTool(tool);
+            mcpClients.set(prefix, client);
+            if (resolvedTransport !== transportType && tool.id) {
+              try {
+                const nextConfig = { ...config, transportType: resolvedTransport };
+                db.prepare('UPDATE tools SET config = ? WHERE id = ?').run(JSON.stringify(nextConfig), tool.id);
+              } catch {}
+            }
+            return client;
+          })();
+          mcpConnectPromises.set(prefix, connectPromise);
+          try {
+            return await connectPromise;
+          } finally {
+            mcpConnectPromises.delete(prefix);
+          }
+        };
 
         const nonMcpTools = scopedTools.filter((t) => t.type !== 'mcp');
         const scopedToolDescriptions = (
@@ -11458,6 +11713,20 @@ async function runAgent(
           toolsEnabled && scopedTools.some((tool) => String(tool?.name || '') === 'delegate_to_agent')
             ? buildDelegationRosterContext(agent)
             : '';
+        const prepDurationMs = Date.now() - prepStartedAt;
+        const mcpEndpointCount = scopedTools.filter((tool) => tool.type === 'mcp').length;
+        const mcpExposedToolCount = mcpSetupResults.reduce((sum, result) => sum + Number(result.mcpToolCount || 0), 0);
+        const mcpManifestCacheHits = mcpSetupResults.reduce((sum, result) => sum + (result.cacheHit ? 1 : 0), 0);
+        span.setAttribute('tool_prep.duration_ms', prepDurationMs);
+        span.setAttribute('tool_prep.scoped_tool_count', scopedTools.length);
+        span.setAttribute('tool_prep.mcp_endpoint_count', mcpEndpointCount);
+        span.setAttribute('tool_prep.mcp_exposed_tool_count', mcpExposedToolCount);
+        span.setAttribute('tool_prep.mcp_manifest_cache_hits', mcpManifestCacheHits);
+        logCallback({
+          type: 'status',
+          agent: agent.name,
+          message: `Tools ready in ${prepDurationMs}ms (${scopedTools.length} total, ${mcpEndpointCount} MCP endpoints, ${mcpExposedToolCount} MCP methods, ${mcpManifestCacheHits} manifest cache hits)`,
+        });
 
         const basePrompt = `
             Your current task is: ${task.description}
@@ -11785,7 +12054,7 @@ async function runAgent(
                 
                 // Create a child span for tool execution
                 const toolStart = Date.now();
-                const mcpPrefix = Array.from(mcpClients.keys()).find((p) => action.tool?.startsWith(p + '_')) || null;
+                const mcpPrefix = Array.from(mcpToolByPrefix.keys()).find((p) => action.tool?.startsWith(p + '_')) || null;
                 const toolKind = mcpPrefix ? 'mcp' : 'local';
                 const actualToolName = mcpPrefix ? String(action.tool).substring(mcpPrefix.length + 1) : action.tool;
                 const toolRecord = mcpPrefix ? mcpToolByPrefix.get(mcpPrefix) : toolByName.get(action.tool);
@@ -11839,7 +12108,7 @@ async function runAgent(
                               runMeta,
                               toolAudit: toolAuditSeed,
                               logCallback,
-                            });
+                            }, ensureMcpClient);
                             toolSpan.setStatus({ code: SpanStatusCode.OK });
                             return res;
                         } catch (e: any) {
@@ -13430,6 +13699,10 @@ async function shutdown(signal: string) {
     clearInterval(cronSchedulerTimer);
     cronSchedulerTimer = null;
   }
+  if (mcpManifestPrewarmTimer) {
+    clearInterval(mcpManifestPrewarmTimer);
+    mcpManifestPrewarmTimer = null;
+  }
   if (gcsSyncTimer) {
     clearInterval(gcsSyncTimer);
     gcsSyncTimer = null;
@@ -14122,6 +14395,7 @@ async function startServer() {
   scheduleRetention();
   startJobWorker();
   startAgentCronScheduler();
+  startMcpManifestPrewarmScheduler();
   gcsSyncTimer = startSqliteGcsSyncLoop(getSqlitePath());
 }
 
