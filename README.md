@@ -69,12 +69,29 @@ cp .env.example .env
 - `APP_SECRET` (32+ chars)
 - `EXECUTION_CONTEXT_TOKEN_SECRET` (recommended dedicated 32+ char secret)
 - `DELEGATED_TOOL_TOKEN_SECRET` (recommended dedicated 32+ char secret)
+- `EXECUTION_CONTEXT_TOKEN_AUDIENCE` (default `agentic-orchestrator`)
+- `DELEGATED_TOOL_TOKEN_AUDIENCE` (default `app-mcp-gateway`)
 - At least one LLM API key
 - Optional Cloud Run state sync:
   - `SQLITE_PATH` (use `/tmp/orchestrator/orchestrator.db`)
   - `GCS_SQLITE_BUCKET`
   - `GCS_SQLITE_PREFIX`
   - `GCS_SYNC_INTERVAL_MS`
+
+### Secret Dependency Map
+
+- `APP_SECRET`
+  - platform auth/session signing
+  - platform crypto helpers (API key/session related)
+  - fallback secret if dedicated token secrets are not set
+- `EXECUTION_CONTEXT_TOKEN_SECRET`
+  - signing/verifying execution-context tokens
+  - used by `/api/v2/execution-contexts`, `/api/v2/agent-runs/chat`, `/api/v2/agent-runs/chat/stream`
+- `DELEGATED_TOOL_TOKEN_SECRET`
+  - signing/verifying delegated gateway tool tokens
+  - used by remote gateway tool execution path (`mcp_remote_gateway`)
+
+Production recommendation: keep all three secrets different so you can rotate one trust boundary without impacting others.
 
 ## How To Run
 
@@ -174,6 +191,28 @@ npm run dev
   - `GET /api/v1/runs/:runId`
   - `GET /api/v1/runs/:runId/stream`
 
+## Multi-Tenant Runtime APIs (v2)
+
+- Execution contexts:
+  - `POST /api/v2/execution-contexts`
+  - `POST /api/v2/execution-contexts/:id/revoke`
+- Agent runs with execution context:
+  - `POST /api/v2/agent-runs/chat`
+  - `POST /api/v2/agent-runs/chat/stream`
+- Connected applications (platform admin):
+  - `GET /api/v2/applications`
+  - `POST /api/v2/applications`
+- MCP gateways (platform admin):
+  - `GET /api/v2/mcp/gateways`
+  - `POST /api/v2/mcp/gateways`
+  - `PUT /api/v2/mcp/gateways/:id`
+  - `DELETE /api/v2/mcp/gateways/:id`
+- Tool policies (platform admin):
+  - `GET /api/v2/mcp/tool-policies`
+  - `POST /api/v2/mcp/tool-policies`
+  - `PUT /api/v2/mcp/tool-policies/:id`
+  - `DELETE /api/v2/mcp/tool-policies/:id`
+
 ## MCP Endpoints
 
 - Generic SSE: `GET /mcp/sse` + `POST /mcp/messages`
@@ -260,7 +299,7 @@ gcloud run deploy agentic-orchestrator \
   --image gcr.io/<PROJECT_ID>/agentic-orchestrator \
   --region <REGION> \
   --allow-unauthenticated \
-  --set-env-vars NODE_ENV=production,SQLITE_PATH=/tmp/orchestrator/orchestrator.db,GCS_SQLITE_BUCKET=<SQLITE_BUCKET>,GCS_SQLITE_PREFIX=state,GCS_SYNC_INTERVAL_MS=30000,REDIS_URL=redis://<REDIS_HOST>:6379
+  --set-env-vars NODE_ENV=production,SQLITE_PATH=/tmp/orchestrator/orchestrator.db,GCS_SQLITE_BUCKET=<SQLITE_BUCKET>,GCS_SQLITE_PREFIX=state,GCS_SYNC_INTERVAL_MS=30000,REDIS_URL=redis://<REDIS_HOST>:6379,EXECUTION_CONTEXT_TOKEN_AUDIENCE=agentic-orchestrator,DELEGATED_TOOL_TOKEN_AUDIENCE=app-mcp-gateway
 ```
 5. Grant service account storage access:
 ```bash
@@ -275,10 +314,11 @@ How it works in Cloud Run:
 ### Production Checklist
 
 - Set strong `APP_SECRET`.
+- Set strong `EXECUTION_CONTEXT_TOKEN_SECRET`.
+- Set strong `DELEGATED_TOOL_TOKEN_SECRET`.
 - Restrict CORS/origins at proxy layer.
 - Use managed Postgres in production.
 - Use managed Redis (Memorystore) in production.
 - Enable regular DB backups.
 - Rotate API keys periodically.
 - Configure log retention and monitoring.
-# daisy-agent-orchestration
