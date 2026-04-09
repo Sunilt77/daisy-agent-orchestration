@@ -26,6 +26,12 @@ flowchart LR
   MCPManifest --> API
 ```
 
+Detailed architecture notes:
+
+- Current platform architecture: `ARCHITECTURE.md`
+- Multi-tenant agent runtime and delegated MCP design: `docs/multi-tenant-agent-runtime.md`
+- Application-side MCP gateway verification reference: `docs/application-mcp-gateway-reference.md`
+
 ## Main Modules
 
 - `src/pages/*`: UI for Agents, Crews, Tools, MCPs, Traces, Platform, Credentials, Providers, Pricing.
@@ -61,6 +67,8 @@ cp .env.example .env
 2. Update minimum required values in `.env`:
 - `DATABASE_URL` (Postgres for platform module)
 - `APP_SECRET` (32+ chars)
+- `EXECUTION_CONTEXT_TOKEN_SECRET` (recommended dedicated 32+ char secret)
+- `DELEGATED_TOOL_TOKEN_SECRET` (recommended dedicated 32+ char secret)
 - At least one LLM API key
 - Optional Cloud Run state sync:
   - `SQLITE_PATH` (use `/tmp/orchestrator/orchestrator.db`)

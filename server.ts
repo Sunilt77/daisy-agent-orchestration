@@ -27,6 +27,12 @@ import { startSqliteGcsSyncLoop, syncSqliteToGcs } from './src/infra/sqliteGcs';
 import { isAttachmentStorageConfigured, uploadAttachmentBuffer } from './src/infra/attachmentsStorage';
 import { randomTraceIdHex32, uuid } from './src/platform/crypto';
 import { verifyProjectApiKey } from './src/platform/apiKeys';
+import {
+  createExecutionContextFromToken,
+  revokeExecutionContext,
+  signDelegatedToolToken,
+  verifyExecutionContextToken,
+} from './src/platform/executionContext';
 import { syncPersistentMirrorFromPostgres } from './src/orchestrator/sqliteMirror';
 import {
   claimNextJob as claimNextRuntimeJob,
@@ -104,6 +110,7 @@ import {
   getScopedVoiceConfigIds,
   getResourceAccess,
   getLocalAccessSubsystemInfo,
+  isPlatformAdminUser,
   requireManageableResource,
   deleteResourceAccess,
   requireVisibleAgentId,
@@ -1235,6 +1242,10 @@ async function executeDelegatedAgentRun(options: {
   userId?: string;
   initiatedBy: string;
   delegationDepth?: number;
+  executionContextId?: string | null;
+  tenantExternalId?: string | null;
+  userExternalId?: string | null;
+  conversationId?: string | null;
   logForwarder?: (log: any) => void;
 }) {
   const {
@@ -1248,6 +1259,10 @@ async function executeDelegatedAgentRun(options: {
     userId,
     initiatedBy,
     delegationDepth = 1,
+    executionContextId,
+    tenantExternalId,
+    userExternalId,
+    conversationId,
     logForwarder,
   } = options;
 
@@ -1262,6 +1277,10 @@ async function executeDelegatedAgentRun(options: {
       initiatedBy,
       sessionId,
       userId,
+      executionContextId,
+      tenantExternalId,
+      userExternalId,
+      conversationId,
     },
     {
       parentExecutionId,
@@ -1615,7 +1634,41 @@ async function delegateToAgentTool(args: any, ctx?: ToolExecutionContext): Promi
   }
 }
 
-type AgentSessionRow = { id: string; user_id: string | null };
+type AgentSessionRow = {
+  id: string;
+  user_id: string | null;
+  execution_context_id?: string | null;
+  tenant_external_id?: string | null;
+  user_external_id?: string | null;
+  conversation_id?: string | null;
+};
+type AgentSessionContext = {
+  executionContextId?: string | null;
+  tenantExternalId?: string | null;
+  userExternalId?: string | null;
+  conversationId?: string | null;
+};
+type ExecutionContextRow = {
+  id: string;
+  applicationId: string;
+  orgId: string;
+  projectId: string | null;
+  tenantExternalId: string;
+  userExternalId: string;
+  conversationId: string | null;
+  sessionId: string | null;
+  status: string;
+  scopesJson?: any;
+  allowedToolsJson?: any;
+  credentialRefsJson?: any;
+  expiresAt: Date;
+  revokedAt: Date | null;
+};
+
+function requirePlatformAdminRequest(req: express.Request) {
+  if (!req.user) throw new Error('Unauthorized');
+  if (!isPlatformAdminUser(req.user)) throw new Error('Platform admin access required');
+}
 type AttachmentRef = {
   id: string;
   kind: 'image' | 'audio' | 'pdf' | 'file';
@@ -1639,8 +1692,181 @@ type FeedbackPayload = {
   feedback?: string;
 };
 
-async function ensureAgentSession(agentId: number, sessionId?: string, userId?: string): Promise<AgentSessionRow> {
-  return await ensureRuntimeAgentSession(agentId, sessionId, userId);
+async function ensureAgentSession(
+  agentId: number,
+  sessionId?: string,
+  userId?: string,
+  context?: AgentSessionContext,
+): Promise<AgentSessionRow> {
+  return await ensureRuntimeAgentSession(agentId, sessionId, userId, context);
+}
+
+async function getActiveExecutionContextById(executionContextId: string): Promise<ExecutionContextRow> {
+  const prisma = getPrisma();
+  const row = await prisma.agentExecutionContext.findUnique({ where: { id: executionContextId } });
+  if (!row) throw new Error('Execution context not found');
+  if (row.revokedAt) throw new Error('Execution context revoked');
+  if (row.expiresAt.getTime() <= Date.now()) throw new Error('Execution context expired');
+  if (row.status !== 'active') throw new Error('Execution context is not active');
+  return row;
+}
+
+async function ensureAgentAllowedForExecutionContext(agentId: number, context: ExecutionContextRow) {
+  const prisma = getPrisma();
+  const agent = await prisma.orchestratorAgent.findUnique({
+    where: { id: agentId },
+    select: { id: true, projectId: true },
+  });
+  if (!agent) throw new Error('Agent not found');
+  if (!context.projectId) return agent;
+  if (!agent.projectId) throw new Error('Agent is not linked to a project');
+
+  const localProject = await prisma.orchestratorProject.findUnique({
+    where: { id: agent.projectId },
+    select: { platformProjectId: true },
+  });
+  if (!localProject?.platformProjectId || String(localProject.platformProjectId) !== String(context.projectId)) {
+    throw new Error('Agent is not accessible for this execution context project');
+  }
+  return agent;
+}
+
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item || '').trim()).filter(Boolean);
+}
+
+async function resolveRemoteGatewayForTool(tool: any, execContext?: ToolExecutionContext) {
+  const rawConfig = tool?.config;
+  let config: any = {};
+  try {
+    config = rawConfig ? JSON.parse(rawConfig) : {};
+  } catch {
+    config = {};
+  }
+
+  const explicitGatewayId = String(config?.gatewayId || '').trim();
+  const remoteToolName = String(config?.remoteToolName || '').trim() || String(tool?.name || '').trim();
+  const timeoutMs = Math.max(1_000, Math.min(120_000, Number(config?.gatewayTimeoutMs || 15_000)));
+  const executionContextId = String(execContext?.invocation?.executionContextId || '').trim();
+
+  if (!executionContextId) {
+    throw new Error('Remote MCP gateway tool requires execution_context_id in invocation context.');
+  }
+  const context = await getActiveExecutionContextById(executionContextId);
+
+  const prisma = getPrisma();
+  let gatewayRow: any = null;
+  if (explicitGatewayId) {
+    gatewayRow = await prisma.applicationMcpGateway.findUnique({ where: { id: explicitGatewayId } });
+  } else {
+    const policy = await prisma.agentToolPolicy.findFirst({
+      where: {
+        applicationId: context.applicationId,
+        toolName: String(tool?.name || ''),
+        enabled: true,
+        OR: [
+          { agentId: Number(execContext?.agent?.id || 0) || -1 },
+          { agentId: null },
+        ],
+      },
+      include: { gateway: true },
+      orderBy: [{ agentId: 'desc' }, { createdAt: 'desc' }],
+    });
+    gatewayRow = policy?.gateway || null;
+  }
+
+  if (!gatewayRow) {
+    throw new Error(`No remote MCP gateway configured for tool "${String(tool?.name || '')}".`);
+  }
+  if (String(gatewayRow.status || 'active') !== 'active') {
+    throw new Error(`Remote MCP gateway "${String(gatewayRow.name || gatewayRow.id)}" is not active.`);
+  }
+  if (String(gatewayRow.applicationId) !== String(context.applicationId)) {
+    throw new Error('Remote MCP gateway application mismatch for execution context.');
+  }
+
+  return {
+    context,
+    gateway: gatewayRow,
+    remoteToolName,
+    timeoutMs: Math.max(timeoutMs, Number(gatewayRow.timeoutMs || 0)),
+  };
+}
+
+async function callRemoteMcpGatewayTool(tool: any, args: any, execContext?: ToolExecutionContext): Promise<string> {
+  const resolved = await resolveRemoteGatewayForTool(tool, execContext);
+  const requestId = randomUUID();
+  const contextScopes = readStringArray((resolved.context as any).scopesJson);
+  const contextCredentialRefs = readStringArray((resolved.context as any).credentialRefsJson);
+  const token = signDelegatedToolToken({
+    iss: 'agentic-orchestrator',
+    sub: `tool:${resolved.remoteToolName}`,
+    execution_context_id: resolved.context.id,
+    tenant_external_id: resolved.context.tenantExternalId,
+    user_external_id: resolved.context.userExternalId,
+    allowed_tool: resolved.remoteToolName,
+    credential_refs: contextCredentialRefs,
+    required_scopes: contextScopes,
+    request_id: requestId,
+    jti: randomUUID(),
+  }, { ttlSeconds: 90 });
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), resolved.timeoutMs);
+  if (execContext) {
+    execContext.toolAudit = {
+      gatewayId: String(resolved.gateway.id || ''),
+      requestId,
+      idempotencyKey: requestId,
+      credentialRefsJson: JSON.stringify(contextCredentialRefs),
+      subjectUserExternalId: String(resolved.context.userExternalId || ''),
+      subjectTenantExternalId: String(resolved.context.tenantExternalId || ''),
+    };
+  }
+  try {
+    const response = await fetch(String(resolved.gateway.endpointUrl || ''), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        'X-Orchestrator-Request-Id': requestId,
+        'X-Orchestrator-Execution-Id': String(execContext?.executionId || ''),
+        'Idempotency-Key': requestId,
+      },
+      body: JSON.stringify({
+        tool_name: resolved.remoteToolName,
+        arguments: args ?? {},
+        context: {
+          execution_context_id: resolved.context.id,
+          tenant_external_id: resolved.context.tenantExternalId,
+          user_external_id: resolved.context.userExternalId,
+          session_id: execContext?.invocation?.sessionId || resolved.context.sessionId || null,
+          conversation_id: execContext?.invocation?.conversationId || resolved.context.conversationId || null,
+          credential_refs: contextCredentialRefs,
+        },
+      }),
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => ({} as any));
+    if (!response.ok) {
+      const errMsg = String(payload?.error || payload?.message || response.statusText || 'Remote MCP gateway request failed');
+      throw new Error(`[Remote MCP Error] ${response.status}: ${errMsg}`);
+    }
+    if (payload?.ok === false) {
+      throw new Error(`[Remote MCP Error] ${String(payload?.error || payload?.message || 'Remote MCP gateway returned failure')}`);
+    }
+    const output = payload?.output ?? payload?.result ?? payload;
+    if (typeof output === 'string') return output;
+    return JSON.stringify(output, null, 2);
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      throw new Error(`[Remote MCP Error] Request timed out after ${resolved.timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function loadSessionConversation(sessionId: string): Promise<SessionMessage[]> {
@@ -6755,7 +6981,7 @@ app.get('/api/agent-executions', requireUser, async (req, res) => {
 
 app.post('/api/agents/:id/run', localRunLimiter, async (req, res) => {
     const agentId = req.params.id;
-    const { task, session_id, user_id } = req.body;
+    const { task, session_id, user_id, execution_context_id, tenant_external_id, user_external_id, conversation_id } = req.body;
     
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any;
     if (!agent) return res.status(404).json({ error: "Agent not found" });
@@ -6766,6 +6992,10 @@ app.post('/api/agents/:id/run', localRunLimiter, async (req, res) => {
           task,
           session_id,
           user_id,
+          execution_context_id,
+          tenant_external_id,
+          user_external_id,
+          conversation_id,
           initiatedBy: 'direct_agent_api',
         }, {
           priority: readJobPriority(req.body?.priority, JOB_PRIORITY.HIGH),
@@ -6862,11 +7092,455 @@ app.post('/api/agents/:id/delegate', localRunLimiter, async (req, res) => {
     acceptedExecutionResponse(res, { parent_execution_id: parentExecutionId, status: 'running' });
 });
 
+app.post('/api/v2/execution-contexts', async (req, res) => {
+  try {
+    const contextToken = String(req.body?.context_token || '').trim();
+    if (!contextToken) return res.status(400).json({ error: 'context_token is required' });
+    const context = await createExecutionContextFromToken(contextToken);
+    res.status(201).json({
+      execution_context_id: context.id,
+      application_id: context.applicationId,
+      org_id: context.orgId,
+      project_id: context.projectId,
+      tenant_external_id: context.tenantExternalId,
+      user_external_id: context.userExternalId,
+      conversation_id: context.conversationId,
+      session_id: context.sessionId,
+      status: context.status,
+      expires_at: context.expiresAt.toISOString(),
+      created_at: context.createdAt.toISOString(),
+    });
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to create execution context' });
+  }
+});
+
+app.post('/api/v2/execution-contexts/:id/revoke', async (req, res) => {
+  try {
+    const executionContextId = String(req.params.id || '').trim();
+    if (!executionContextId) return res.status(400).json({ error: 'execution context id is required' });
+    const context = await getActiveExecutionContextById(executionContextId);
+
+    let allowed = false;
+    const contextToken = String(req.body?.context_token || '').trim();
+    if (contextToken) {
+      const claims = verifyExecutionContextToken(contextToken);
+      if (String(claims.app_id) === String(context.applicationId) && String(claims.org_id) === String(context.orgId)) {
+        allowed = true;
+      }
+    }
+    if (!allowed) return res.status(403).json({ error: 'Forbidden' });
+
+    await revokeExecutionContext(executionContextId);
+    res.json({ success: true, execution_context_id: executionContextId, revoked: true });
+  } catch (e: any) {
+    const message = String(e?.message || 'Failed to revoke execution context');
+    const status = message.toLowerCase().includes('not found') ? 404 : 400;
+    res.status(status).json({ error: message });
+  }
+});
+
+app.get('/api/v2/applications', requireUser, async (req, res) => {
+  try {
+    requirePlatformAdminRequest(req);
+    const applications = await getPrisma().connectedApplication.findMany({
+      orderBy: [{ createdAt: 'desc' }],
+    });
+    res.json(applications);
+  } catch (e: any) {
+    const message = String(e?.message || 'Failed to load applications');
+    const status = message.toLowerCase().includes('unauthorized') ? 401 : (message.toLowerCase().includes('admin') ? 403 : 400);
+    res.status(status).json({ error: message });
+  }
+});
+
+app.post('/api/v2/applications', requireUser, async (req, res) => {
+  try {
+    requirePlatformAdminRequest(req);
+    const name = String(req.body?.name || '').trim();
+    const slug = String(req.body?.slug || '').trim();
+    const tokenIssuer = String(req.body?.token_issuer || '').trim();
+    const tokenAudience = String(req.body?.token_audience || '').trim();
+    const baseUrl = String(req.body?.base_url || '').trim();
+    const jwksUrl = String(req.body?.jwks_url || '').trim();
+    const status = String(req.body?.status || 'active').trim() || 'active';
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    if (!slug) return res.status(400).json({ error: 'slug is required' });
+    if (!tokenIssuer) return res.status(400).json({ error: 'token_issuer is required' });
+    if (!tokenAudience) return res.status(400).json({ error: 'token_audience is required' });
+
+    const appRow = await getPrisma().connectedApplication.create({
+      data: {
+        name,
+        slug,
+        tokenIssuer,
+        tokenAudience,
+        status,
+        baseUrl: baseUrl || null,
+        jwksUrl: jwksUrl || null,
+      },
+    });
+    res.status(201).json(appRow);
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to create application' });
+  }
+});
+
+app.get('/api/v2/mcp/gateways', requireUser, async (req, res) => {
+  try {
+    requirePlatformAdminRequest(req);
+    const applicationId = String(req.query.application_id || '').trim();
+    const gateways = await getPrisma().applicationMcpGateway.findMany({
+      where: applicationId ? { applicationId } : undefined,
+      include: { application: { select: { id: true, name: true, slug: true } } },
+      orderBy: [{ createdAt: 'desc' }],
+    });
+    res.json(gateways);
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to load gateways' });
+  }
+});
+
+app.post('/api/v2/mcp/gateways', requireUser, async (req, res) => {
+  try {
+    requirePlatformAdminRequest(req);
+    const applicationId = String(req.body?.application_id || '').trim();
+    const name = String(req.body?.name || '').trim();
+    const endpointUrl = String(req.body?.endpoint_url || '').trim();
+    const authMode = String(req.body?.auth_mode || 'signed_jwt').trim() || 'signed_jwt';
+    const status = String(req.body?.status || 'active').trim() || 'active';
+    const timeoutMs = Number(req.body?.timeout_ms || 15000);
+    if (!applicationId) return res.status(400).json({ error: 'application_id is required' });
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    if (!endpointUrl) return res.status(400).json({ error: 'endpoint_url is required' });
+
+    const gateway = await getPrisma().applicationMcpGateway.create({
+      data: {
+        applicationId,
+        name,
+        endpointUrl,
+        authMode,
+        status,
+        timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.round(timeoutMs) : 15000,
+      },
+    });
+    res.status(201).json(gateway);
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to create gateway' });
+  }
+});
+
+app.put('/api/v2/mcp/gateways/:id', requireUser, async (req, res) => {
+  try {
+    requirePlatformAdminRequest(req);
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'id is required' });
+
+    const payload: any = {};
+    if (req.body?.name != null) payload.name = String(req.body.name || '').trim();
+    if (req.body?.endpoint_url != null) payload.endpointUrl = String(req.body.endpoint_url || '').trim();
+    if (req.body?.auth_mode != null) payload.authMode = String(req.body.auth_mode || '').trim();
+    if (req.body?.status != null) payload.status = String(req.body.status || '').trim();
+    if (req.body?.timeout_ms != null) {
+      const timeoutMs = Number(req.body.timeout_ms);
+      payload.timeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.round(timeoutMs) : 15000;
+    }
+    if (!Object.keys(payload).length) return res.status(400).json({ error: 'No update fields provided' });
+
+    const updated = await getPrisma().applicationMcpGateway.update({
+      where: { id },
+      data: payload,
+    });
+    res.json(updated);
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to update gateway' });
+  }
+});
+
+app.delete('/api/v2/mcp/gateways/:id', requireUser, async (req, res) => {
+  try {
+    requirePlatformAdminRequest(req);
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'id is required' });
+    await getPrisma().applicationMcpGateway.delete({ where: { id } });
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to delete gateway' });
+  }
+});
+
+app.get('/api/v2/mcp/tool-policies', requireUser, async (req, res) => {
+  try {
+    requirePlatformAdminRequest(req);
+    const applicationId = String(req.query.application_id || '').trim();
+    const agentId = Number(req.query.agent_id || 0);
+    const where: any = {};
+    if (applicationId) where.applicationId = applicationId;
+    if (Number.isFinite(agentId) && agentId > 0) where.agentId = agentId;
+    const policies = await getPrisma().agentToolPolicy.findMany({
+      where,
+      include: {
+        application: { select: { id: true, name: true, slug: true } },
+        gateway: { select: { id: true, name: true, endpointUrl: true, status: true } },
+        agent: { select: { id: true, name: true } },
+      },
+      orderBy: [{ createdAt: 'desc' }],
+    });
+    res.json(policies);
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to load tool policies' });
+  }
+});
+
+app.post('/api/v2/mcp/tool-policies', requireUser, async (req, res) => {
+  try {
+    requirePlatformAdminRequest(req);
+    const applicationId = String(req.body?.application_id || '').trim();
+    const toolName = String(req.body?.tool_name || '').trim();
+    const gatewayId = String(req.body?.gateway_id || '').trim();
+    const enabled = req.body?.enabled == null ? true : Boolean(req.body.enabled);
+    const agentId = Number(req.body?.agent_id || 0);
+    const requiredScopes = Array.isArray(req.body?.required_scopes)
+      ? req.body.required_scopes.map((value: any) => String(value || '').trim()).filter(Boolean)
+      : [];
+    if (!applicationId) return res.status(400).json({ error: 'application_id is required' });
+    if (!toolName) return res.status(400).json({ error: 'tool_name is required' });
+    if (!gatewayId) return res.status(400).json({ error: 'gateway_id is required' });
+
+    const created = await getPrisma().agentToolPolicy.create({
+      data: {
+        applicationId,
+        toolName,
+        gatewayId,
+        enabled,
+        agentId: Number.isFinite(agentId) && agentId > 0 ? Math.round(agentId) : null,
+        requiredScopesJson: requiredScopes,
+      },
+    });
+    res.status(201).json(created);
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to create tool policy' });
+  }
+});
+
+app.put('/api/v2/mcp/tool-policies/:id', requireUser, async (req, res) => {
+  try {
+    requirePlatformAdminRequest(req);
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'id is required' });
+
+    const payload: any = {};
+    if (req.body?.tool_name != null) payload.toolName = String(req.body.tool_name || '').trim();
+    if (req.body?.gateway_id != null) payload.gatewayId = String(req.body.gateway_id || '').trim();
+    if (req.body?.enabled != null) payload.enabled = Boolean(req.body.enabled);
+    if (req.body?.agent_id != null) {
+      const agentId = Number(req.body.agent_id);
+      payload.agentId = Number.isFinite(agentId) && agentId > 0 ? Math.round(agentId) : null;
+    }
+    if (req.body?.required_scopes != null) {
+      payload.requiredScopesJson = Array.isArray(req.body.required_scopes)
+        ? req.body.required_scopes.map((value: any) => String(value || '').trim()).filter(Boolean)
+        : [];
+    }
+    if (!Object.keys(payload).length) return res.status(400).json({ error: 'No update fields provided' });
+
+    const updated = await getPrisma().agentToolPolicy.update({
+      where: { id },
+      data: payload,
+    });
+    res.json(updated);
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to update tool policy' });
+  }
+});
+
+app.delete('/api/v2/mcp/tool-policies/:id', requireUser, async (req, res) => {
+  try {
+    requirePlatformAdminRequest(req);
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'id is required' });
+    await getPrisma().agentToolPolicy.delete({ where: { id } });
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || 'Failed to delete tool policy' });
+  }
+});
+
+app.post('/api/v2/agent-runs/chat', localRunLimiter, async (req, res) => {
+  const agentId = Number(req.body?.agent_id);
+  if (!Number.isFinite(agentId) || agentId <= 0) return res.status(400).json({ error: 'agent_id is required' });
+
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  const contextToken = String(req.body?.context_token || '').trim();
+  const executionContextId = String(req.body?.execution_context_id || '').trim();
+  const requestedSessionId = typeof req.body?.session_id === 'string' ? req.body.session_id.trim() : '';
+  const requestedConversationId = typeof req.body?.conversation_id === 'string' ? req.body.conversation_id.trim() : '';
+  const attachments = normalizeIncomingAttachments(req.body?.attachments);
+  const effectiveTask = message || (attachments.length ? 'Please use the attached file(s) as part of this request.' : '');
+  if (!effectiveTask) return res.status(400).json({ error: 'message is required' });
+  if (!contextToken && !executionContextId) {
+    return res.status(400).json({ error: 'Provide either context_token or execution_context_id' });
+  }
+
+  try {
+    const context = executionContextId
+      ? await getActiveExecutionContextById(executionContextId)
+      : await createExecutionContextFromToken(contextToken);
+
+    await ensureAgentAllowedForExecutionContext(agentId, context);
+
+    const sessionId = requestedSessionId || context.sessionId || undefined;
+    const conversationId = requestedConversationId || context.conversationId || undefined;
+    const tenantKey = readTenantKey(`${context.orgId}:${context.tenantExternalId}`, context.orgId);
+    const externalUserId = String(context.userExternalId || '').trim() || null;
+
+    const jobId = await enqueueJob('run_agent', {
+      agentId,
+      task: effectiveTask,
+      session_id: sessionId,
+      user_id: externalUserId,
+      userMessage: effectiveTask,
+      attachments,
+      initiatedBy: 'v2_agent_chat_api',
+      execution_context_id: context.id,
+      tenant_external_id: context.tenantExternalId,
+      user_external_id: context.userExternalId,
+      conversation_id: conversationId,
+    }, {
+      priority: readJobPriority(req.body?.priority, JOB_PRIORITY.CRITICAL),
+      tenantKey,
+    });
+
+    const result = await waitForJob(jobId, 120000);
+    res.json({
+      execution_context_id: context.id,
+      session_id: result?.session_id ?? sessionId ?? null,
+      user_id: result?.user_id ?? externalUserId ?? null,
+      conversation_id: conversationId ?? null,
+      reply: result?.result ?? '',
+      execution_id: result?.exec_id ?? null,
+      usage: result?.usage ?? null,
+      logs: Array.isArray(result?.logs) ? result.logs : [],
+    });
+  } catch (e: any) {
+    const messageText = String(e?.message || 'Failed to run v2 chat request');
+    const lower = messageText.toLowerCase();
+    const status = lower.includes('not found') ? 404 : (lower.includes('forbidden') || lower.includes('not accessible') ? 403 : 400);
+    res.status(status).json({ error: messageText });
+  }
+});
+
+app.post('/api/v2/agent-runs/chat/stream', localRunLimiter, async (req, res) => {
+  const agentId = Number(req.body?.agent_id);
+  if (!Number.isFinite(agentId) || agentId <= 0) return res.status(400).json({ error: 'agent_id is required' });
+
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  const contextToken = String(req.body?.context_token || '').trim();
+  const executionContextId = String(req.body?.execution_context_id || '').trim();
+  const requestedSessionId = typeof req.body?.session_id === 'string' ? req.body.session_id.trim() : '';
+  const requestedConversationId = typeof req.body?.conversation_id === 'string' ? req.body.conversation_id.trim() : '';
+  const normalizedAttachments = normalizeIncomingAttachments(req.body?.attachments);
+  const effectiveTask = message || (normalizedAttachments.length ? 'Please use the attached file(s) as part of this request.' : '');
+  if (!effectiveTask) return res.status(400).json({ error: 'message is required' });
+  if (!contextToken && !executionContextId) {
+    return res.status(400).json({ error: 'Provide either context_token or execution_context_id' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  let closed = false;
+  req.on('close', () => { closed = true; });
+  const sendSse = (event: string, payload: any) => {
+    if (closed) return;
+    try {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(payload ?? {})}\n\n`);
+    } catch {
+      closed = true;
+    }
+  };
+  const ping = setInterval(() => sendSse('ping', { ts: Date.now() }), 15_000);
+
+  try {
+    const context = executionContextId
+      ? await getActiveExecutionContextById(executionContextId)
+      : await createExecutionContextFromToken(contextToken);
+    await ensureAgentAllowedForExecutionContext(agentId, context);
+
+    const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any;
+    if (!agent) throw new Error('Agent not found');
+
+    const sessionId = requestedSessionId || context.sessionId || undefined;
+    const conversationId = requestedConversationId || context.conversationId || undefined;
+    const userId = String(context.userExternalId || '').trim() || null;
+    const session = await ensureAgentSession(agent.id, sessionId, userId, {
+      executionContextId: context.id,
+      tenantExternalId: context.tenantExternalId,
+      userExternalId: context.userExternalId,
+      conversationId,
+    });
+
+    sendSse('session', {
+      execution_context_id: context.id,
+      session_id: session.id,
+      user_id: session.user_id ?? userId ?? null,
+      conversation_id: conversationId ?? null,
+    });
+    sendSse('log', { type: 'status', agent: agent.name, message: 'Agent execution started' });
+
+    const result = await runAgent(
+      agent,
+      { description: effectiveTask, expected_output: 'The best possible answer.' },
+      '',
+      (log) => sendSse('log', log),
+      {
+        initiatedBy: 'v2_agent_chat_api_stream',
+        sessionId: session.id,
+        userId: session.user_id ?? userId ?? undefined,
+        userMessage: effectiveTask,
+        attachments: normalizedAttachments,
+        executionContextId: context.id,
+        tenantExternalId: context.tenantExternalId,
+        userExternalId: context.userExternalId,
+        conversationId,
+      }
+    );
+
+    sendSse('done', {
+      execution_context_id: context.id,
+      session_id: session.id,
+      user_id: session.user_id ?? userId ?? null,
+      conversation_id: conversationId ?? null,
+      reply: result?.text ?? '',
+      execution_id: result?.exec_id ?? null,
+      usage: result?.usage ?? null,
+    });
+  } catch (e: any) {
+    sendSse('error', { error: e?.message || 'Failed to run v2 chat stream request' });
+  } finally {
+    clearInterval(ping);
+    if (!closed) res.end();
+  }
+});
+
 app.post('/api/agents/:id/chat', requireUser, localRunLimiter, async (req, res) => {
     const agentId = Number(req.params.id);
     const scope = await resolveOrchestratorAccessScope(req);
     requireVisibleAgentId(scope, agentId);
-    const { message, session_id, user_id, attachments } = req.body || {};
+    const {
+      message,
+      session_id,
+      user_id,
+      attachments,
+      execution_context_id,
+      tenant_external_id,
+      user_external_id,
+      conversation_id,
+    } = req.body || {};
     const normalizedAttachments = normalizeIncomingAttachments(attachments);
     const task = typeof message === 'string' ? message.trim() : '';
     const effectiveTask = task || (normalizedAttachments.length ? 'Please use the attached file(s) as part of this request.' : '');
@@ -6883,6 +7557,10 @@ app.post('/api/agents/:id/chat', requireUser, localRunLimiter, async (req, res) 
         user_id,
         userMessage: effectiveTask,
         attachments: normalizedAttachments,
+        execution_context_id,
+        tenant_external_id,
+        user_external_id,
+        conversation_id,
         initiatedBy: 'agent_chat_ui',
       }, {
         priority: readJobPriority(req.body?.priority, JOB_PRIORITY.CRITICAL),
@@ -6906,7 +7584,16 @@ app.post('/api/agents/:id/chat/stream', requireUser, localRunLimiter, async (req
     const agentId = Number(req.params.id);
     const scope = await resolveOrchestratorAccessScope(req);
     requireVisibleAgentId(scope, agentId);
-    const { message, session_id, user_id, attachments } = req.body || {};
+    const {
+      message,
+      session_id,
+      user_id,
+      attachments,
+      execution_context_id,
+      tenant_external_id,
+      user_external_id,
+      conversation_id,
+    } = req.body || {};
     const normalizedAttachments = normalizeIncomingAttachments(attachments);
     const task = typeof message === 'string' ? message.trim() : '';
     const effectiveTask = task || (normalizedAttachments.length ? 'Please use the attached file(s) as part of this request.' : '');
@@ -6937,7 +7624,12 @@ app.post('/api/agents/:id/chat/stream', requireUser, localRunLimiter, async (req
     const ping = setInterval(() => sendSse('ping', { ts: Date.now() }), 15_000);
 
     try {
-      const session = await ensureAgentSession(agent.id, session_id, user_id);
+      const session = await ensureAgentSession(agent.id, session_id, user_id, {
+        executionContextId: execution_context_id || null,
+        tenantExternalId: tenant_external_id || null,
+        userExternalId: user_external_id || null,
+        conversationId: conversation_id || null,
+      });
       sendSse('session', { session_id: session.id, user_id: session.user_id ?? user_id ?? null });
       sendSse('log', { type: 'status', agent: agent.name, message: 'Agent execution started' });
 
@@ -9472,6 +10164,17 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
     config = {};
   }
 
+  const isRemoteGatewayTool =
+    String(tool.type || '').trim().toLowerCase() === 'mcp_remote_gateway'
+    || Boolean(String(config?.gatewayId || '').trim());
+  if (isRemoteGatewayTool) {
+    try {
+      return await callRemoteMcpGatewayTool(tool, args, execContext);
+    } catch (e: any) {
+      return String(e?.message || '[Remote MCP Error] Failed to execute remote gateway tool');
+    }
+  }
+
   if (tool.type === 'python') {
     return '[Python Error] Python tools are deprecated in this runtime. Convert this tool to type "javascript" and keep code in config.code.';
   }
@@ -9975,11 +10678,31 @@ async function runDelegatedAgentExecution(options: {
 
 async function processJob(job: { id: number; type: string; payload: any }) {
   if (job.type === 'run_agent') {
-    const { agentId, task, session_id, user_id, initiatedBy, retryOfExecutionId, parentExecutionId, delegationTitle, userMessage, attachments } = job.payload || {};
+    const {
+      agentId,
+      task,
+      session_id,
+      user_id,
+      initiatedBy,
+      retryOfExecutionId,
+      parentExecutionId,
+      delegationTitle,
+      userMessage,
+      attachments,
+      execution_context_id,
+      tenant_external_id,
+      user_external_id,
+      conversation_id,
+    } = job.payload || {};
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any;
     if (!agent) throw new Error('Agent not found');
     const logs: any[] = [];
-    const session = await ensureAgentSession(agent.id, session_id, user_id);
+    const session = await ensureAgentSession(agent.id, session_id, user_id, {
+      executionContextId: execution_context_id || null,
+      tenantExternalId: tenant_external_id || null,
+      userExternalId: user_external_id || null,
+      conversationId: conversation_id || null,
+    });
     const result = parentExecutionId
       ? await executeDelegatedAgentRun({
           targetAgent: agent,
@@ -9990,6 +10713,10 @@ async function processJob(job: { id: number; type: string; payload: any }) {
           userId: session.user_id ?? user_id,
           initiatedBy: initiatedBy || 'delegated_agent_child',
           delegationDepth: 1,
+          executionContextId: execution_context_id || null,
+          tenantExternalId: tenant_external_id || null,
+          userExternalId: user_external_id || null,
+          conversationId: conversation_id || null,
           logForwarder: (l) => logs.push(l),
         })
       : await runAgent(agent, { description: task, expected_output: 'The best possible answer.' }, "", (l) => logs.push(l), {
@@ -9998,13 +10725,25 @@ async function processJob(job: { id: number; type: string; payload: any }) {
           userId: session.user_id ?? user_id,
           userMessage: typeof userMessage === 'string' ? userMessage : String(task || ''),
           attachments: normalizeIncomingAttachments(attachments),
+          executionContextId: execution_context_id || null,
+          tenantExternalId: tenant_external_id || null,
+          userExternalId: user_external_id || null,
+          conversationId: conversation_id || null,
         }, {
           retryOfExecutionId: retryOfExecutionId ?? null,
           parentExecutionId: null,
           delegationTitle: null,
           executionKind: 'standard',
         });
-    return { exec_id: result.exec_id, result: result.text, usage: result.usage, logs, session_id: session.id, user_id: session.user_id ?? user_id ?? null };
+    return {
+      exec_id: result.exec_id,
+      result: result.text,
+      usage: result.usage,
+      logs,
+      session_id: session.id,
+      user_id: session.user_id ?? user_id ?? null,
+      execution_context_id: execution_context_id ?? session.execution_context_id ?? null,
+    };
   }
 
   if (job.type === 'run_crew') {
@@ -10177,13 +10916,26 @@ type RunInvocation = {
   userId?: string;
   userMessage?: string;
   attachments?: AttachmentRef[];
+  executionContextId?: string | null;
+  tenantExternalId?: string | null;
+  userExternalId?: string | null;
+  conversationId?: string | null;
 };
 type RunMeta = { retryOfExecutionId?: number | null; parentExecutionId?: number | null; executionKind?: string; delegationTitle?: string | null; delegationDepth?: number | null };
+type ToolExecutionAuditInfo = {
+  gatewayId?: string | null;
+  requestId?: string | null;
+  idempotencyKey?: string | null;
+  credentialRefsJson?: string | null;
+  subjectUserExternalId?: string | null;
+  subjectTenantExternalId?: string | null;
+};
 type ToolExecutionContext = {
   agent?: any;
   executionId?: number | null;
   invocation?: RunInvocation;
   runMeta?: RunMeta;
+  toolAudit?: ToolExecutionAuditInfo | null;
   logCallback?: (log: any) => void;
 };
 
@@ -10248,7 +11000,12 @@ async function runAgent(
   let runError: any = null;
 
   const session = invocation?.sessionId
-    ? await ensureAgentSession(agent.id, invocation.sessionId, invocation.userId)
+    ? await ensureAgentSession(agent.id, invocation.sessionId, invocation.userId, {
+        executionContextId: invocation.executionContextId ?? null,
+        tenantExternalId: invocation.tenantExternalId ?? null,
+        userExternalId: invocation.userExternalId ?? null,
+        conversationId: invocation.conversationId ?? null,
+      })
     : undefined;
   const sessionId = session?.id ?? null;
   const sessionUserId = session?.user_id ?? invocation?.userId ?? null;
@@ -10958,14 +11715,30 @@ async function runAgent(
                 const actualToolName = mcpPrefix ? String(action.tool).substring(mcpPrefix.length + 1) : action.tool;
                 const toolRecord = mcpPrefix ? mcpToolByPrefix.get(mcpPrefix) : toolByName.get(action.tool);
                 const toolType = mcpPrefix ? 'mcp' : (toolRecord?.type || 'custom');
+                let toolRecordConfig: any = {};
+                try {
+                  toolRecordConfig = toolRecord?.config ? JSON.parse(String(toolRecord.config)) : {};
+                } catch {
+                  toolRecordConfig = {};
+                }
+                const toolAuditSeed: ToolExecutionAuditInfo = {
+                  gatewayId: String(toolRecordConfig?.gatewayId || '').trim() || null,
+                  subjectUserExternalId: invocation?.userExternalId ? String(invocation.userExternalId) : null,
+                  subjectTenantExternalId: invocation?.tenantExternalId ? String(invocation.tenantExternalId) : null,
+                };
                 let toolSpanId: string | null = null;
 
                 const toolExecId = await createRuntimeToolExecution({
                   toolId: toolRecord?.id ?? null,
                   agentId: agent.id,
                   agentExecutionId: execId,
+                  executionContextId: invocation?.executionContextId ?? null,
+                  gatewayId: toolAuditSeed.gatewayId ?? null,
                   toolName: String(action.tool),
                   toolType,
+                  credentialRefsJson: null,
+                  subjectUserExternalId: toolAuditSeed.subjectUserExternalId ?? null,
+                  subjectTenantExternalId: toolAuditSeed.subjectTenantExternalId ?? null,
                   args: action.args ? JSON.stringify(action.args) : null,
                 });
 
@@ -10989,6 +11762,7 @@ async function runAgent(
                               executionId: execId,
                               invocation,
                               runMeta,
+                              toolAudit: toolAuditSeed,
                               logCallback,
                             });
                             toolSpan.setStatus({ code: SpanStatusCode.OK });
@@ -11011,6 +11785,12 @@ async function runAgent(
                   result: toolResult || null,
                   error: toolError ? (toolError.message || String(toolError)) : null,
                   durationMs: toolDurationMs,
+                  gatewayId: toolAuditSeed.gatewayId ?? null,
+                  requestId: toolAuditSeed.requestId ?? null,
+                  idempotencyKey: toolAuditSeed.idempotencyKey ?? null,
+                  credentialRefsJson: toolAuditSeed.credentialRefsJson ?? null,
+                  subjectUserExternalId: toolAuditSeed.subjectUserExternalId ?? null,
+                  subjectTenantExternalId: toolAuditSeed.subjectTenantExternalId ?? null,
                 });
 
                 if (toolError) {

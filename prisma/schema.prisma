@@ -12,10 +12,11 @@ model Org {
   name      String
   createdAt DateTime @default(now()) @map("created_at")
 
-  users    User[]
-  roles    Role[]
-  projects Project[]
-  runs     Run[]
+  users             User[]
+  roles             Role[]
+  projects          Project[]
+  runs              Run[]
+  executionContexts AgentExecutionContext[]
 
   @@map("orgs")
 }
@@ -74,19 +75,23 @@ model Session {
 }
 
 model Project {
-  id          String   @id @default(uuid())
-  orgId       String   @map("org_id")
-  name        String
-  description String?
-  createdAt   DateTime @default(now()) @map("created_at")
+  id            String   @id @default(uuid())
+  orgId         String   @map("org_id")
+  applicationId String?  @map("application_id")
+  name          String
+  description   String?
+  createdAt     DateTime @default(now()) @map("created_at")
 
-  org     Org @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  apiKeys ProjectApiKey[]
-  runs    Run[]
-  documents Document[]
+  org                  Org                   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  application          ConnectedApplication? @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+  apiKeys              ProjectApiKey[]
+  runs                 Run[]
+  documents            Document[]
   knowledgebaseIndexes KnowledgebaseIndex[]
+  executionContexts    AgentExecutionContext[]
 
   @@index([orgId])
+  @@index([applicationId])
   @@map("projects")
 }
 
@@ -104,6 +109,116 @@ model ProjectApiKey {
   @@index([projectId])
   @@index([revokedAt])
   @@map("project_api_keys")
+}
+
+model ConnectedApplication {
+  id            String   @id @default(uuid())
+  name          String
+  slug          String   @unique
+  status        String   @default("active")
+  baseUrl       String?  @map("base_url")
+  jwksUrl       String?  @map("jwks_url")
+  tokenIssuer   String   @map("token_issuer")
+  tokenAudience String   @map("token_audience")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  projects          Project[]
+  mcpGateways       ApplicationMcpGateway[]
+  executionContexts AgentExecutionContext[]
+  toolPolicies      AgentToolPolicy[]
+
+  @@map("connected_applications")
+}
+
+model ApplicationMcpGateway {
+  id            String   @id @default(uuid())
+  applicationId String   @map("application_id")
+  name          String
+  endpointUrl   String   @map("endpoint_url")
+  authMode      String   @default("signed_jwt") @map("auth_mode")
+  status        String   @default("active")
+  timeoutMs     Int      @default(15000) @map("timeout_ms")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  application    ConnectedApplication   @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  toolPolicies   AgentToolPolicy[]
+  toolExecutions OrchestratorToolExecution[]
+
+  @@index([applicationId])
+  @@map("application_mcp_gateways")
+}
+
+model AgentExecutionContext {
+  id                 String    @id @default(uuid())
+  applicationId      String    @map("application_id")
+  orgId              String    @map("org_id")
+  projectId          String?   @map("project_id")
+  tenantExternalId   String    @map("tenant_external_id")
+  userExternalId     String    @map("user_external_id")
+  conversationId     String?   @map("conversation_id")
+  sessionId          String?   @map("session_id")
+  rolesJson          Json?     @map("roles_jsonb")
+  scopesJson         Json?     @map("scopes_jsonb")
+  allowedToolsJson   Json?     @map("allowed_tools_jsonb")
+  credentialRefsJson Json?     @map("credential_refs_jsonb")
+  sourceTokenJti     String?   @map("source_token_jti")
+  status             String    @default("active")
+  expiresAt          DateTime  @map("expires_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  revokedAt          DateTime? @map("revoked_at")
+
+  application        ConnectedApplication    @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  org                Org                     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  project            Project?                @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  credentialBindings AgentCredentialBinding[]
+  toolExecutions     OrchestratorToolExecution[]
+  agentSessions      OrchestratorAgentSession[]
+
+  @@index([applicationId, tenantExternalId])
+  @@index([orgId, projectId])
+  @@index([userExternalId])
+  @@index([expiresAt])
+  @@map("agent_execution_contexts")
+}
+
+model AgentCredentialBinding {
+  id                String   @id @default(uuid())
+  executionContextId String  @map("execution_context_id")
+  provider          String
+  credentialRef     String   @map("credential_ref")
+  subjectType       String   @map("subject_type")
+  subjectExternalId String   @map("subject_external_id")
+  scopesJson        Json?    @map("scopes_jsonb")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  executionContext AgentExecutionContext @relation(fields: [executionContextId], references: [id], onDelete: Cascade)
+
+  @@index([executionContextId])
+  @@index([provider, credentialRef])
+  @@map("agent_credential_bindings")
+}
+
+model AgentToolPolicy {
+  id                 String   @id @default(uuid())
+  applicationId      String   @map("application_id")
+  agentId            Int?     @map("agent_id")
+  toolName           String   @map("tool_name")
+  gatewayId          String   @map("gateway_id")
+  requiredScopesJson Json?    @map("required_scopes_jsonb")
+  enabled            Boolean  @default(true)
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  application ConnectedApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  agent       OrchestratorAgent?   @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  gateway     ApplicationMcpGateway @relation(fields: [gatewayId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId, toolName])
+  @@index([agentId])
+  @@index([gatewayId])
+  @@map("agent_tool_policies")
 }
 
 model Run {
@@ -320,6 +435,7 @@ model OrchestratorAgent {
   delegations OrchestratorAgentDelegation[]
   runtimeSessions OrchestratorAgentSession[]
   toolExecutions  OrchestratorToolExecution[]
+  toolPolicies    AgentToolPolicy[]
 
   @@index([projectId])
   @@map("orchestrator_agents")
@@ -676,38 +792,55 @@ model OrchestratorToolExecution {
   toolId           Int?     @map("tool_id")
   agentId          Int?     @map("agent_id")
   agentExecutionId Int?     @map("agent_execution_id")
+  executionContextId String? @map("execution_context_id")
+  gatewayId        String?  @map("gateway_id")
   toolName         String   @map("tool_name")
   toolType         String?  @map("tool_type")
   status           String   @default("running")
+  requestId        String?  @map("request_id")
+  idempotencyKey   String?  @map("idempotency_key")
+  credentialRefsJson Json?  @map("credential_refs_jsonb")
+  subjectUserExternalId String? @map("subject_user_external_id")
+  subjectTenantExternalId String? @map("subject_tenant_external_id")
   args             String?
   result           String?
   error            String?
   durationMs       Int?     @map("duration_ms")
   createdAt        DateTime @default(now()) @map("created_at")
 
-  tool           OrchestratorTool?           @relation(fields: [toolId], references: [id], onDelete: SetNull)
-  agent          OrchestratorAgent?          @relation(fields: [agentId], references: [id], onDelete: SetNull)
-  agentExecution OrchestratorAgentExecution? @relation(fields: [agentExecutionId], references: [id], onDelete: SetNull)
+  tool             OrchestratorTool?           @relation(fields: [toolId], references: [id], onDelete: SetNull)
+  agent            OrchestratorAgent?          @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  agentExecution   OrchestratorAgentExecution? @relation(fields: [agentExecutionId], references: [id], onDelete: SetNull)
+  executionContext AgentExecutionContext?      @relation(fields: [executionContextId], references: [id], onDelete: SetNull)
+  gateway          ApplicationMcpGateway?      @relation(fields: [gatewayId], references: [id], onDelete: SetNull)
 
   @@index([toolId])
   @@index([agentId])
   @@index([agentExecutionId])
+  @@index([executionContextId])
+  @@index([gatewayId])
   @@index([status])
   @@map("orchestrator_tool_executions")
 }
 
 model OrchestratorAgentSession {
-  id         String   @id
-  agentId    Int      @map("agent_id")
-  userId     String?  @map("user_id")
-  createdAt  DateTime @default(now()) @map("created_at")
-  updatedAt  DateTime @default(now()) @map("updated_at")
-  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  id                 String   @id
+  agentId            Int      @map("agent_id")
+  userId             String?  @map("user_id")
+  executionContextId String?  @map("execution_context_id")
+  tenantExternalId   String?  @map("tenant_external_id")
+  userExternalId     String?  @map("user_external_id")
+  conversationId     String?  @map("conversation_id")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @default(now()) @map("updated_at")
+  lastSeenAt         DateTime @default(now()) @map("last_seen_at")
 
-  agent  OrchestratorAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  memory OrchestratorAgentSessionMemory[]
+  agent            OrchestratorAgent      @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  executionContext AgentExecutionContext? @relation(fields: [executionContextId], references: [id], onDelete: SetNull)
+  memory           OrchestratorAgentSessionMemory[]
 
   @@index([agentId])
+  @@index([executionContextId])
   @@map("orchestrator_agent_sessions")
 }
 

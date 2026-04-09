@@ -398,11 +398,36 @@ export async function collectExecutionUsage(executionIds: number[]) {
   }, { prompt_tokens: 0, completion_tokens: 0, cost: 0 });
 }
 
-export type AgentSessionRow = { id: string; user_id: string | null };
+export type AgentSessionRow = {
+  id: string;
+  user_id: string | null;
+  execution_context_id?: string | null;
+  tenant_external_id?: string | null;
+  user_external_id?: string | null;
+  conversation_id?: string | null;
+};
 
-export async function ensureAgentSession(agentId: number, sessionId?: string, userId?: string): Promise<AgentSessionRow> {
+export type AgentSessionContextOptions = {
+  executionContextId?: string | null;
+  tenantExternalId?: string | null;
+  userExternalId?: string | null;
+  conversationId?: string | null;
+};
+
+export async function ensureAgentSession(
+  agentId: number,
+  sessionId?: string,
+  userId?: string,
+  context?: AgentSessionContextOptions,
+): Promise<AgentSessionRow> {
   const prisma = getPrisma();
   const now = new Date();
+  const contextData = {
+    executionContextId: context?.executionContextId ?? null,
+    tenantExternalId: context?.tenantExternalId ?? null,
+    userExternalId: context?.userExternalId ?? null,
+    conversationId: context?.conversationId ?? null,
+  };
   if (sessionId) {
     const existing = await prisma.orchestratorAgentSession.findUnique({
       where: { id: sessionId },
@@ -416,9 +441,23 @@ export async function ensureAgentSession(agentId: number, sessionId?: string, us
       if (scoped) {
         await prisma.orchestratorAgentSession.update({
           where: { id: sessionId },
-          data: { updatedAt: now, lastSeenAt: now },
+          data: {
+            updatedAt: now,
+            lastSeenAt: now,
+            ...(contextData.executionContextId ? { executionContextId: contextData.executionContextId } : {}),
+            ...(contextData.tenantExternalId ? { tenantExternalId: contextData.tenantExternalId } : {}),
+            ...(contextData.userExternalId ? { userExternalId: contextData.userExternalId } : {}),
+            ...(contextData.conversationId ? { conversationId: contextData.conversationId } : {}),
+          },
         });
-        return { id: scoped.id, user_id: scoped.userId };
+        return {
+          id: scoped.id,
+          user_id: scoped.userId,
+          execution_context_id: contextData.executionContextId,
+          tenant_external_id: contextData.tenantExternalId,
+          user_external_id: contextData.userExternalId,
+          conversation_id: contextData.conversationId,
+        };
       }
       // The requested session id already belongs to another agent. Treat this as a
       // request for a fresh conversation instead of trying to reuse the foreign id.
@@ -434,10 +473,21 @@ export async function ensureAgentSession(agentId: number, sessionId?: string, us
             createdAt: now,
             updatedAt: now,
             lastSeenAt: now,
+            executionContextId: contextData.executionContextId,
+            tenantExternalId: contextData.tenantExternalId,
+            userExternalId: contextData.userExternalId,
+            conversationId: contextData.conversationId,
           },
           select: { id: true, userId: true },
         });
-        return { id: created.id, user_id: created.userId };
+        return {
+          id: created.id,
+          user_id: created.userId,
+          execution_context_id: contextData.executionContextId,
+          tenant_external_id: contextData.tenantExternalId,
+          user_external_id: contextData.userExternalId,
+          conversation_id: contextData.conversationId,
+        };
       } catch {
         // Race or stale id collision. Fall through to a fresh session id.
       }
@@ -453,9 +503,23 @@ export async function ensureAgentSession(agentId: number, sessionId?: string, us
     if (existing) {
       await prisma.orchestratorAgentSession.update({
         where: { id: existing.id },
-        data: { updatedAt: now, lastSeenAt: now },
+        data: {
+          updatedAt: now,
+          lastSeenAt: now,
+          ...(contextData.executionContextId ? { executionContextId: contextData.executionContextId } : {}),
+          ...(contextData.tenantExternalId ? { tenantExternalId: contextData.tenantExternalId } : {}),
+          ...(contextData.userExternalId ? { userExternalId: contextData.userExternalId } : {}),
+          ...(contextData.conversationId ? { conversationId: contextData.conversationId } : {}),
+        },
       });
-      return { id: existing.id, user_id: existing.userId };
+      return {
+        id: existing.id,
+        user_id: existing.userId,
+        execution_context_id: contextData.executionContextId,
+        tenant_external_id: contextData.tenantExternalId,
+        user_external_id: contextData.userExternalId,
+        conversation_id: contextData.conversationId,
+      };
     }
   }
 
@@ -467,10 +531,21 @@ export async function ensureAgentSession(agentId: number, sessionId?: string, us
       createdAt: now,
       updatedAt: now,
       lastSeenAt: now,
+      executionContextId: contextData.executionContextId,
+      tenantExternalId: contextData.tenantExternalId,
+      userExternalId: contextData.userExternalId,
+      conversationId: contextData.conversationId,
     },
     select: { id: true, userId: true },
   });
-  return { id: created.id, user_id: created.userId };
+  return {
+    id: created.id,
+    user_id: created.userId,
+    execution_context_id: contextData.executionContextId,
+    tenant_external_id: contextData.tenantExternalId,
+    user_external_id: contextData.userExternalId,
+    conversation_id: contextData.conversationId,
+  };
 }
 
 export async function loadSessionConversation(sessionId: string) {
@@ -679,8 +754,15 @@ export async function createToolExecution(data: {
   toolId?: number | null;
   agentId?: number | null;
   agentExecutionId?: number | null;
+  executionContextId?: string | null;
+  gatewayId?: string | null;
   toolName: string;
   toolType?: string | null;
+  requestId?: string | null;
+  idempotencyKey?: string | null;
+  credentialRefsJson?: string | null;
+  subjectUserExternalId?: string | null;
+  subjectTenantExternalId?: string | null;
   args?: string | null;
 }) {
   const row = await getPrisma().orchestratorToolExecution.create({
@@ -688,8 +770,15 @@ export async function createToolExecution(data: {
       toolId: data.toolId ?? null,
       agentId: data.agentId ?? null,
       agentExecutionId: data.agentExecutionId ?? null,
+      executionContextId: data.executionContextId ?? null,
+      gatewayId: data.gatewayId ?? null,
       toolName: data.toolName,
       toolType: data.toolType ?? null,
+      requestId: data.requestId ?? null,
+      idempotencyKey: data.idempotencyKey ?? null,
+      credentialRefsJson: data.credentialRefsJson ?? null,
+      subjectUserExternalId: data.subjectUserExternalId ?? null,
+      subjectTenantExternalId: data.subjectTenantExternalId ?? null,
       status: 'running',
       args: data.args ?? null,
     },
@@ -703,15 +792,28 @@ export async function updateToolExecution(id: number, data: {
   result?: string | null;
   error?: string | null;
   durationMs?: number | null;
+  gatewayId?: string | null;
+  requestId?: string | null;
+  idempotencyKey?: string | null;
+  credentialRefsJson?: string | null;
+  subjectUserExternalId?: string | null;
+  subjectTenantExternalId?: string | null;
 }) {
+  const updateData: any = {
+    status: data.status,
+    result: data.result ?? null,
+    error: data.error ?? null,
+    durationMs: data.durationMs ?? null,
+  };
+  if (data.gatewayId !== undefined) updateData.gatewayId = data.gatewayId ?? null;
+  if (data.requestId !== undefined) updateData.requestId = data.requestId ?? null;
+  if (data.idempotencyKey !== undefined) updateData.idempotencyKey = data.idempotencyKey ?? null;
+  if (data.credentialRefsJson !== undefined) updateData.credentialRefsJson = data.credentialRefsJson ?? null;
+  if (data.subjectUserExternalId !== undefined) updateData.subjectUserExternalId = data.subjectUserExternalId ?? null;
+  if (data.subjectTenantExternalId !== undefined) updateData.subjectTenantExternalId = data.subjectTenantExternalId ?? null;
   const updated = await getPrisma().orchestratorToolExecution.update({
     where: { id },
-    data: {
-      status: data.status,
-      result: data.result ?? null,
-      error: data.error ?? null,
-      durationMs: data.durationMs ?? null,
-    },
+    data: updateData,
   });
   const executionId = Number((updated as any)?.agentExecutionId || 0);
   if (executionId > 0) publishAgentExecution(executionId, 'tool_updated');

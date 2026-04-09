@@ -3,10 +3,16 @@ import request from 'supertest';
 import { app } from '../server';
 import db, { initDb } from '../src/db';
 import { ensurePrismaReady, getPrisma } from '../src/platform/prisma';
+import { signExecutionContextToken } from '../src/platform/executionContext';
 
 async function wipeAllDbs() {
   const prisma = await ensurePrismaReady();
   // Wipe Prisma (Primary)
+  await prisma.agentCredentialBinding.deleteMany({});
+  await prisma.agentExecutionContext.deleteMany({});
+  await prisma.agentToolPolicy.deleteMany({});
+  await prisma.applicationMcpGateway.deleteMany({});
+  await prisma.connectedApplication.deleteMany({});
   await prisma.orchestratorAgentExecution.deleteMany({});
   await prisma.orchestratorToolExecution.deleteMany({});
   await prisma.orchestratorJobQueue.deleteMany({});
@@ -370,5 +376,169 @@ describe.sequential('orchestrator local APIs', () => {
     await authed.delete(`/api/tools/${tool1.body.id}`).expect(200);
     await authed.delete(`/api/tools/${tool2.body.id}`).expect(200);
     await authed.delete(`/api/mcp/bundles/${bundle.body.id}`).expect(200);
+  });
+
+  it('supports v2 application/gateway/tool-policy management and execution context lifecycle', async () => {
+    const authed = await createAuthedAgent();
+    const prisma = getPrisma();
+    const me = await authed.get('/api/auth/me').expect(200);
+    const orgId = String(me.body?.user?.org_id || me.body?.user?.orgId || '');
+    expect(orgId).toBeTruthy();
+
+    const platformProject = await prisma.project.create({
+      data: {
+        orgId,
+        name: 'V2 Platform Project',
+        description: 'project for v2 context tests',
+      },
+    });
+
+    const localProject = await authed
+      .post('/api/projects')
+      .send({ name: 'V2 Local Project', description: 'local linked project' })
+      .expect(200);
+
+    await authed
+      .put(`/api/projects/${localProject.body.id}/platform-link`)
+      .send({ platformProjectId: platformProject.id })
+      .expect(200);
+
+    const application = await authed
+      .post('/api/v2/applications')
+      .send({
+        name: 'CRM App',
+        slug: 'crm-app',
+        token_issuer: 'https://crm.test',
+        token_audience: 'agentic-orchestrator',
+        base_url: 'https://crm.test',
+      })
+      .expect(201);
+    expect(application.body.id).toBeTruthy();
+
+    const apps = await authed.get('/api/v2/applications').expect(200);
+    expect(Array.isArray(apps.body)).toBe(true);
+    expect(apps.body.some((x: any) => String(x.id) === String(application.body.id))).toBe(true);
+
+    await prisma.project.update({
+      where: { id: platformProject.id },
+      data: { applicationId: String(application.body.id) },
+    });
+
+    const gateway = await authed
+      .post('/api/v2/mcp/gateways')
+      .send({
+        application_id: application.body.id,
+        name: 'CRM Gateway',
+        endpoint_url: 'https://crm.test/mcp/gateway/tool-call',
+        auth_mode: 'signed_jwt',
+        timeout_ms: 12000,
+      })
+      .expect(201);
+    expect(gateway.body.id).toBeTruthy();
+
+    const gateways = await authed
+      .get(`/api/v2/mcp/gateways?application_id=${encodeURIComponent(String(application.body.id))}`)
+      .expect(200);
+    expect(gateways.body.some((x: any) => String(x.id) === String(gateway.body.id))).toBe(true);
+
+    await authed
+      .put(`/api/v2/mcp/gateways/${gateway.body.id}`)
+      .send({ status: 'active', timeout_ms: 9000 })
+      .expect(200);
+
+    const agent = await authed
+      .post('/api/agents')
+      .send({
+        name: 'V2 Agent',
+        role: 'Assistant',
+        goal: 'Test v2 context',
+        backstory: 'v2 test agent',
+        provider: 'google',
+        model: 'gemini-1.5-flash',
+      })
+      .expect(200);
+    expect(agent.body.id).toBeTruthy();
+
+    const policy = await authed
+      .post('/api/v2/mcp/tool-policies')
+      .send({
+        application_id: application.body.id,
+        tool_name: 'RemoteTool',
+        gateway_id: gateway.body.id,
+        agent_id: Number(agent.body.id),
+        required_scopes: ['crm.leads:write'],
+        enabled: true,
+      })
+      .expect(201);
+    expect(policy.body.id).toBeTruthy();
+
+    const policies = await authed
+      .get(`/api/v2/mcp/tool-policies?application_id=${encodeURIComponent(String(application.body.id))}`)
+      .expect(200);
+    expect(policies.body.some((x: any) => String(x.id) === String(policy.body.id))).toBe(true);
+
+    await authed
+      .put(`/api/v2/mcp/tool-policies/${policy.body.id}`)
+      .send({ enabled: false })
+      .expect(200);
+
+    const contextToken = signExecutionContextToken({
+      iss: 'https://crm.test',
+      aud: 'agentic-orchestrator',
+      sub: 'user:user_123',
+      app_id: String(application.body.id),
+      org_id: orgId,
+      project_id: platformProject.id,
+      tenant_external_id: 'tenant_123',
+      user_external_id: 'user_123',
+      conversation_id: 'conv_123',
+      session_id: 'sess_123',
+      roles: ['sales_rep'],
+      scopes: ['crm.leads:write'],
+      allowed_tools: ['RemoteTool'],
+      credential_refs: ['crm:tenant_123'],
+      jti: `jti_${Date.now()}`,
+    }, { ttlSeconds: 600 });
+
+    const createdContext = await authed
+      .post('/api/v2/execution-contexts')
+      .send({ context_token: contextToken })
+      .expect(201);
+    expect(createdContext.body.execution_context_id).toBeTruthy();
+
+    const missingContextChat = await authed
+      .post('/api/v2/agent-runs/chat')
+      .send({ agent_id: Number(agent.body.id), message: 'hello' })
+      .expect(400);
+    expect(String(missingContextChat.body.error || '')).toContain('Provide either context_token or execution_context_id');
+
+    await authed
+      .post(`/api/v2/execution-contexts/${createdContext.body.execution_context_id}/revoke`)
+      .send({ context_token: contextToken })
+      .expect(200);
+
+    const remoteTool = await authed
+      .post('/api/tools')
+      .send({
+        name: 'RemoteTool',
+        description: 'Remote gateway test tool',
+        category: 'MCP',
+        type: 'mcp_remote_gateway',
+        config: {
+          gatewayId: String(gateway.body.id),
+          remoteToolName: 'crm.create_lead',
+          gatewayTimeoutMs: 5000,
+        },
+      })
+      .expect(200);
+
+    const remoteToolRun = await authed
+      .post(`/api/tools/${remoteTool.body.id}/test-run`)
+      .send({ args: { name: 'Acme' } })
+      .expect(200);
+    expect(String(remoteToolRun.body.result || '')).toContain('requires execution_context_id');
+
+    await authed.delete(`/api/v2/mcp/tool-policies/${policy.body.id}`).expect(200);
+    await authed.delete(`/api/v2/mcp/gateways/${gateway.body.id}`).expect(200);
   });
 });
