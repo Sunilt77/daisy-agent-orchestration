@@ -6045,17 +6045,27 @@ app.get('/api/projects/:id', requireUser, async (req, res) => {
 
 app.get('/api/projects/:id/traces', requireUser, async (req, res) => {
   try {
-    const projectId = Number(req.params.id);
-    if (!Number.isFinite(projectId)) return res.status(400).json({ error: 'Invalid project id' });
+    const rawProjectId = String(req.params.id || '').trim().toLowerCase();
     const scope = await resolveOrchestratorAccessScope(req);
-    requireVisibleProjectId(scope, projectId);
+    const scopedProjectIds = getScopedProjectIds(scope);
+
+    const where: any = {};
+    if (rawProjectId === 'all') {
+      if (Array.isArray(scopedProjectIds) && scopedProjectIds.length === 0) {
+        return res.json([]);
+      }
+      if (Array.isArray(scopedProjectIds) && scopedProjectIds.length > 0) {
+        where.agent = { projectId: { in: scopedProjectIds } };
+      }
+    } else {
+      const projectId = Number(rawProjectId);
+      if (!Number.isFinite(projectId)) return res.status(400).json({ error: 'Invalid project id' });
+      requireVisibleProjectId(scope, projectId);
+      where.agent = { projectId };
+    }
 
     const executions = await getPrisma().orchestratorAgentExecution.findMany({
-      where: {
-        agent: {
-          projectId: projectId
-        }
-      },
+      where,
       include: {
         agent: {
           select: { name: true, role: true }
@@ -6085,17 +6095,27 @@ app.get('/api/projects/:id/traces', requireUser, async (req, res) => {
 
 app.get('/api/projects/:id/tool-traces', requireUser, async (req, res) => {
   try {
-    const projectId = Number(req.params.id);
-    if (!Number.isFinite(projectId)) return res.status(400).json({ error: 'Invalid project id' });
+    const rawProjectId = String(req.params.id || '').trim().toLowerCase();
     const scope = await resolveOrchestratorAccessScope(req);
-    requireVisibleProjectId(scope, projectId);
+    const scopedProjectIds = getScopedProjectIds(scope);
+
+    const where: any = {};
+    if (rawProjectId === 'all') {
+      if (Array.isArray(scopedProjectIds) && scopedProjectIds.length === 0) {
+        return res.json([]);
+      }
+      if (Array.isArray(scopedProjectIds) && scopedProjectIds.length > 0) {
+        where.agent = { projectId: { in: scopedProjectIds } };
+      }
+    } else {
+      const projectId = Number(rawProjectId);
+      if (!Number.isFinite(projectId)) return res.status(400).json({ error: 'Invalid project id' });
+      requireVisibleProjectId(scope, projectId);
+      where.agent = { projectId };
+    }
 
     const rows = await getPrisma().orchestratorToolExecution.findMany({
-      where: {
-        agent: {
-          projectId: projectId
-        }
-      },
+      where,
       include: {
         agent: {
           select: { name: true, role: true }
@@ -7375,6 +7395,7 @@ app.post('/api/v2/agent-runs/chat', localRunLimiter, async (req, res) => {
   const executionContextId = String(req.body?.execution_context_id || '').trim();
   const requestedSessionId = typeof req.body?.session_id === 'string' ? req.body.session_id.trim() : '';
   const requestedConversationId = typeof req.body?.conversation_id === 'string' ? req.body.conversation_id.trim() : '';
+  const runAsync = Boolean(req.body?.async === true);
   const attachments = normalizeIncomingAttachments(req.body?.attachments);
   const effectiveTask = message || (attachments.length ? 'Please use the attached file(s) as part of this request.' : '');
   if (!effectiveTask) return res.status(400).json({ error: 'message is required' });
@@ -7393,34 +7414,79 @@ app.post('/api/v2/agent-runs/chat', localRunLimiter, async (req, res) => {
     const conversationId = requestedConversationId || context.conversationId || undefined;
     const tenantKey = readTenantKey(`${context.orgId}:${context.tenantExternalId}`, context.orgId);
     const externalUserId = String(context.userExternalId || '').trim() || null;
+    if (runAsync) {
+      const jobId = await enqueueJob('run_agent', {
+        agentId,
+        task: effectiveTask,
+        session_id: sessionId,
+        user_id: externalUserId,
+        userMessage: effectiveTask,
+        attachments,
+        initiatedBy: 'v2_agent_chat_api',
+        execution_context_id: context.id,
+        tenant_external_id: context.tenantExternalId,
+        user_external_id: context.userExternalId,
+        conversation_id: conversationId,
+      }, {
+        priority: readJobPriority(req.body?.priority, JOB_PRIORITY.CRITICAL),
+        tenantKey,
+      });
 
-    const jobId = await enqueueJob('run_agent', {
-      agentId,
-      task: effectiveTask,
-      session_id: sessionId,
-      user_id: externalUserId,
-      userMessage: effectiveTask,
-      attachments,
-      initiatedBy: 'v2_agent_chat_api',
-      execution_context_id: context.id,
-      tenant_external_id: context.tenantExternalId,
-      user_external_id: context.userExternalId,
-      conversation_id: conversationId,
-    }, {
-      priority: readJobPriority(req.body?.priority, JOB_PRIORITY.CRITICAL),
-      tenantKey,
+      const result = await waitForJob(jobId, 120000);
+      res.json({
+        mode: 'async',
+        job_id: jobId,
+        execution_context_id: context.id,
+        session_id: result?.session_id ?? sessionId ?? null,
+        user_id: result?.user_id ?? externalUserId ?? null,
+        conversation_id: conversationId ?? null,
+        reply: result?.result ?? '',
+        execution_id: result?.exec_id ?? null,
+        usage: result?.usage ?? null,
+        logs: Array.isArray(result?.logs) ? result.logs : [],
+      });
+      return;
+    }
+
+    const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any;
+    if (!agent) throw new Error('Agent not found');
+    const session = await ensureAgentSession(agent.id, sessionId, externalUserId, {
+      executionContextId: context.id,
+      tenantExternalId: context.tenantExternalId,
+      userExternalId: context.userExternalId,
+      conversationId,
     });
 
-    const result = await waitForJob(jobId, 120000);
+    const logs: any[] = [];
+    const result = await runAgent(
+      agent,
+      { description: effectiveTask, expected_output: 'The best possible answer.' },
+      '',
+      (log) => logs.push(log),
+      {
+        initiatedBy: 'v2_agent_chat_api',
+        sessionId: session.id,
+        userId: session.user_id ?? externalUserId ?? undefined,
+        userMessage: effectiveTask,
+        attachments,
+        executionContextId: context.id,
+        tenantExternalId: context.tenantExternalId,
+        userExternalId: context.userExternalId,
+        conversationId,
+      },
+    );
+
     res.json({
+      mode: 'sync',
       execution_context_id: context.id,
-      session_id: result?.session_id ?? sessionId ?? null,
-      user_id: result?.user_id ?? externalUserId ?? null,
+      session_id: session.id,
+      user_id: session.user_id ?? externalUserId ?? null,
       conversation_id: conversationId ?? null,
-      reply: result?.result ?? '',
+      reply: result?.text ?? '',
       execution_id: result?.exec_id ?? null,
       usage: result?.usage ?? null,
-      logs: Array.isArray(result?.logs) ? result.logs : [],
+      logs,
+      tenant_key: tenantKey,
     });
   } catch (e: any) {
     const messageText = String(e?.message || 'Failed to run v2 chat request');
@@ -11009,8 +11075,9 @@ async function runAgent(
     : undefined;
   const sessionId = session?.id ?? null;
   const sessionUserId = session?.user_id ?? invocation?.userId ?? null;
-  const sessionConversation = sessionId ? await loadSessionConversation(sessionId) : [];
-  const sessionSummary = sessionId ? await loadSessionSummary(sessionId) : '';
+  const [sessionConversation, sessionSummary] = sessionId
+    ? await Promise.all([loadSessionConversation(sessionId), loadSessionSummary(sessionId)])
+    : [[], ''];
   const memoryContext = buildMemoryContext(sessionSummary, sessionConversation);
   const invocationAttachments = normalizeIncomingAttachments(invocation?.attachments);
   const attachmentContext = buildAttachmentContext(invocationAttachments);
@@ -11210,9 +11277,17 @@ async function runAgent(
           
           // Check exposure status from SQLite for each bundle
           try {
-            for (const bundle of mcpBundles) {
-              const exposureRow = db.prepare('SELECT is_exposed FROM mcp_bundles WHERE id = ?').get(bundle.id);
-              bundle.is_exposed = exposureRow ? Boolean(exposureRow.is_exposed) : true;
+            if (mcpBundles.length > 0) {
+              const bundleRows = db.prepare(
+                `SELECT id, is_exposed FROM mcp_bundles WHERE id IN (${mcpBundles.map(() => '?').join(',')})`
+              ).all(...mcpBundles.map((b) => Number(b.id))) as Array<{ id: number; is_exposed: number }>;
+              const isExposedById = new Map<number, boolean>(
+                bundleRows.map((row) => [Number(row.id), Boolean(row.is_exposed)]),
+              );
+              for (const bundle of mcpBundles) {
+                const bundleId = Number(bundle.id);
+                bundle.is_exposed = isExposedById.has(bundleId) ? Boolean(isExposedById.get(bundleId)) : true;
+              }
             }
           } catch (e) {
             console.warn('Failed to get bundle exposure status from SQLite:', e.message);

@@ -969,19 +969,18 @@ export function registerPlatformRoutes(app: Express) {
   // Query APIs (session auth)
   router.get('/api/v1/insights', requireUser, async (req, res, next) => {
     try {
-      const projectId = req.query.project_id as string | undefined;
-      if (!projectId) throw new HttpError(400, 'project_id is required');
-
-      const project = await prisma.project.findFirst({ where: { id: projectId, orgId: req.user!.orgId } });
-      if (!project) throw new HttpError(404, 'Project not found');
+      const projectIdRaw = req.query.project_id as string | undefined;
+      const projectId = projectIdRaw && String(projectIdRaw).toLowerCase() !== 'all' ? String(projectIdRaw) : undefined;
 
       const from = req.query.from ? new Date(String(req.query.from)) : undefined;
       const to = req.query.to ? new Date(String(req.query.to)) : undefined;
 
-      const where: any = {
-        projectId: project.id,
-        orgId: req.user!.orgId,
-      };
+      const where: any = { orgId: req.user!.orgId };
+      if (projectId) {
+        const project = await prisma.project.findFirst({ where: { id: projectId, orgId: req.user!.orgId } });
+        if (!project) throw new HttpError(404, 'Project not found');
+        where.projectId = project.id;
+      }
       if (from || to) where.startedAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
 
       const agg = await prisma.run.aggregate({
@@ -1100,11 +1099,8 @@ export function registerPlatformRoutes(app: Express) {
 
   router.get('/api/v1/runs', requireUser, async (req, res, next) => {
     try {
-      const projectId = req.query.project_id as string | undefined;
-      if (!projectId) throw new HttpError(400, 'project_id is required');
-
-      const project = await prisma.project.findFirst({ where: { id: projectId, orgId: req.user!.orgId } });
-      if (!project) throw new HttpError(404, 'Project not found');
+      const projectIdRaw = req.query.project_id as string | undefined;
+      const projectId = projectIdRaw && String(projectIdRaw).toLowerCase() !== 'all' ? String(projectIdRaw) : undefined;
 
       const from = req.query.from ? new Date(String(req.query.from)) : undefined;
       const to = req.query.to ? new Date(String(req.query.to)) : undefined;
@@ -1112,10 +1108,12 @@ export function registerPlatformRoutes(app: Express) {
       const kind = req.query.kind ? String(req.query.kind) : undefined;
       const q = req.query.q ? String(req.query.q).trim() : undefined;
 
-      const where: any = {
-        projectId: project.id,
-        orgId: req.user!.orgId,
-      };
+      const where: any = { orgId: req.user!.orgId };
+      if (projectId) {
+        const project = await prisma.project.findFirst({ where: { id: projectId, orgId: req.user!.orgId } });
+        if (!project) throw new HttpError(404, 'Project not found');
+        where.projectId = project.id;
+      }
       if (from || to) where.startedAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
       if (status) where.status = status;
       if (kind) where.kind = kind;

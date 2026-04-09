@@ -266,14 +266,11 @@ export default function TracesPage() {
   };
 
   const loadLocalTraces = async () => {
-    if (localProjectId == null) {
-      setLocalTraces([]);
-      return;
-    }
     setLocalLoading(true);
     setLocalError(null);
     try {
-      const res = await fetch(`/api/projects/${localProjectId}/traces`);
+      const scopeId = localProjectId == null ? 'all' : String(localProjectId);
+      const res = await fetch(`/api/projects/${scopeId}/traces`);
       const data = await res.json().catch(() => []);
       if (!res.ok) throw new Error(data.error || 'Failed to load local traces');
       setLocalTraces(Array.isArray(data) ? data : []);
@@ -285,14 +282,11 @@ export default function TracesPage() {
   };
 
   const loadLocalToolTraces = async () => {
-    if (localProjectId == null) {
-      setLocalToolTraces([]);
-      return;
-    }
     setLocalToolLoading(true);
     setLocalToolError(null);
     try {
-      const res = await fetch(`/api/projects/${localProjectId}/tool-traces`);
+      const scopeId = localProjectId == null ? 'all' : String(localProjectId);
+      const res = await fetch(`/api/projects/${scopeId}/tool-traces`);
       const data = await res.json().catch(() => []);
       if (!res.ok) throw new Error(data.error || 'Failed to load local tool traces');
       setLocalToolTraces(Array.isArray(data) ? data : []);
@@ -304,11 +298,17 @@ export default function TracesPage() {
   };
 
   const loadRuns = async () => {
-    if (!platformProjectId) return;
+    if (localProjectId != null && !platformProjectId) {
+      setRuns([]);
+      return;
+    }
     setRunsLoading(true);
     setRunsError(null);
     try {
-      const params = new URLSearchParams({ project_id: platformProjectId });
+      const params = new URLSearchParams();
+      if (localProjectId != null && platformProjectId) {
+        params.set('project_id', platformProjectId);
+      }
       if (q) params.set('q', q);
       if (status) params.set('status', status);
       if (kind) params.set('kind', kind);
@@ -326,11 +326,17 @@ export default function TracesPage() {
   };
 
   const loadInsights = async () => {
-    if (!platformProjectId) return;
+    if (localProjectId != null && !platformProjectId) {
+      setInsights(null);
+      return;
+    }
     setInsightsLoading(true);
     setInsightsError(null);
     try {
-      const params = new URLSearchParams({ project_id: platformProjectId });
+      const params = new URLSearchParams();
+      if (localProjectId != null && platformProjectId) {
+        params.set('project_id', platformProjectId);
+      }
       if (from) params.set('from', new Date(from).toISOString());
       if (to) params.set('to', new Date(to).toISOString());
       const res = await fetch(`/api/v1/insights?${params.toString()}`);
@@ -366,23 +372,25 @@ export default function TracesPage() {
   }, []);
 
   useEffect(() => {
-    if (localProjectId == null) return;
+    if (localProjectId == null) {
+      setPlatformProjectId(null);
+      return;
+    }
     loadPlatformLink(localProjectId);
   }, [localProjectId]);
 
   useEffect(() => {
-    if (localProjectId == null) return;
     loadLocalTraces();
     loadLocalToolTraces();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [localProjectId]);
 
   useEffect(() => {
-    if (!platformProjectId) return;
+    if (localProjectId != null && !platformProjectId) return;
     loadRuns();
     loadInsights();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [platformProjectId]);
+  }, [localProjectId, platformProjectId]);
 
   useEffect(() => {
     setRunsPage(1);
@@ -431,16 +439,19 @@ export default function TracesPage() {
     return localFilteredToolTraces.slice(start, start + localToolPageSize);
   }, [localFilteredToolTraces, localToolPage, localToolPageSize]);
 
+  const hasPlatformScope = localProjectId == null || Boolean(platformProjectId);
+
   useEffect(() => {
-    if (!platformProjectId) {
+    if (!hasPlatformScope) {
       setViewMode('local-agent');
     } else if (viewMode !== 'platform') {
       setViewMode('platform');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [platformProjectId]);
+  }, [hasPlatformScope]);
 
   const selectedProject = useMemo(() => projects.find((p) => p.id === localProjectId) || null, [projects, localProjectId]);
+  const selectedScopeLabel = selectedProject?.name || 'All projects';
   const runStatusCounts = useMemo(() => {
     return runs.reduce<Record<string, number>>((acc, run) => {
       acc[run.status] = (acc[run.status] || 0) + 1;
@@ -569,8 +580,8 @@ export default function TracesPage() {
       <div className="mb-4 panel-chrome rounded-2xl p-2 flex items-center gap-2 flex-wrap">
         <button
           onClick={() => setViewMode('platform')}
-          disabled={!platformProjectId}
-          className={`px-3 py-2 rounded-xl text-sm font-semibold border inline-flex items-center gap-2 ${viewMode === 'platform' ? 'bg-indigo-50 border-indigo-200 text-indigo-800' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'} ${!platformProjectId ? 'opacity-60 cursor-not-allowed' : ''}`}
+          disabled={!hasPlatformScope}
+          className={`px-3 py-2 rounded-xl text-sm font-semibold border inline-flex items-center gap-2 ${viewMode === 'platform' ? 'bg-indigo-50 border-indigo-200 text-indigo-800' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'} ${!hasPlatformScope ? 'opacity-60 cursor-not-allowed' : ''}`}
         >
           <Activity size={14} />
           Platform Runs
@@ -652,7 +663,9 @@ export default function TracesPage() {
                 ) : (
                   <span>Project not linked to platform traces. Link it from <Link className="underline" to="/projects">Projects</Link>.</span>
                 )
-              ) : 'Select a project.'}
+              ) : (
+                <span>All projects scope selected: loading traces across every accessible project in your org.</span>
+              )}
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <button type="button" onClick={() => applyQuickRange(24)} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1"><CalendarClock size={12} />24h</button>
@@ -661,7 +674,6 @@ export default function TracesPage() {
               <button type="button" onClick={resetFilters} disabled={!hasTraceFilters} className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1 disabled:opacity-45"><RotateCcw size={12} />Reset</button>
               <button
                 onClick={() => {
-                  if (!selectedProject) return;
                   if (viewMode === 'local-agent') {
                     loadLocalTraces();
                     return;
@@ -670,14 +682,14 @@ export default function TracesPage() {
                     loadLocalToolTraces();
                     return;
                   }
-                  if (!platformProjectId) {
+                  if (!hasPlatformScope) {
                     setRunsError('Project not linked to platform traces. Link it from Projects.');
                     return;
                   }
                   loadRuns();
                   loadInsights();
                 }}
-                disabled={!selectedProject}
+                disabled={false}
                 className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white px-4 py-2 rounded-lg text-sm font-semibold"
               >
                 <Filter size={16} /> Apply
@@ -708,7 +720,7 @@ export default function TracesPage() {
               </div>
             </div>
             <div className="text-xs text-slate-400 uppercase tracking-[0.2em]">
-              {selectedProject?.name || 'No project'}
+              {selectedScopeLabel}
             </div>
           </div>
           <div className="mt-5 grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -769,7 +781,7 @@ export default function TracesPage() {
               <div className="mt-2 text-lg font-bold text-slate-900">
                 {viewMode === 'platform' ? 'Platform Runs' : viewMode === 'local-tool' ? 'Local Tool Traces' : 'Local Agent Traces'}
               </div>
-              <div className="mt-1 text-sm text-slate-500">{selectedProject?.name || 'Choose a project to inspect telemetry.'}</div>
+              <div className="mt-1 text-sm text-slate-500">{selectedScopeLabel}</div>
             </div>
             <div className="rounded-2xl border border-slate-100 bg-slate-50/70 p-4">
               <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Filters</div>
@@ -812,7 +824,7 @@ export default function TracesPage() {
         </div>
 
         <div className="overflow-x-auto">
-          {viewMode === 'platform' && platformProjectId ? (
+          {viewMode === 'platform' && hasPlatformScope ? (
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-slate-500">
