@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Building2, Link2, ShieldCheck, Trash2 } from 'lucide-react';
+import { Building2, CheckCircle2, Lightbulb, Link2, ShieldCheck, Sparkles, Trash2 } from 'lucide-react';
 
 type AppRow = {
   id: string;
@@ -43,6 +43,17 @@ function normalizeScopesCsv(value: string): string[] {
     .filter(Boolean);
 }
 
+function slugify(value: string): string {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+const SCOPE_SUGGESTIONS = ['crm.leads:read', 'crm.leads:write', 'crm.campaigns:read', 'crm.campaigns:write'];
+const TOOL_NAME_SUGGESTIONS = ['meta_graph_query', 'meta_create_campaign', 'meta_pause_campaign', 'meta_update_budget'];
+
 export default function RuntimeAccessPage() {
   const [apps, setApps] = useState<AppRow[]>([]);
   const [selectedAppId, setSelectedAppId] = useState('');
@@ -79,6 +90,11 @@ export default function RuntimeAccessPage() {
     () => apps.find((row) => String(row.id) === String(selectedAppId)) || null,
     [apps, selectedAppId],
   );
+  const setupProgress = useMemo(() => {
+    const checks = [apps.length > 0, gateways.length > 0, policies.length > 0];
+    const done = checks.filter(Boolean).length;
+    return { done, total: checks.length, percent: Math.round((done / checks.length) * 100) };
+  }, [apps.length, gateways.length, policies.length]);
 
   const requestJson = async (url: string, init?: RequestInit) => {
     const response = await fetch(url, {
@@ -155,11 +171,17 @@ export default function RuntimeAccessPage() {
 
   const createApplication = async () => {
     try {
+      const name = newApp.name.trim();
+      const slug = (newApp.slug.trim() || slugify(name)).trim();
+      if (!name) throw new Error('Application name is required.');
+      if (!slug) throw new Error('Application slug is required.');
+      if (!newApp.token_issuer.trim()) throw new Error('Token issuer is required.');
+      if (!newApp.token_audience.trim()) throw new Error('Token audience is required.');
       await requestJson('/api/v2/applications', {
         method: 'POST',
         body: JSON.stringify({
-          name: newApp.name.trim(),
-          slug: newApp.slug.trim(),
+          name,
+          slug,
           token_issuer: newApp.token_issuer.trim(),
           token_audience: newApp.token_audience.trim(),
           base_url: newApp.base_url.trim() || undefined,
@@ -264,6 +286,20 @@ export default function RuntimeAccessPage() {
       <div className="swarm-hero p-6">
         <h1 className="text-3xl font-black text-white">Runtime Access</h1>
         <p className="text-slate-300 mt-1">Manage connected applications, MCP gateways, and tool policies.</p>
+        <div className="mt-4 rounded-xl bg-white/10 border border-white/20 p-3 text-sm text-slate-100">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 font-semibold">
+              <Sparkles size={15} /> Quick Setup Progress
+            </div>
+            <div>{setupProgress.done}/{setupProgress.total} steps complete</div>
+          </div>
+          <div className="mt-2 h-2 rounded-full bg-white/20 overflow-hidden">
+            <div className="h-full bg-cyan-300" style={{ width: `${setupProgress.percent}%` }} />
+          </div>
+          <div className="mt-2 text-xs text-slate-200">
+            1) Create Application {'->'} 2) Add Gateway {'->'} 3) Add Tool Policy
+          </div>
+        </div>
       </div>
 
       {notice && (
@@ -275,6 +311,13 @@ export default function RuntimeAccessPage() {
       <div className="panel-chrome rounded-2xl p-4 space-y-3">
         <div className="flex items-center gap-2 text-slate-800 font-semibold">
           <Building2 size={16} /> Connected Applications
+        </div>
+        <div className="rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2 text-xs text-indigo-800 flex items-start gap-2">
+          <Lightbulb size={14} className="mt-0.5" />
+          <div>
+            Tip: use your app domain as <span className="font-mono">token_issuer</span> and keep
+            <span className="font-mono"> token_audience</span> as <span className="font-mono">agentic-orchestrator</span>.
+          </div>
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-2">
           <input className="px-3 py-2 border rounded-lg bg-white" placeholder="Name" value={newApp.name} onChange={(e) => setNewApp((v) => ({ ...v, name: e.target.value }))} />
@@ -289,6 +332,28 @@ export default function RuntimeAccessPage() {
         >
           Create Application
         </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="px-2.5 py-1 rounded border text-xs bg-white hover:bg-slate-50"
+            onClick={() => setNewApp((prev) => ({ ...prev, slug: prev.slug || slugify(prev.name) }))}
+          >
+            Autofill slug from name
+          </button>
+          <button
+            type="button"
+            className="px-2.5 py-1 rounded border text-xs bg-white hover:bg-slate-50"
+            onClick={() =>
+              setNewApp((prev) => ({
+                ...prev,
+                token_issuer: prev.token_issuer || window.location.origin,
+                base_url: prev.base_url || window.location.origin,
+              }))
+            }
+          >
+            Use current host for issuer/base URL
+          </button>
+        </div>
 
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -316,7 +381,7 @@ export default function RuntimeAccessPage() {
                 </tr>
               ))}
               {!loading && apps.length === 0 && (
-                <tr><td className="px-2 py-4 text-slate-500" colSpan={5}>No applications yet.</td></tr>
+                <tr><td className="px-2 py-4 text-slate-500" colSpan={5}>No applications yet. Start by creating one above.</td></tr>
               )}
             </tbody>
           </table>
@@ -328,6 +393,11 @@ export default function RuntimeAccessPage() {
           <div className="flex items-center gap-2 text-slate-800 font-semibold">
             <Link2 size={16} /> MCP Gateways {selectedApp ? `for ${selectedApp.name}` : ''}
           </div>
+          {!selectedApp && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              Select an application first to create gateways.
+            </div>
+          )}
           <div className="grid grid-cols-1 gap-2">
             <input className="px-3 py-2 border rounded-lg bg-white" placeholder="Gateway name" value={newGateway.name} onChange={(e) => setNewGateway((v) => ({ ...v, name: e.target.value }))} />
             <input className="px-3 py-2 border rounded-lg bg-white" placeholder="Endpoint URL" value={newGateway.endpoint_url} onChange={(e) => setNewGateway((v) => ({ ...v, endpoint_url: e.target.value }))} />
@@ -355,6 +425,9 @@ export default function RuntimeAccessPage() {
                   <div className="text-xs text-slate-500 mt-1">auth: {row.auth_mode} · timeout: {row.timeout_ms}ms · status: {row.status}</div>
                 </div>
                 <div className="flex items-center gap-2">
+                  <span className={`px-2 py-1 rounded-full text-[11px] font-semibold ${row.status === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                    {row.status}
+                  </span>
                   <button onClick={() => updateGatewayStatus(row, row.status === 'active' ? 'inactive' : 'active')} className="px-2 py-1 rounded border text-xs">
                     {row.status === 'active' ? 'Deactivate' : 'Activate'}
                   </button>
@@ -362,7 +435,7 @@ export default function RuntimeAccessPage() {
                 </div>
               </div>
             ))}
-            {!loading && gateways.length === 0 && <div className="text-sm text-slate-500">No gateways for selected application.</div>}
+            {!loading && gateways.length === 0 && <div className="text-sm text-slate-500">No gateways yet. Add one endpoint that receives delegated tool calls.</div>}
           </div>
         </div>
 
@@ -370,6 +443,11 @@ export default function RuntimeAccessPage() {
           <div className="flex items-center gap-2 text-slate-800 font-semibold">
             <ShieldCheck size={16} /> Tool Policies {selectedApp ? `for ${selectedApp.name}` : ''}
           </div>
+          {!selectedApp && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              Select an application first to create tool policies.
+            </div>
+          )}
           <div className="grid grid-cols-1 gap-2">
             <input className="px-3 py-2 border rounded-lg bg-white" placeholder="Tool name" value={newPolicy.tool_name} onChange={(e) => setNewPolicy((v) => ({ ...v, tool_name: e.target.value }))} />
             <select className="px-3 py-2 border rounded-lg bg-white" value={newPolicy.gateway_id} onChange={(e) => setNewPolicy((v) => ({ ...v, gateway_id: e.target.value }))}>
@@ -381,6 +459,40 @@ export default function RuntimeAccessPage() {
               {agents.map((row) => <option key={row.id} value={String(row.id)}>{row.name}</option>)}
             </select>
             <input className="px-3 py-2 border rounded-lg bg-white" placeholder="Required scopes (comma separated)" value={newPolicy.required_scopes_csv} onChange={(e) => setNewPolicy((v) => ({ ...v, required_scopes_csv: e.target.value }))} />
+          </div>
+          <div className="space-y-2">
+            <div className="text-xs text-slate-500">Suggested tool names</div>
+            <div className="flex flex-wrap gap-2">
+              {TOOL_NAME_SUGGESTIONS.map((toolName) => (
+                <button
+                  key={toolName}
+                  type="button"
+                  className="px-2 py-1 rounded border bg-white text-xs hover:bg-slate-50"
+                  onClick={() => setNewPolicy((prev) => ({ ...prev, tool_name: toolName }))}
+                >
+                  {toolName}
+                </button>
+              ))}
+            </div>
+            <div className="text-xs text-slate-500">Suggested scopes</div>
+            <div className="flex flex-wrap gap-2">
+              {SCOPE_SUGGESTIONS.map((scope) => (
+                <button
+                  key={scope}
+                  type="button"
+                  className="px-2 py-1 rounded border bg-white text-xs hover:bg-slate-50"
+                  onClick={() =>
+                    setNewPolicy((prev) => {
+                      const current = normalizeScopesCsv(prev.required_scopes_csv);
+                      if (current.includes(scope)) return prev;
+                      return { ...prev, required_scopes_csv: [...current, scope].join(', ') };
+                    })
+                  }
+                >
+                  + {scope}
+                </button>
+              ))}
+            </div>
           </div>
           <button
             disabled={!selectedAppId || !newPolicy.gateway_id}
@@ -399,6 +511,9 @@ export default function RuntimeAccessPage() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
+                  <span className={`px-2 py-1 rounded-full text-[11px] font-semibold ${row.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                    {row.enabled ? 'enabled' : 'disabled'}
+                  </span>
                   <button onClick={() => updatePolicyEnabled(row, !row.enabled)} className="px-2 py-1 rounded border text-xs">
                     {row.enabled ? 'Disable' : 'Enable'}
                   </button>
@@ -406,9 +521,21 @@ export default function RuntimeAccessPage() {
                 </div>
               </div>
             ))}
-            {!loading && policies.length === 0 && <div className="text-sm text-slate-500">No policies for selected application.</div>}
+            {!loading && policies.length === 0 && <div className="text-sm text-slate-500">No policies yet. Add policies to control which tools each agent can invoke.</div>}
           </div>
         </div>
+      </div>
+
+      <div className="panel-chrome rounded-2xl p-4">
+        <div className="flex items-center gap-2 text-slate-800 font-semibold">
+          <CheckCircle2 size={16} /> Suggested Setup Order
+        </div>
+        <ol className="mt-3 text-sm text-slate-700 list-decimal pl-5 space-y-1">
+          <li>Create one connected application per product/app domain.</li>
+          <li>Add at least one active gateway for that application.</li>
+          <li>Create tool policies mapping tool names to gateway and scopes.</li>
+          <li>Run agent chat with execution context token from your app backend.</li>
+        </ol>
       </div>
     </div>
   );
