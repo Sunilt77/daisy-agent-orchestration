@@ -48,6 +48,7 @@ External service keys (as needed):
 - `GEMINI_API_KEY`
 - `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`
+- `GOOGLE_SEARCH_API_KEY` + `GOOGLE_SEARCH_ENGINE_ID` (optional, enables built-in `google_search` tool)
 - `AGENTOPS_API_KEY` (optional observability)
 - `REDIS_URL` (recommended for Cloud Run / distributed coordination)
 

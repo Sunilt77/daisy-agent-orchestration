@@ -259,6 +259,9 @@ function getBuiltInToolHint(tool?: Pick<Tool, 'name' | 'type'> | null) {
   if (tool.name === 'delegate_to_agent') {
     return 'Hands a subtask to another agent and returns the delegated child result to the current run.';
   }
+  if (tool.name === 'google_search') {
+    return 'Runs Google Custom Search from agent workflows. Configure shared credentials once, then agents can call it without hardcoding secrets.';
+  }
   return 'Built-in platform tool maintained by the runtime.';
 }
 
@@ -1992,6 +1995,13 @@ export default function ToolsPage() {
                                   <div className="mt-2 text-xs text-amber-700">
                                     These tools are maintained by the runtime. You can assign them to agents like other tools, but their execution behavior is provided by the platform.
                                   </div>
+                                  {selectedTool.name === 'google_search' && (
+                                    <div className="mt-3 rounded-lg border border-amber-300/70 bg-white/80 px-3 py-2 text-xs text-amber-900">
+                                      Credential setup for Google Search:
+                                      <div className="mt-1">Use shared credential provider <code className="bg-amber-100 px-1 rounded">google_search</code> for the API key.</div>
+                                      <div className="mt-1">Use shared credential provider <code className="bg-amber-100 px-1 rounded">google_search_engine_id</code> for the Search Engine ID (cx).</div>
+                                    </div>
+                                  )}
                                 </div>
                               )}
 

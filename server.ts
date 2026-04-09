@@ -9280,6 +9280,123 @@ async function runSearchTool(args: any): Promise<string> {
   ].filter(Boolean).join('\n\n');
 }
 
+async function resolveGoogleSearchApiKey(args: any): Promise<string> {
+  const inlineApiKey = String(args?.api_key || args?.apiKey || '').trim();
+  if (inlineApiKey) return inlineApiKey;
+
+  const credentialProvider = String(args?.credential_provider || 'google_search').trim();
+  if (credentialProvider) {
+    const credential = db.prepare('SELECT api_key FROM credentials WHERE provider = ?').get(credentialProvider) as any;
+    const credentialApiKey = String(credential?.api_key || '').trim();
+    if (credentialApiKey) return credentialApiKey;
+  }
+
+  // Match LLM-style provider fallback by attempting the default Google provider key path.
+  const providerConfig = await getProviderConfig('google');
+  const providerApiKey = String(providerConfig?.apiKey || '').trim();
+  if (providerApiKey) return providerApiKey;
+
+  return String(
+    process.env.GOOGLE_SEARCH_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.GEMINI_API_KEY ||
+    process.env.API_KEY ||
+    ''
+  ).trim();
+}
+
+function resolveGoogleSearchEngineId(args: any): string {
+  const inlineEngineId = String(
+    args?.search_engine_id ||
+    args?.engine_id ||
+    args?.cx ||
+    ''
+  ).trim();
+  if (inlineEngineId) return inlineEngineId;
+
+  const engineCredentialProvider = String(args?.search_engine_credential_provider || 'google_search_engine_id').trim();
+  if (engineCredentialProvider) {
+    const credential = db.prepare('SELECT api_key FROM credentials WHERE provider = ?').get(engineCredentialProvider) as any;
+    const credentialEngineId = String(credential?.api_key || '').trim();
+    if (credentialEngineId) return credentialEngineId;
+  }
+
+  return String(process.env.GOOGLE_SEARCH_ENGINE_ID || process.env.GOOGLE_CSE_ID || '').trim();
+}
+
+async function runGoogleSearchTool(args: any, execContext?: ToolExecutionContext): Promise<string> {
+  if (!execContext?.agent?.id) {
+    return '[Google Search Error] This tool is available through agent runs only.';
+  }
+  const query = String(args?.query ?? args?.q ?? '').trim();
+  if (!query) return '[Google Search Error] query is required.';
+
+  const apiKey = await resolveGoogleSearchApiKey(args);
+  if (!apiKey) {
+    return '[Google Search Error] Missing API key. Provide args.api_key, set credential provider "google_search", configure default Google provider credentials, or set GOOGLE_SEARCH_API_KEY.';
+  }
+  const engineId = resolveGoogleSearchEngineId(args);
+  if (!engineId) {
+    return '[Google Search Error] Missing search engine id. Provide args.search_engine_id (or args.cx), set credential provider "google_search_engine_id", or set GOOGLE_SEARCH_ENGINE_ID.';
+  }
+
+  const topK = Math.min(10, Math.max(1, Number(args?.top_k ?? args?.num ?? 5) || 5));
+  const safe = String(args?.safe ?? 'off').toLowerCase() === 'active' ? 'active' : 'off';
+  const site = String(args?.site || '').trim();
+  const hl = String(args?.hl || '').trim();
+  const gl = String(args?.gl || '').trim();
+  const lr = String(args?.lr || '').trim();
+  const timeoutMs = Math.max(1000, Math.min(120000, Number(args?.timeout_ms || 20000)));
+
+  const searchParams = new URLSearchParams({
+    key: apiKey,
+    cx: engineId,
+    q: site ? `site:${site} ${query}` : query,
+    num: String(topK),
+    safe,
+  });
+  if (hl) searchParams.set('hl', hl);
+  if (gl) searchParams.set('gl', gl);
+  if (lr) searchParams.set('lr', lr);
+
+  const endpoint = `https://www.googleapis.com/customsearch/v1?${searchParams.toString()}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(endpoint, {
+      headers: { 'User-Agent': 'AgentOrch/1.0 (+google-search-tool)' },
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => ({} as any));
+    if (!response.ok) {
+      const apiMessage = String(payload?.error?.message || '').trim();
+      const statusText = apiMessage || response.statusText || 'Request failed';
+      return `[Google Search Error] ${response.status}: ${statusText}`;
+    }
+
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    return JSON.stringify({
+      query,
+      total_results: Number(payload?.searchInformation?.totalResults || 0),
+      search_time_seconds: Number(payload?.searchInformation?.searchTime || 0),
+      credential_source: String(args?.api_key || args?.apiKey || '').trim() ? 'args' : 'shared_or_env',
+      items: items.slice(0, topK).map((item: any) => ({
+        title: String(item?.title || ''),
+        link: String(item?.link || ''),
+        display_link: String(item?.displayLink || ''),
+        snippet: String(item?.snippet || ''),
+      })),
+    }, null, 2);
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      return `[Google Search Error] Request timed out after ${timeoutMs}ms`;
+    }
+    return `[Google Search Error] ${error?.message || 'Request failed.'}`;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function runCalculatorTool(args: any): Promise<string> {
   const expression = String(args?.expression ?? args?.expr ?? args?.input ?? '').trim();
   if (!expression) return '[Calculator Error] expression is required.';
@@ -9396,6 +9513,9 @@ async function executeTool(toolName: string, args: any, mcpClients?: Map<string,
       }
       if (fnName === 'delegate_to_agent') {
         return await delegateToAgentTool(args, execContext);
+      }
+      if (fnName === 'google_search') {
+        return await runGoogleSearchTool(args, execContext);
       }
       return `[Internal Error] Unknown internal method: ${fnName}`;
     } catch (e: any) {
@@ -12979,6 +13099,46 @@ async function startServer() {
             body: 'Optional request body for non-GET methods.',
             timeout_ms: 'Optional timeout in milliseconds. Defaults to 30000.',
             follow_redirects: 'Set false to inspect redirect responses instead of following them.',
+          },
+        },
+      },
+      {
+        name: 'google_search',
+        description: 'Search the web through Google Custom Search. Enabled when API key + Search Engine ID are provided via args, credentials, or env vars.',
+        category: 'Search',
+        type: 'internal',
+        config: {
+          method: 'google_search',
+          requiredArgs: ['query'],
+          argSchema: {
+            query: 'string',
+            top_k: 'number',
+            safe: 'string',
+            site: 'string',
+            search_engine_id: 'string',
+            cx: 'string',
+            api_key: 'string',
+            credential_provider: 'string',
+            search_engine_credential_provider: 'string',
+            hl: 'string',
+            gl: 'string',
+            lr: 'string',
+            timeout_ms: 'number',
+          },
+          argDescriptions: {
+            query: 'Search query text.',
+            top_k: 'Number of results to return (1-10). Default is 5.',
+            safe: 'SafeSearch mode: off or active. Default is off.',
+            site: 'Optional site filter (for example: example.com).',
+            search_engine_id: 'Google Programmable Search Engine ID. Alias: cx.',
+            cx: 'Alias for search_engine_id.',
+            api_key: 'Optional Google API key for this call. If omitted, the runtime checks credentials/default Google provider/env vars.',
+            credential_provider: 'Credential key to read api_key from (defaults to google_search).',
+            search_engine_credential_provider: 'Credential key containing the Search Engine ID (defaults to google_search_engine_id).',
+            hl: 'Interface language hint (for example: en).',
+            gl: 'Country geolocation hint (for example: us).',
+            lr: 'Language restrict value (for example: lang_en).',
+            timeout_ms: 'Optional request timeout in milliseconds.',
           },
         },
       },

@@ -60,6 +60,15 @@ export type OrchestratorAccessScope = {
   allowedVoiceConfigIds: Set<number> | null;
 };
 
+async function getGlobalVisibleToolIds() {
+  const prisma = getPrisma();
+  const rows = await prisma.orchestratorTool.findMany({
+    where: { name: { in: ['google_search'] } },
+    select: { id: true },
+  });
+  return new Set(rows.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0));
+}
+
 function getPlatformAdminEmails() {
   return String(process.env.PLATFORM_ADMIN_EMAILS || '')
     .split(',')
@@ -89,6 +98,7 @@ export async function resolveOrchestratorAccessScope(req: Request): Promise<Orch
     };
   }
 
+  const globalVisibleToolIds = await getGlobalVisibleToolIds();
   const prisma = getPrisma();
   const platformProjects = await prisma.project.findMany({
     where: { orgId: req.user.orgId },
@@ -102,7 +112,7 @@ export async function resolveOrchestratorAccessScope(req: Request): Promise<Orch
       allowedProjectIds: new Set<number>(),
       allowedAgentIds: new Set<number>(),
       allowedCrewIds: new Set<number>(),
-      allowedToolIds: new Set<number>(),
+      allowedToolIds: globalVisibleToolIds,
       allowedBundleIds: new Set<number>(),
       allowedCredentialIds: new Set<number>(),
       allowedVoiceConfigIds: new Set<number>(),
@@ -121,7 +131,7 @@ export async function resolveOrchestratorAccessScope(req: Request): Promise<Orch
       allowedProjectIds,
       allowedAgentIds: new Set<number>(),
       allowedCrewIds: new Set<number>(),
-      allowedToolIds: new Set<number>(),
+      allowedToolIds: globalVisibleToolIds,
       allowedBundleIds: new Set<number>(),
       allowedCredentialIds: new Set<number>(),
       allowedVoiceConfigIds: new Set<number>(),
@@ -161,6 +171,8 @@ export async function resolveOrchestratorAccessScope(req: Request): Promise<Orch
   }
   for (const id of getAccessibleResourceIds('tool', req.user)) toolIds.add(id);
   for (const id of getAccessibleResourceIds('mcp_bundle', req.user)) bundleIds.add(id);
+  // Shared built-in tools are visible to all authenticated users.
+  for (const id of globalVisibleToolIds) toolIds.add(id);
 
   return {
     user: req.user,
