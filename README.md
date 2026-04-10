@@ -31,6 +31,7 @@ Detailed architecture notes:
 - Current platform architecture: `ARCHITECTURE.md`
 - Multi-tenant agent runtime and delegated MCP design: `docs/multi-tenant-agent-runtime.md`
 - Application-side MCP gateway verification reference: `docs/application-mcp-gateway-reference.md`
+- Simple website integration quickstart: `docs/website-agent-connector-quickstart.md`
 
 ## Main Modules
 
