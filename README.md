@@ -77,6 +77,11 @@ cp .env.example .env
   - `GCS_SQLITE_BUCKET`
   - `GCS_SQLITE_PREFIX`
   - `GCS_SYNC_INTERVAL_MS`
+- Optional MCP startup latency tuning:
+  - `MCP_MANIFEST_CACHE_TTL_MS` (default `120000`)
+  - `MCP_MANIFEST_PREWARM_ENABLED` (default `true`)
+  - `MCP_MANIFEST_PREWARM_INTERVAL_MS` (default `60000`)
+  - `MCP_MANIFEST_PREWARM_MAX_ENDPOINTS` (default `40`)
 
 ### Secret Dependency Map
 
@@ -92,6 +97,37 @@ cp .env.example .env
   - used by remote gateway tool execution path (`mcp_remote_gateway`)
 
 Production recommendation: keep all three secrets different so you can rotate one trust boundary without impacting others.
+
+## MCP Startup Performance
+
+The runtime includes three optimizations to reduce delay at `Preparing tools and execution context...`:
+
+- Parallel MCP manifest discovery across configured MCP endpoints.
+- In-memory MCP manifest cache (TTL-based) to avoid repeated `listTools` on every chat turn.
+- Lazy MCP connection for execution: MCP clients connect on first actual MCP tool call, not during every turn prep.
+
+Background prewarm scheduler:
+
+- Periodically prewarms MCP manifests for active agent/tool bindings.
+- Writes cache entries before user chats hit the endpoint.
+- Emits prewarm logs: `[mcp-prewarm] ready in ...`.
+
+Runtime observability fields (OpenTelemetry span attributes):
+
+- `tool_prep.duration_ms`
+- `tool_prep.scoped_tool_count`
+- `tool_prep.mcp_endpoint_count`
+- `tool_prep.mcp_exposed_tool_count`
+- `tool_prep.mcp_manifest_cache_hits`
+
+Recommended local defaults:
+
+```env
+MCP_MANIFEST_CACHE_TTL_MS=120000
+MCP_MANIFEST_PREWARM_ENABLED=true
+MCP_MANIFEST_PREWARM_INTERVAL_MS=60000
+MCP_MANIFEST_PREWARM_MAX_ENDPOINTS=40
+```
 
 ## How To Run
 
@@ -244,6 +280,7 @@ curl -X POST http://localhost:3000/api/v1/runs/<RUN_ID>/events \
 - `Invalid credentials` after reseed: run `npm run seed` again or `npm run reset-password`.
 - Postgres errors: verify `docker ps` and `DATABASE_URL`.
 - MCP 400 on connect: use correct transport URL (`/mcp/sse` for SSE clients, `/mcp` base for streamable HTTP clients).
+- Agent chat slow at `Preparing tools and execution context...`: tune MCP cache/prewarm env vars and verify `tool_prep.*` span attributes for cache hits and endpoint counts.
 - If tests warn about `whileHover` in UI tests: this comes from motion mocks and is non-blocking.
 
 ## Deployment Guide
@@ -299,7 +336,7 @@ gcloud run deploy agentic-orchestrator \
   --image gcr.io/<PROJECT_ID>/agentic-orchestrator \
   --region <REGION> \
   --allow-unauthenticated \
-  --set-env-vars NODE_ENV=production,SQLITE_PATH=/tmp/orchestrator/orchestrator.db,GCS_SQLITE_BUCKET=<SQLITE_BUCKET>,GCS_SQLITE_PREFIX=state,GCS_SYNC_INTERVAL_MS=30000,REDIS_URL=redis://<REDIS_HOST>:6379,EXECUTION_CONTEXT_TOKEN_AUDIENCE=agentic-orchestrator,DELEGATED_TOOL_TOKEN_AUDIENCE=app-mcp-gateway
+  --set-env-vars NODE_ENV=production,SQLITE_PATH=/tmp/orchestrator/orchestrator.db,GCS_SQLITE_BUCKET=<SQLITE_BUCKET>,GCS_SQLITE_PREFIX=state,GCS_SYNC_INTERVAL_MS=30000,REDIS_URL=redis://<REDIS_HOST>:6379,EXECUTION_CONTEXT_TOKEN_AUDIENCE=agentic-orchestrator,DELEGATED_TOOL_TOKEN_AUDIENCE=app-mcp-gateway,MCP_MANIFEST_CACHE_TTL_MS=180000,MCP_MANIFEST_PREWARM_ENABLED=true,MCP_MANIFEST_PREWARM_INTERVAL_MS=45000,MCP_MANIFEST_PREWARM_MAX_ENDPOINTS=80
 ```
 5. Grant service account storage access:
 ```bash

@@ -132,6 +132,21 @@ const MCP_MANIFEST_CACHE_TTL_MS = Math.max(10_000, Number(process.env.MCP_MANIFE
 const MCP_MANIFEST_PREWARM_ENABLED = String(process.env.MCP_MANIFEST_PREWARM_ENABLED || 'true').trim().toLowerCase() !== 'false';
 const MCP_MANIFEST_PREWARM_INTERVAL_MS = Math.max(10_000, Number(process.env.MCP_MANIFEST_PREWARM_INTERVAL_MS || 60_000));
 const MCP_MANIFEST_PREWARM_MAX_ENDPOINTS = Math.max(1, Number(process.env.MCP_MANIFEST_PREWARM_MAX_ENDPOINTS || 40));
+const AGENT_ACTIVITY_EXPOSE_THOUGHTS = String(process.env.AGENT_ACTIVITY_EXPOSE_THOUGHTS || 'false').trim().toLowerCase() === 'true';
+const MCP_CLIENT_POOL_ENABLED = String(process.env.MCP_CLIENT_POOL_ENABLED || 'true').trim().toLowerCase() !== 'false';
+const MCP_CLIENT_IDLE_TTL_MS = Math.max(15_000, Number(process.env.MCP_CLIENT_IDLE_TTL_MS || 300_000));
+const MCP_CLIENT_POOL_MAX = Math.max(1, Number(process.env.MCP_CLIENT_POOL_MAX || 100));
+
+type PooledMcpClientEntry = {
+  key: string;
+  client: Client;
+  resolvedTransport: string;
+  inUse: number;
+  createdAt: number;
+  lastUsedAt: number;
+};
+const mcpClientPool = new Map<string, PooledMcpClientEntry>();
+const mcpClientPoolConnectInFlight = new Map<string, Promise<PooledMcpClientEntry>>();
 
 // Test suites import `app` without calling `startServer()`, so the local mirror
 // schema must be ready at module load time as well.
@@ -351,6 +366,133 @@ async function connectMcpClientForTool(tool: any): Promise<{ client: Client; con
   return { client, config, transportType, resolvedTransport };
 }
 
+async function sweepMcpClientPool(force = false): Promise<void> {
+  if (!MCP_CLIENT_POOL_ENABLED && !force) return;
+  const now = Date.now();
+  const closers: Promise<void>[] = [];
+  for (const [key, entry] of mcpClientPool.entries()) {
+    const idleMs = now - entry.lastUsedAt;
+    const shouldClose = force || (entry.inUse <= 0 && idleMs >= MCP_CLIENT_IDLE_TTL_MS);
+    if (!shouldClose) continue;
+    mcpClientPool.delete(key);
+    closers.push((async () => {
+      try { await entry.client.close(); } catch {}
+    })());
+  }
+  if (closers.length) await Promise.allSettled(closers);
+}
+
+async function trimMcpClientPoolIfNeeded(): Promise<void> {
+  if (!MCP_CLIENT_POOL_ENABLED) return;
+  if (mcpClientPool.size <= MCP_CLIENT_POOL_MAX) return;
+  const candidates = Array.from(mcpClientPool.values())
+    .filter((entry) => entry.inUse <= 0)
+    .sort((a, b) => a.lastUsedAt - b.lastUsedAt);
+  for (const entry of candidates) {
+    if (mcpClientPool.size <= MCP_CLIENT_POOL_MAX) break;
+    mcpClientPool.delete(entry.key);
+    try { await entry.client.close(); } catch {}
+  }
+}
+
+async function acquireMcpClientForTool(tool: any): Promise<{
+  client: Client;
+  config: any;
+  transportType: string;
+  resolvedTransport: string;
+  cacheKey: string;
+  release: () => Promise<void>;
+}> {
+  const config = tool?.config ? JSON.parse(String(tool.config)) : {};
+  const transportType = String(config?.transportType || 'auto');
+  const cacheKey = buildMcpManifestCacheKey(String(tool?.name || ''), config);
+
+  if (!MCP_CLIENT_POOL_ENABLED) {
+    const { client, resolvedTransport } = await connectMcpClientForTool(tool);
+    return {
+      client,
+      config,
+      transportType,
+      resolvedTransport,
+      cacheKey,
+      release: async () => {
+        try { await client.close(); } catch {}
+      },
+    };
+  }
+
+  await sweepMcpClientPool(false);
+  const existing = mcpClientPool.get(cacheKey);
+  if (existing) {
+    existing.inUse += 1;
+    existing.lastUsedAt = Date.now();
+    return {
+      client: existing.client,
+      config,
+      transportType,
+      resolvedTransport: existing.resolvedTransport,
+      cacheKey,
+      release: async () => {
+        existing.inUse = Math.max(0, existing.inUse - 1);
+        existing.lastUsedAt = Date.now();
+      },
+    };
+  }
+
+  const inFlight = mcpClientPoolConnectInFlight.get(cacheKey);
+  if (inFlight) {
+    const entry = await inFlight;
+    entry.inUse += 1;
+    entry.lastUsedAt = Date.now();
+    return {
+      client: entry.client,
+      config,
+      transportType,
+      resolvedTransport: entry.resolvedTransport,
+      cacheKey,
+      release: async () => {
+        entry.inUse = Math.max(0, entry.inUse - 1);
+        entry.lastUsedAt = Date.now();
+      },
+    };
+  }
+
+  const connectPromise = (async () => {
+    const connected = await connectMcpClientForTool(tool);
+    const now = Date.now();
+    const entry: PooledMcpClientEntry = {
+      key: cacheKey,
+      client: connected.client,
+      resolvedTransport: connected.resolvedTransport,
+      inUse: 0,
+      createdAt: now,
+      lastUsedAt: now,
+    };
+    mcpClientPool.set(cacheKey, entry);
+    await trimMcpClientPoolIfNeeded();
+    return entry;
+  })();
+  mcpClientPoolConnectInFlight.set(cacheKey, connectPromise);
+  try {
+    const entry = await connectPromise;
+    entry.inUse += 1;
+    entry.lastUsedAt = Date.now();
+    return {
+      client: entry.client,
+      config,
+      transportType,
+      resolvedTransport: entry.resolvedTransport,
+      cacheKey,
+      release: async () => {
+        entry.inUse = Math.max(0, entry.inUse - 1);
+        entry.lastUsedAt = Date.now();
+      },
+    };
+  } finally {
+    mcpClientPoolConnectInFlight.delete(cacheKey);
+  }
+}
+
 async function prewarmMcpManifestForTool(tool: any): Promise<{ cacheHit: boolean; toolCount: number }> {
   try {
     const parsedConfig = tool?.config ? JSON.parse(String(tool.config)) : {};
@@ -358,7 +500,7 @@ async function prewarmMcpManifestForTool(tool: any): Promise<{ cacheHit: boolean
     const cached = readMcpManifestCache(cacheKey);
     if (cached) return { cacheHit: true, toolCount: cached.tools.length };
 
-    const { client, resolvedTransport } = await connectMcpClientForTool(tool);
+    const { client, resolvedTransport, release } = await acquireMcpClientForTool(tool);
     try {
       const mcpTools = await withTimeout(client.listTools(), 8000, 'MCP listTools');
       const normalizedTools = (mcpTools.tools || []).map((entry: any) => ({
@@ -369,7 +511,7 @@ async function prewarmMcpManifestForTool(tool: any): Promise<{ cacheHit: boolean
       writeMcpManifestCache(cacheKey, resolvedTransport, normalizedTools);
       return { cacheHit: false, toolCount: normalizedTools.length };
     } finally {
-      try { await client.close(); } catch {}
+      await release();
     }
   } catch {
     return { cacheHit: false, toolCount: 0 };
@@ -1096,6 +1238,7 @@ const JOB_PRIORITY = {
 let workerTimer: NodeJS.Timeout | null = null;
 let cronSchedulerTimer: NodeJS.Timeout | null = null;
 let mcpManifestPrewarmTimer: NodeJS.Timeout | null = null;
+let mcpClientPoolSweepTimer: NodeJS.Timeout | null = null;
 let mcpManifestPrewarmRunning = false;
 let workerRunning = 0;
 const agentCancelTokens = new Map<number, CancelToken>();
@@ -11209,6 +11352,17 @@ function startMcpManifestPrewarmScheduler() {
   tick();
 }
 
+function startMcpClientPoolSweeper() {
+  if (!MCP_CLIENT_POOL_ENABLED) return;
+  if (mcpClientPoolSweepTimer) return;
+  const intervalMs = Math.max(15_000, Math.floor(MCP_CLIENT_IDLE_TTL_MS / 2));
+  const tick = () => {
+    void sweepMcpClientPool(false);
+  };
+  mcpClientPoolSweepTimer = setInterval(tick, intervalMs);
+  tick();
+}
+
 interface RunResult {
     exec_id?: number;
     text: string;
@@ -11460,6 +11614,7 @@ async function runAgent(
     const cancelToken = getCancelToken(agentCancelTokens, execId);
 
     const mcpClients = new Map<string, Client>();
+    const mcpClientReleases = new Map<string, () => Promise<void>>();
     let mcpToolDescriptions = '';
 
     const maxMetrics = {
@@ -11568,7 +11723,7 @@ async function runAgent(
         const toolByName = new Map<string, any>();
         const mcpToolByPrefix = new Map<string, any>();
         const toolSchemaByName = new Map<string, any>();
-        const mcpConnectPromises = new Map<string, Promise<Client>>();
+        const mcpConnectPromises = new Map<string, Promise<{ client: Client; release: () => Promise<void> }>>();
         for (const tool of scopedTools) {
             toolByName.set(tool.name, tool);
             if (tool.type === 'mcp') {
@@ -11605,7 +11760,9 @@ async function runAgent(
                   return { mcpDescriptions, mcpToolCount: cachedManifest.tools.length, cacheHit: true };
                 }
 
-                const { client, config, transportType, resolvedTransport } = await connectMcpClientForTool(tool);
+                const { client, config, transportType, resolvedTransport, release } = await acquireMcpClientForTool(tool);
+                mcpClients.set(prefix, client);
+                mcpClientReleases.set(prefix, release);
                 const mcpTools = await withTimeout(client.listTools(), 8000, 'MCP listTools');
                 const mcpDescriptions: string[] = [];
                 const manifestTools: Array<{ name: string; description?: string; inputSchema?: any }> = [];
@@ -11637,8 +11794,6 @@ async function runAgent(
                     db.prepare('UPDATE tools SET config = ? WHERE id = ?').run(JSON.stringify(nextConfig), tool.id);
                   } catch {}
                 }
-                try { await client.close(); } catch {}
-
                 return { mcpDescriptions, mcpToolCount: mcpTools.tools.length, cacheHit: false };
               } catch (e: any) {
                 const detail = e?.code ? ` (HTTP ${e.code})` : '';
@@ -11654,23 +11809,24 @@ async function runAgent(
           const connected = mcpClients.get(prefix);
           if (connected) return connected;
           const inFlight = mcpConnectPromises.get(prefix);
-          if (inFlight) return await inFlight;
+          if (inFlight) return (await inFlight).client;
           const tool = mcpToolByPrefix.get(prefix);
           if (!tool) return null;
           const connectPromise = (async () => {
-            const { client, config, transportType, resolvedTransport } = await connectMcpClientForTool(tool);
+            const { client, config, transportType, resolvedTransport, release } = await acquireMcpClientForTool(tool);
             mcpClients.set(prefix, client);
+            mcpClientReleases.set(prefix, release);
             if (resolvedTransport !== transportType && tool.id) {
               try {
                 const nextConfig = { ...config, transportType: resolvedTransport };
                 db.prepare('UPDATE tools SET config = ? WHERE id = ?').run(JSON.stringify(nextConfig), tool.id);
               } catch {}
             }
-            return client;
+            return { client, release };
           })();
           mcpConnectPromises.set(prefix, connectPromise);
           try {
-            return await connectPromise;
+            return (await connectPromise).client;
           } finally {
             mcpConnectPromises.delete(prefix);
           }
@@ -11745,10 +11901,10 @@ async function runAgent(
             If you use delegate_to_agent, give the child agent a focused subtask, include concrete context, and then use the delegated result to continue reasoning or provide the final answer.
 
             If you need to use a tool, respond with a JSON object in this format:
-            { "tool": "tool_name", "args": { "arg_name": "value" }, "thought": "Why I am using this tool" }
+            { "tool": "tool_name", "args": { "arg_name": "value" } }
 
             If you have the final answer, respond with a JSON object in this format:
-            { "final_answer": "Your final answer here. This can be a string, or a nested JSON object/array if the expected output is structured.", "thought": "Why this is the final answer" }
+            { "final_answer": "Your final answer here. This can be a string, or a nested JSON object/array if the expected output is structured." }
         `;
 
         let iterations = 0;
@@ -11970,7 +12126,9 @@ async function runAgent(
             }
 
             if (action.final_answer) {
-                logCallback({ type: 'thought', agent: agent.name, message: action.thought || "Providing final answer" });
+                if (AGENT_ACTIVITY_EXPOSE_THOUGHTS && String(action.thought || '').trim()) {
+                  logCallback({ type: 'thought', agent: agent.name, message: String(action.thought) });
+                }
                 span.setStatus({ code: SpanStatusCode.OK });
                 const finalAnswerText = typeof action.final_answer === 'string' ? action.final_answer : JSON.stringify(action.final_answer, null, 2);
 
@@ -11979,7 +12137,9 @@ async function runAgent(
             }
 
             if (action.tool) {
-                logCallback({ type: 'thought', agent: agent.name, message: action.thought });
+                if (AGENT_ACTIVITY_EXPOSE_THOUGHTS && String(action.thought || '').trim()) {
+                  logCallback({ type: 'thought', agent: agent.name, message: String(action.thought) });
+                }
 
                 if (!toolsEnabled) {
                     const disabledMsg = 'Tools are disabled for this agent. Continue without tools.';
@@ -12278,12 +12438,12 @@ async function runAgent(
           await saveSessionConversation(sessionId, trimmed);
         }
 
-        for (const client of mcpClients.values()) {
-            try {
-                await client.close();
-            } catch (e) {
-                console.error("Error closing MCP client:", e);
-            }
+        for (const release of mcpClientReleases.values()) {
+          try {
+            await release();
+          } catch (e) {
+            console.error('Error releasing MCP client:', e);
+          }
         }
         // Set status back to idle
         await syncAgentStatus({
@@ -13703,9 +13863,19 @@ async function shutdown(signal: string) {
     clearInterval(mcpManifestPrewarmTimer);
     mcpManifestPrewarmTimer = null;
   }
+  if (mcpClientPoolSweepTimer) {
+    clearInterval(mcpClientPoolSweepTimer);
+    mcpClientPoolSweepTimer = null;
+  }
   if (gcsSyncTimer) {
     clearInterval(gcsSyncTimer);
     gcsSyncTimer = null;
+  }
+
+  try {
+    await sweepMcpClientPool(true);
+  } catch (e) {
+    console.error('Failed to close MCP client pool:', e);
   }
 
   try {
@@ -14396,6 +14566,7 @@ async function startServer() {
   startJobWorker();
   startAgentCronScheduler();
   startMcpManifestPrewarmScheduler();
+  startMcpClientPoolSweeper();
   gcsSyncTimer = startSqliteGcsSyncLoop(getSqlitePath());
 }
 
