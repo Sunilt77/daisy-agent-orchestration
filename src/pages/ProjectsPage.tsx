@@ -27,6 +27,8 @@ async function readJsonOrText(res: Response) {
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [isCreating, setIsCreating] = useState(false);
+  const [isSubmittingProject, setIsSubmittingProject] = useState(false);
+  const [createProjectError, setCreateProjectError] = useState<string | null>(null);
   const [formData, setFormData] = useState({ name: '', description: '' });
   const [platformProjects, setPlatformProjects] = useState<PlatformProject[]>([]);
   const [platformLinks, setPlatformLinks] = useState<Record<number, string>>({});
@@ -174,14 +176,24 @@ export default function ProjectsPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    await fetch('/api/projects', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(formData)
-    });
-    setFormData({ name: '', description: '' });
-    setIsCreating(false);
-    fetchProjects();
+    setCreateProjectError(null);
+    setIsSubmittingProject(true);
+    try {
+      const res = await fetch('/api/projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formData),
+      });
+      const { data, text } = await readJsonOrText(res);
+      if (!res.ok) throw new Error(data?.error || text || 'Failed to create project');
+      setFormData({ name: '', description: '' });
+      setIsCreating(false);
+      fetchProjects();
+    } catch (e: any) {
+      setCreateProjectError(String(e?.message || 'Failed to create project'));
+    } finally {
+      setIsSubmittingProject(false);
+    }
   };
 
   const deleteProject = async (id: number) => {
@@ -277,6 +289,11 @@ export default function ProjectsPage() {
       {isCreating && (
         <div className="mb-8 bg-white p-6 rounded-xl border border-slate-200 shadow-sm animate-in fade-in slide-in-from-top-4">
           <h3 className="text-lg font-semibold mb-4">Create New Project</h3>
+          {createProjectError && (
+            <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {createProjectError}
+            </div>
+          )}
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">Project Name</label>
@@ -302,16 +319,20 @@ export default function ProjectsPage() {
             <div className="flex justify-end gap-3">
               <button 
                 type="button"
-                onClick={() => setIsCreating(false)}
+                onClick={() => {
+                  setCreateProjectError(null);
+                  setIsCreating(false);
+                }}
                 className="text-slate-500 px-4 py-2 hover:text-slate-700"
               >
                 Cancel
               </button>
               <button 
                 type="submit"
-                className="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700"
+                disabled={isSubmittingProject}
+                className="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-60"
               >
-                Create Project
+                {isSubmittingProject ? 'Creating...' : 'Create Project'}
               </button>
             </div>
           </form>

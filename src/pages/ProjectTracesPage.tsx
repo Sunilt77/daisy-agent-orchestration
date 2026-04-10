@@ -98,6 +98,10 @@ type Insights = {
 export default function ProjectTracesPage() {
   const { id } = useParams<{ id: string }>();
   const [project, setProject] = useState<any>(null);
+  const [projectLoadError, setProjectLoadError] = useState<string | null>(null);
+  const [tracesLoadError, setTracesLoadError] = useState<string | null>(null);
+  const [toolTracesLoadError, setToolTracesLoadError] = useState<string | null>(null);
+  const [initialLoadError, setInitialLoadError] = useState<string | null>(null);
   const [traces, setTraces] = useState<Trace[]>([]);
   const [toolTraces, setToolTraces] = useState<ToolTrace[]>([]);
   const [loading, setLoading] = useState(true);
@@ -125,27 +129,90 @@ export default function ProjectTracesPage() {
   const [localToolPageSize, setLocalToolPageSize] = useState(10);
   const hasFilters = Boolean(q || status || kind || from || to);
 
+  const loadInitialData = async () => {
+    if (!id) return;
+    setLoading(true);
+    setInitialLoadError(null);
+    setProjectLoadError(null);
+    setTracesLoadError(null);
+    setToolTracesLoadError(null);
+
+    const readJson = async (res: Response) => {
+      const text = await res.text();
+      if (!text) return null;
+      try {
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    };
+
+    const errors: string[] = [];
+
+    try {
+      const res = await fetch(`/api/projects/${id}`);
+      const data = await readJson(res);
+      if (!res.ok) {
+        const msg = String((data as any)?.error || 'Failed to load project details');
+        setProjectLoadError(msg);
+        errors.push(msg);
+      } else {
+        setProject(data);
+      }
+    } catch (e: any) {
+      const msg = String(e?.message || 'Failed to load project details');
+      setProjectLoadError(msg);
+      errors.push(msg);
+    }
+
+    try {
+      const res = await fetch(`/api/projects/${id}/traces`);
+      const data = await readJson(res);
+      if (!res.ok) {
+        const msg = String((data as any)?.error || 'Failed to load local agent traces');
+        setTraces([]);
+        setTracesLoadError(msg);
+        errors.push(msg);
+      } else {
+        setTraces(Array.isArray(data) ? data : []);
+      }
+    } catch (e: any) {
+      const msg = String(e?.message || 'Failed to load local agent traces');
+      setTraces([]);
+      setTracesLoadError(msg);
+      errors.push(msg);
+    }
+
+    try {
+      const res = await fetch(`/api/projects/${id}/tool-traces`);
+      const data = await readJson(res);
+      if (!res.ok) {
+        const msg = String((data as any)?.error || 'Failed to load local tool traces');
+        setToolTraces([]);
+        setToolTracesLoadError(msg);
+        errors.push(msg);
+      } else {
+        setToolTraces(Array.isArray(data) ? data : []);
+      }
+    } catch (e: any) {
+      const msg = String(e?.message || 'Failed to load local tool traces');
+      setToolTraces([]);
+      setToolTracesLoadError(msg);
+      errors.push(msg);
+    }
+
+    if (errors.length > 0) {
+      setInitialLoadError('Some project trace data failed to load. You can retry now.');
+    }
+    setLoading(false);
+  };
+
   useEffect(() => {
-    fetch(`/api/projects/${id}`)
-      .then(res => res.json())
-      .then(data => setProject(data))
-      .catch(err => console.error(err));
-
-    fetch(`/api/projects/${id}/traces`)
-      .then(res => res.json())
-      .then(data => {
-        setTraces(data);
-        setLoading(false);
-      })
-      .catch(err => {
-        console.error(err);
-        setLoading(false);
-      });
-
-    fetch(`/api/projects/${id}/tool-traces`)
-      .then(res => res.json())
-      .then(data => setToolTraces(data))
-      .catch(err => console.error(err));
+    loadInitialData().catch(() => {
+      setInitialLoadError('Some project trace data failed to load. You can retry now.');
+      setLoading(false);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   const loadPlatformLink = async () => {
@@ -272,6 +339,23 @@ export default function ProjectTracesPage() {
         <h1 className="text-3xl font-bold text-slate-900">{project?.name} - Traces</h1>
         <p className="text-slate-500 mt-1">Project-wise traces (Platform runs/events + local agent executions).</p>
       </div>
+
+      {initialLoadError && (
+        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 flex items-center justify-between gap-3">
+          <span>{initialLoadError}</span>
+          <button
+            onClick={() => loadInitialData()}
+            className="inline-flex items-center gap-1 rounded border border-amber-300 bg-white px-3 py-1 text-xs font-medium hover:bg-amber-100"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {projectLoadError && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          Project details unavailable: {projectLoadError}
+        </div>
+      )}
 
       <div className="mb-6 flex items-center gap-2">
         <button
@@ -568,6 +652,12 @@ export default function ProjectTracesPage() {
       )}
 
       {tab === 'local-agent' && (
+      <div className="space-y-4">
+      {tracesLoadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          Local agent traces unavailable: {tracesLoadError}
+        </div>
+      )}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Traces List */}
         <div className="lg:col-span-1 bg-white border border-slate-200 rounded-xl overflow-hidden flex flex-col h-[800px]">
@@ -664,9 +754,16 @@ export default function ProjectTracesPage() {
           )}
         </div>
       </div>
+      </div>
       )}
 
       {tab === 'local-tool' && (
+      <div className="space-y-4">
+      {toolTracesLoadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          Local tool traces unavailable: {toolTracesLoadError}
+        </div>
+      )}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-1 bg-white border border-slate-200 rounded-xl overflow-hidden flex flex-col h-[800px]">
           <div className="p-4 border-b border-slate-200 bg-slate-50 font-medium text-slate-700 flex items-center gap-2">
@@ -749,6 +846,7 @@ export default function ProjectTracesPage() {
             </div>
           )}
         </div>
+      </div>
       </div>
       )}
     </div>
