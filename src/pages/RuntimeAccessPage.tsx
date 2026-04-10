@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Building2, CheckCircle2, Lightbulb, Link2, ShieldCheck, Sparkles, Trash2 } from 'lucide-react';
+import { Building2, CheckCircle2, Copy, Lightbulb, Link2, Rocket, ShieldCheck, Sparkles, Trash2 } from 'lucide-react';
 
 type AppRow = {
   id: string;
@@ -51,6 +51,19 @@ function slugify(value: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
+function normalizeBaseUrl(value: string): string {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const withProto = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  return withProto.replace(/\/+$/, '');
+}
+
+function normalizePath(value: string): string {
+  const raw = String(value || '').trim();
+  if (!raw) return '/mcp/gateway/tool-call';
+  return raw.startsWith('/') ? raw : `/${raw}`;
+}
+
 const SCOPE_SUGGESTIONS = ['crm.leads:read', 'crm.leads:write', 'crm.campaigns:read', 'crm.campaigns:write'];
 const TOOL_NAME_SUGGESTIONS = ['meta_graph_query', 'meta_create_campaign', 'meta_pause_campaign', 'meta_update_budget'];
 
@@ -85,6 +98,15 @@ export default function RuntimeAccessPage() {
     required_scopes_csv: '',
     enabled: true,
   });
+  const [wizard, setWizard] = useState({
+    app_name: '',
+    app_domain: '',
+    gateway_path: '/mcp/gateway/tool-call',
+    policy_tool_name: 'meta_graph_query',
+    policy_scopes_csv: 'crm.leads:read',
+    policy_agent_id: '',
+  });
+  const [wizardBusy, setWizardBusy] = useState(false);
 
   const selectedApp = useMemo(
     () => apps.find((row) => String(row.id) === String(selectedAppId)) || null,
@@ -95,6 +117,41 @@ export default function RuntimeAccessPage() {
     const done = checks.filter(Boolean).length;
     return { done, total: checks.length, percent: Math.round((done / checks.length) * 100) };
   }, [apps.length, gateways.length, policies.length]);
+  const wizardDerived = useMemo(() => {
+    const normalizedDomain = normalizeBaseUrl(wizard.app_domain);
+    const appSlug = slugify(wizard.app_name);
+    const endpointUrl = normalizedDomain ? `${normalizedDomain}${normalizePath(wizard.gateway_path)}` : '';
+    const gatewayName = wizard.app_name.trim() ? `${wizard.app_name.trim()} Gateway` : 'Application Gateway';
+    return {
+      appSlug,
+      tokenIssuer: normalizedDomain || '',
+      baseUrl: normalizedDomain || '',
+      endpointUrl,
+      gatewayName,
+    };
+  }, [wizard]);
+  const selectedAppGateway = useMemo(
+    () => gateways.find((gateway) => gateway.status === 'active') || gateways[0] || null,
+    [gateways],
+  );
+  const backendEnvSnippet = useMemo(() => {
+    if (!selectedApp) return '';
+    return [
+      `ORCHESTRATOR_BASE_URL=${window.location.origin}`,
+      'ORCHESTRATOR_API_KEY=<server-side-project-api-key>',
+      `CONNECTED_APPLICATION_ID=${selectedApp.id}`,
+      'DEFAULT_AGENT_ID=<agent-id>',
+    ].join('\n');
+  }, [selectedApp]);
+  const gatewayCurlSnippet = useMemo(() => {
+    if (!selectedApp || !selectedAppGateway) return '';
+    return [
+      `curl -X POST ${window.location.origin}/api/v2/mcp/gateways/${selectedAppGateway.id}`,
+      '  -H "Authorization: Bearer <admin-session-or-api>"',
+      '  -H "Content-Type: application/json"',
+      "  -d '{\"status\":\"active\"}'",
+    ].join('\n');
+  }, [selectedApp, selectedAppGateway]);
 
   const requestJson = async (url: string, init?: RequestInit) => {
     const response = await fetch(url, {
@@ -104,6 +161,14 @@ export default function RuntimeAccessPage() {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data?.error || `Request failed (${response.status})`);
     return data;
+  };
+  const copyText = async (value: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setNotice({ type: 'ok', text: `${label} copied.` });
+    } catch {
+      setNotice({ type: 'err', text: `Failed to copy ${label}.` });
+    }
   };
 
   const loadApps = async () => {
@@ -192,6 +257,77 @@ export default function RuntimeAccessPage() {
       setNotice({ type: 'ok', text: 'Application created.' });
     } catch (error: any) {
       setNotice({ type: 'err', text: String(error?.message || 'Failed to create application') });
+    }
+  };
+  const runConnectWizard = async () => {
+    try {
+      const appName = wizard.app_name.trim();
+      const appSlug = wizardDerived.appSlug;
+      const tokenIssuer = wizardDerived.tokenIssuer;
+      const baseUrl = wizardDerived.baseUrl;
+      const endpointUrl = wizardDerived.endpointUrl;
+      const toolName = wizard.policy_tool_name.trim();
+      if (!appName) throw new Error('App name is required.');
+      if (!appSlug) throw new Error('App slug could not be generated.');
+      if (!tokenIssuer) throw new Error('App domain is required.');
+      if (!endpointUrl) throw new Error('Gateway endpoint URL is required.');
+      if (!toolName) throw new Error('Policy tool name is required.');
+
+      setWizardBusy(true);
+      const createdApp = await requestJson('/api/v2/applications', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: appName,
+          slug: appSlug,
+          token_issuer: tokenIssuer,
+          token_audience: 'agentic-orchestrator',
+          base_url: baseUrl || undefined,
+        }),
+      });
+      const appId = String(createdApp?.id || '');
+      if (!appId) throw new Error('Application creation failed to return an id.');
+
+      const createdGateway = await requestJson('/api/v2/mcp/gateways', {
+        method: 'POST',
+        body: JSON.stringify({
+          application_id: appId,
+          name: wizardDerived.gatewayName,
+          endpoint_url: endpointUrl,
+          auth_mode: 'signed_jwt',
+          timeout_ms: 15000,
+        }),
+      });
+      const gatewayId = String(createdGateway?.id || '');
+      if (!gatewayId) throw new Error('Gateway creation failed to return an id.');
+
+      await requestJson('/api/v2/mcp/tool-policies', {
+        method: 'POST',
+        body: JSON.stringify({
+          application_id: appId,
+          tool_name: toolName,
+          gateway_id: gatewayId,
+          agent_id: wizard.policy_agent_id ? Number(wizard.policy_agent_id) : null,
+          required_scopes: normalizeScopesCsv(wizard.policy_scopes_csv),
+          enabled: true,
+        }),
+      });
+
+      setSelectedAppId(appId);
+      await loadApps();
+      await refreshForSelectedApp(appId);
+      setWizard({
+        app_name: '',
+        app_domain: '',
+        gateway_path: '/mcp/gateway/tool-call',
+        policy_tool_name: 'meta_graph_query',
+        policy_scopes_csv: 'crm.leads:read',
+        policy_agent_id: '',
+      });
+      setNotice({ type: 'ok', text: 'Connected app setup complete: application, gateway, and policy created.' });
+    } catch (error: any) {
+      setNotice({ type: 'err', text: String(error?.message || 'Failed to run connect wizard') });
+    } finally {
+      setWizardBusy(false);
     }
   };
 
@@ -307,6 +443,70 @@ export default function RuntimeAccessPage() {
           {notice.text}
         </div>
       )}
+
+      <div className="panel-chrome rounded-2xl p-4 space-y-4 border-2 border-cyan-200/70">
+        <div className="flex items-center gap-2 text-slate-800 font-semibold">
+          <Rocket size={16} /> One-Click Connect Wizard
+        </div>
+        <div className="text-sm text-slate-600">
+          Fill these 5 fields, then click once. We create application, gateway, and first policy automatically.
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-2">
+          <input
+            className="px-3 py-2 border rounded-lg bg-white"
+            placeholder="Website/App name"
+            value={wizard.app_name}
+            onChange={(e) => setWizard((v) => ({ ...v, app_name: e.target.value }))}
+          />
+          <input
+            className="px-3 py-2 border rounded-lg bg-white"
+            placeholder="App domain (ex: https://app.example.com)"
+            value={wizard.app_domain}
+            onChange={(e) => setWizard((v) => ({ ...v, app_domain: e.target.value }))}
+          />
+          <input
+            className="px-3 py-2 border rounded-lg bg-white"
+            placeholder="Gateway path"
+            value={wizard.gateway_path}
+            onChange={(e) => setWizard((v) => ({ ...v, gateway_path: e.target.value }))}
+          />
+          <input
+            className="px-3 py-2 border rounded-lg bg-white"
+            placeholder="First tool name"
+            value={wizard.policy_tool_name}
+            onChange={(e) => setWizard((v) => ({ ...v, policy_tool_name: e.target.value }))}
+          />
+          <input
+            className="px-3 py-2 border rounded-lg bg-white"
+            placeholder="Required scopes (comma separated)"
+            value={wizard.policy_scopes_csv}
+            onChange={(e) => setWizard((v) => ({ ...v, policy_scopes_csv: e.target.value }))}
+          />
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-2">
+          <select
+            className="px-3 py-2 border rounded-lg bg-white"
+            value={wizard.policy_agent_id}
+            onChange={(e) => setWizard((v) => ({ ...v, policy_agent_id: e.target.value }))}
+          >
+            <option value="">Policy applies to all agents</option>
+            {agents.map((row) => <option key={row.id} value={String(row.id)}>{row.name}</option>)}
+          </select>
+          <div className="px-3 py-2 rounded-lg border bg-slate-50 text-sm text-slate-700 truncate">
+            Slug: <span className="font-mono">{wizardDerived.appSlug || '-'}</span>
+          </div>
+          <div className="px-3 py-2 rounded-lg border bg-slate-50 text-sm text-slate-700 truncate">
+            Endpoint: <span className="font-mono">{wizardDerived.endpointUrl || '-'}</span>
+          </div>
+        </div>
+        <button
+          onClick={runConnectWizard}
+          disabled={wizardBusy}
+          className="px-4 py-2 rounded-lg bg-cyan-600 text-white text-sm font-semibold hover:bg-cyan-700 disabled:opacity-60"
+        >
+          {wizardBusy ? 'Creating...' : 'Connect App in One Click'}
+        </button>
+      </div>
 
       <div className="panel-chrome rounded-2xl p-4 space-y-3">
         <div className="flex items-center gap-2 text-slate-800 font-semibold">
@@ -524,6 +724,51 @@ export default function RuntimeAccessPage() {
             {!loading && policies.length === 0 && <div className="text-sm text-slate-500">No policies yet. Add policies to control which tools each agent can invoke.</div>}
           </div>
         </div>
+      </div>
+
+      <div className="panel-chrome rounded-2xl p-4">
+        <div className="flex items-center gap-2 text-slate-800 font-semibold">
+          <Copy size={16} /> Integration Values
+        </div>
+        {!selectedApp && (
+          <div className="mt-3 text-sm text-slate-500">Select an application to copy connector values for your website backend.</div>
+        )}
+        {selectedApp && (
+          <div className="mt-3 grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div className="rounded-xl border bg-white p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-sm font-semibold text-slate-900">Backend Env Snippet</div>
+                <button
+                  type="button"
+                  className="px-2 py-1 rounded border text-xs bg-white hover:bg-slate-50"
+                  onClick={() => copyText(backendEnvSnippet, 'Backend env snippet')}
+                >
+                  Copy
+                </button>
+              </div>
+              <pre className="text-xs bg-slate-900 text-slate-100 rounded-lg p-3 overflow-x-auto">{backendEnvSnippet}</pre>
+            </div>
+            <div className="rounded-xl border bg-white p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-sm font-semibold text-slate-900">Selected Gateway</div>
+                <button
+                  type="button"
+                  className="px-2 py-1 rounded border text-xs bg-white hover:bg-slate-50 disabled:opacity-50"
+                  disabled={!selectedAppGateway}
+                  onClick={() => copyText(String(selectedAppGateway?.endpoint_url || ''), 'Gateway endpoint URL')}
+                >
+                  Copy URL
+                </button>
+              </div>
+              <div className="text-sm text-slate-700">{selectedAppGateway?.name || 'No gateway yet'}</div>
+              <div className="text-xs font-mono text-slate-600 break-all">{selectedAppGateway?.endpoint_url || '-'}</div>
+              <div className="text-xs text-slate-500">Audience: <span className="font-mono">{selectedApp.token_audience}</span></div>
+              {gatewayCurlSnippet && (
+                <pre className="text-xs bg-slate-900 text-slate-100 rounded-lg p-3 overflow-x-auto">{gatewayCurlSnippet}</pre>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="panel-chrome rounded-2xl p-4">
