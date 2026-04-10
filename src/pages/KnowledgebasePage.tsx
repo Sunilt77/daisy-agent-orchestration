@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Database, FileText, Plus, Search, Trash2, Upload } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import Pagination from '../components/Pagination';
 
 interface Project {
@@ -38,6 +39,8 @@ export default function KnowledgebasePage() {
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
   const [documents, setDocuments] = useState<Document[]>([]);
   const [indexes, setIndexes] = useState<KnowledgebaseIndex[]>([]);
+  const [linkedPlatformProjectId, setLinkedPlatformProjectId] = useState<string>('');
+  const [linkStatusMessage, setLinkStatusMessage] = useState<string>('');
   const [activeTab, setActiveTab] = useState<'documents' | 'indexes'>('documents');
   const [showCreateIndex, setShowCreateIndex] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -58,6 +61,8 @@ export default function KnowledgebasePage() {
     } else {
       setDocuments([]);
       setIndexes([]);
+      setLinkedPlatformProjectId('');
+      setLinkStatusMessage('');
     }
   }, [selectedProjectId]);
 
@@ -84,10 +89,41 @@ export default function KnowledgebasePage() {
   const loadData = async () => {
     if (!selectedProjectId) return;
     setLoading(true);
+    setLinkStatusMessage('');
     try {
+      const linkResponse = await fetch(`/api/projects/${selectedProjectId}/platform-link`);
+      let effectiveProjectId = '';
+      if (linkResponse.ok) {
+        const linkData = await linkResponse.json().catch(() => ({}));
+        effectiveProjectId = String(linkData?.platformProjectId || '');
+      }
+      setLinkedPlatformProjectId(effectiveProjectId);
+
+      if (!effectiveProjectId) {
+        setDocuments([]);
+        setIndexes([]);
+        setLinkStatusMessage('This project is not linked to a Platform project yet.');
+        return;
+      }
+
+      const visibleProjectsRes = await fetch('/api/v1/projects');
+      const visibleProjects = visibleProjectsRes.ok
+        ? await visibleProjectsRes.json().catch(() => [])
+        : [];
+      const hasVisibleLink = Array.isArray(visibleProjects)
+        ? visibleProjects.some((project: any) => String(project?.id || '') === effectiveProjectId)
+        : false;
+      if (!hasVisibleLink) {
+        setDocuments([]);
+        setIndexes([]);
+        setLinkedPlatformProjectId('');
+        setLinkStatusMessage('Linked Platform project is not visible in your current organization.');
+        return;
+      }
+
       const [docsResponse, indexesResponse] = await Promise.all([
-        fetch(`/api/knowledgebase/documents?projectId=${selectedProjectId}`),
-        fetch(`/api/knowledgebase/indexes?projectId=${selectedProjectId}`),
+        fetch(`/api/knowledgebase/documents?projectId=${encodeURIComponent(effectiveProjectId)}`),
+        fetch(`/api/knowledgebase/indexes?projectId=${encodeURIComponent(effectiveProjectId)}`),
       ]);
       if (docsResponse.ok) {
         const docs = await docsResponse.json();
@@ -111,9 +147,14 @@ export default function KnowledgebasePage() {
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file || !selectedProjectId) return;
+    if (!linkedPlatformProjectId) {
+      alert('Link this project to a Platform project first from Projects > Link.');
+      event.target.value = '';
+      return;
+    }
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('projectId', selectedProjectId);
+    formData.append('projectId', linkedPlatformProjectId);
     formData.append('name', file.name);
     formData.append('description', '');
     try {
@@ -148,11 +189,15 @@ export default function KnowledgebasePage() {
 
   const createIndex = async (name: string, description: string) => {
     if (!selectedProjectId) return;
+    if (!linkedPlatformProjectId) {
+      alert('Link this project to a Platform project first from Projects > Link.');
+      return;
+    }
     try {
       const response = await fetch('/api/knowledgebase/indexes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId: selectedProjectId, name, description }),
+        body: JSON.stringify({ projectId: linkedPlatformProjectId, name, description }),
       });
       if (response.ok) {
         setShowCreateIndex(false);
@@ -349,6 +394,17 @@ export default function KnowledgebasePage() {
       ) : loading ? (
         <div className="text-center py-14 bg-slate-50 rounded-xl border border-dashed border-slate-300">
           <p className="text-slate-500">Loading knowledgebase data...</p>
+        </div>
+      ) : !linkedPlatformProjectId ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-6 text-amber-900">
+          <p className="font-medium">{linkStatusMessage || 'This project is not linked to a Platform project yet.'}</p>
+          <p className="text-sm mt-1">Link it from the Projects page to enable document upload and index management.</p>
+          <Link
+            to="/projects"
+            className="mt-3 inline-block rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-amber-100"
+          >
+            Go To Projects
+          </Link>
         </div>
       ) : activeTab === 'documents' ? (
         <div className="space-y-4">
