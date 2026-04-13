@@ -189,6 +189,7 @@ export default function VoicePage() {
   const [eventSearch, setEventSearch] = useState('');
   const [eventTypeFilter, setEventTypeFilter] = useState<'all' | string>('all');
   const [directElevenLabsMedia, setDirectElevenLabsMedia] = useState(true);
+  const [runtimeTtsFallbackEnabled, setRuntimeTtsFallbackEnabled] = useState(false);
   const [latencyMetrics, setLatencyMetrics] = useState<{
     sttToReplyMs: number | null;
     replyToTtsMs: number | null;
@@ -600,6 +601,7 @@ export default function VoicePage() {
         settle(false, new Error('Timed out connecting to ElevenLabs realtime TTS'));
       }, 10000);
       socket.onopen = () => {
+        setRuntimeTtsFallbackEnabled(false);
         socket.send(JSON.stringify({
           text: ' ',
           voice_settings: {
@@ -700,6 +702,7 @@ export default function VoicePage() {
       await done;
     } catch (e: any) {
       directTtsPlayingRef.current = false;
+      setRuntimeTtsFallbackEnabled(true);
       sendRuntimeSessionUpdate(autoTts);
       setStatusNote('Direct ElevenLabs TTS is unavailable. Switched to server speech fallback.');
       pushEvent('tts.socket.error.direct', { message: e?.message || 'Failed to synthesize direct TTS' });
@@ -955,6 +958,7 @@ export default function VoicePage() {
     if (!targetId) return;
     closeDirectSttSocket();
     closeDirectTtsSocket();
+    setRuntimeTtsFallbackEnabled(false);
     setError('');
     setStatusNote('');
     const runtimeAutoTts = autoTts && !directElevenLabsMedia;
@@ -988,6 +992,7 @@ export default function VoicePage() {
     ws.onmessage = (event) => {
       try {
         const message = JSON.parse(String(event.data || '{}'));
+        const shouldIgnoreRuntimeTts = directElevenLabsMedia && !runtimeTtsFallbackEnabled;
         pushEvent(message.type || 'message', message);
         if (message.type === 'session.started') setSessionId(String(message.sessionId || ''));
         if (message.type === 'session.started') setSessionAttachments(Array.isArray(message.attachments) ? message.attachments : []);
@@ -1045,7 +1050,7 @@ export default function VoicePage() {
           }
         }
         if (message.type === 'agent.reply.complete') setAgentReply(String(message.text || ''));
-        if (message.type === 'agent.reply.complete' && directElevenLabsMedia && autoTts) {
+        if (message.type === 'agent.reply.complete' && shouldIgnoreRuntimeTts && autoTts) {
           if (!directTtsQueueRef.current.length && !directTtsWorkerActiveRef.current && !directTtsBufferRef.current.trim()) {
             enqueueDirectTtsFromText(String(message.text || ''), true);
           } else {
@@ -1053,7 +1058,7 @@ export default function VoicePage() {
           }
         }
         if (message.type === 'agent.reply') setAgentReply(String(message.text || ''));
-        if (message.type === 'agent.reply' && directElevenLabsMedia && autoTts) enqueueDirectTtsFromText('', true);
+        if (message.type === 'agent.reply' && shouldIgnoreRuntimeTts && autoTts) enqueueDirectTtsFromText('', true);
         if (message.type === 'voice.busy') setStatusNote(String(message.message || 'The runtime is still processing the previous utterance.'));
         if (message.type === 'voice.progress' && message.text) {
           setVoiceProgress((prev) => [
@@ -1062,7 +1067,7 @@ export default function VoicePage() {
           ].slice(0, 20));
         }
         if (message.type === 'tts.start') {
-          if (directElevenLabsMedia) return;
+          if (shouldIgnoreRuntimeTts) return;
           const now = Date.now();
           if (replyStartedAtRef.current) {
             setLatencyMetrics((prev) => ({
@@ -1073,23 +1078,23 @@ export default function VoicePage() {
           startIncomingAudioStream(String(message.mimeType || 'audio/mpeg'));
         }
         if (message.type === 'tts.chunk' && message.audio) {
-          if (directElevenLabsMedia) return;
+          if (shouldIgnoreRuntimeTts) return;
           appendIncomingAudioChunk(String(message.audio || ''));
         }
         if (message.type === 'tts.complete') {
-          if (directElevenLabsMedia) return;
+          if (shouldIgnoreRuntimeTts) return;
           finishIncomingAudioStream();
         }
         if (message.type === 'voice.progress.audio.start') {
-          if (directElevenLabsMedia) return;
+          if (shouldIgnoreRuntimeTts) return;
           startIncomingAudioStream(String(message.mimeType || 'audio/mpeg'));
         }
         if (message.type === 'voice.progress.audio.chunk' && message.audio) {
-          if (directElevenLabsMedia) return;
+          if (shouldIgnoreRuntimeTts) return;
           appendIncomingAudioChunk(String(message.audio || ''));
         }
         if (message.type === 'voice.progress.audio.complete') {
-          if (directElevenLabsMedia) return;
+          if (shouldIgnoreRuntimeTts) return;
           finishIncomingAudioStream();
         }
         if (message.type === 'tts.interrupted') {
@@ -1120,6 +1125,7 @@ export default function VoicePage() {
     ws.onclose = () => {
       closeDirectSttSocket();
       closeDirectTtsSocket();
+      setRuntimeTtsFallbackEnabled(false);
       wsRef.current = null;
       setIsConnected(false);
       setIsRecording(false);
@@ -1141,6 +1147,7 @@ export default function VoicePage() {
   const disconnect = () => {
     closeDirectSttSocket();
     closeDirectTtsSocket();
+    setRuntimeTtsFallbackEnabled(false);
     wsRef.current?.send(JSON.stringify({ type: 'session.stop' }));
     wsRef.current?.close();
     wsRef.current = null;
@@ -1427,6 +1434,7 @@ export default function VoicePage() {
   const stopRecording = () => {
     closeDirectSttSocket();
     closeDirectTtsSocket();
+    setRuntimeTtsFallbackEnabled(false);
     stopMicVisualization();
     processorRef.current?.disconnect();
     sourceRef.current?.disconnect();
@@ -1479,6 +1487,7 @@ export default function VoicePage() {
     if (directElevenLabsMedia) return;
     closeDirectSttSocket();
     closeDirectTtsSocket();
+    setRuntimeTtsFallbackEnabled(false);
   }, [directElevenLabsMedia]);
 
   useEffect(() => {
@@ -1489,6 +1498,7 @@ export default function VoicePage() {
   useEffect(() => () => {
     closeDirectSttSocket();
     closeDirectTtsSocket();
+    setRuntimeTtsFallbackEnabled(false);
     resetAudioStream();
     stopMicVisualization();
   }, []);
