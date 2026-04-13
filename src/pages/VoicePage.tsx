@@ -225,6 +225,10 @@ export default function VoicePage() {
   const directTtsActiveRef = useRef(false);
   const directTtsPlayingRef = useRef(false);
   const lastDirectTtsTextRef = useRef('');
+  const directTtsBufferRef = useRef('');
+  const directTtsQueueRef = useRef<string[]>([]);
+  const directTtsWorkerActiveRef = useRef(false);
+  const directTtsSegmentResolveRef = useRef<(() => void) | null>(null);
 
   const stopMicVisualization = () => {
     if (animationFrameRef.current != null && typeof window !== 'undefined') {
@@ -425,10 +429,25 @@ export default function VoicePage() {
   const closeDirectTtsSocket = () => {
     directTtsActiveRef.current = false;
     directTtsPlayingRef.current = false;
+    directTtsBufferRef.current = '';
+    directTtsQueueRef.current = [];
+    directTtsWorkerActiveRef.current = false;
+    if (directTtsSegmentResolveRef.current) {
+      const resolve = directTtsSegmentResolveRef.current;
+      directTtsSegmentResolveRef.current = null;
+      resolve();
+    }
     try {
       directTtsSocketRef.current?.close();
     } catch {}
     directTtsSocketRef.current = null;
+  };
+
+  const interruptDirectTtsPlayback = () => {
+    directTtsBufferRef.current = '';
+    directTtsQueueRef.current = [];
+    closeDirectTtsSocket();
+    resetAudioStream();
   };
 
   const requestSingleUseToken = async (tokenType: 'realtime_scribe' | 'tts_websocket') => {
@@ -518,6 +537,7 @@ export default function VoicePage() {
           const speechStarted = messageType === 'speech_started' || messageType === 'speech_start';
           const speechStopped = messageType === 'speech_stopped' || messageType === 'speech_end';
           if (speechStarted || (partial && turnState !== 'speaking')) {
+            interruptDirectTtsPlayback();
             setStatusNote('Listening…');
             setTurnState('listening');
           }
@@ -613,17 +633,41 @@ export default function VoicePage() {
             finishIncomingAudioStream();
             directTtsPlayingRef.current = false;
             setTurnState('idle');
+            if (directTtsSegmentResolveRef.current) {
+              const resolve = directTtsSegmentResolveRef.current;
+              directTtsSegmentResolveRef.current = null;
+              resolve();
+            }
           }
         } catch {}
       };
     });
   };
 
-  const synthesizeDirectTts = async (text: string) => {
+  const extractReadyDirectTtsSegments = (buffer: string, flushAll = false) => {
+    const text = String(buffer || '');
+    if (!text.trim()) return { ready: [] as string[], remainder: '' };
+    const matches = text.match(/[^.!?]+[.!?]+(?:\s+|$)/g) || [];
+    const ready = matches.map((part) => String(part || '').trim()).filter(Boolean);
+    const consumed = matches.join('');
+    let remainder = text.slice(consumed.length);
+    if (flushAll && remainder.trim()) {
+      ready.push(remainder.trim());
+      remainder = '';
+    }
+    if (!flushAll && !ready.length && text.trim().length > 120) {
+      const splitAt = text.lastIndexOf(' ', 120);
+      const idx = splitAt > 40 ? splitAt : 120;
+      ready.push(text.slice(0, idx).trim());
+      remainder = text.slice(idx).trimStart();
+    }
+    return { ready, remainder };
+  };
+
+  const synthesizeDirectTtsSegment = async (text: string) => {
     const content = String(text || '').trim();
     if (!content || !directElevenLabsMedia || !autoTts) return;
     if (lastDirectTtsTextRef.current === content) return;
-    if (directTtsPlayingRef.current) return;
 
     try {
       if (!directTtsActiveRef.current || !directTtsSocketRef.current || directTtsSocketRef.current.readyState !== WebSocket.OPEN) {
@@ -633,14 +677,56 @@ export default function VoicePage() {
       lastDirectTtsTextRef.current = content;
       directTtsPlayingRef.current = true;
       setTurnState('speaking');
+      if (replyStartedAtRef.current) {
+        const now = Date.now();
+        setLatencyMetrics((prev) => (
+          prev.replyToTtsMs == null
+            ? { ...prev, replyToTtsMs: Math.max(0, now - replyStartedAtRef.current!) }
+            : prev
+        ));
+      }
       startIncomingAudioStream(outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg');
+      const done = new Promise<void>((resolve) => {
+        directTtsSegmentResolveRef.current = resolve;
+        window.setTimeout(() => {
+          if (directTtsSegmentResolveRef.current === resolve) {
+            directTtsSegmentResolveRef.current = null;
+            resolve();
+          }
+        }, 15000);
+      });
       directTtsSocketRef.current.send(JSON.stringify({ text: `${content} `, try_trigger_generation: true }));
       directTtsSocketRef.current.send(JSON.stringify({ text: '' }));
+      await done;
     } catch (e: any) {
       directTtsPlayingRef.current = false;
       setStatusNote('Direct ElevenLabs TTS is unavailable. Reply text remains available.');
       pushEvent('tts.socket.error.direct', { message: e?.message || 'Failed to synthesize direct TTS' });
     }
+  };
+
+  const processDirectTtsQueue = async () => {
+    if (directTtsWorkerActiveRef.current) return;
+    directTtsWorkerActiveRef.current = true;
+    try {
+      while (directTtsQueueRef.current.length) {
+        const segment = directTtsQueueRef.current.shift();
+        if (!segment) continue;
+        await synthesizeDirectTtsSegment(segment);
+      }
+    } finally {
+      directTtsWorkerActiveRef.current = false;
+    }
+  };
+
+  const enqueueDirectTtsFromText = (text: string, flushAll = false) => {
+    if (!directElevenLabsMedia || !autoTts) return;
+    directTtsBufferRef.current = `${directTtsBufferRef.current}${String(text || '')}`;
+    const { ready, remainder } = extractReadyDirectTtsSegments(directTtsBufferRef.current, flushAll);
+    directTtsBufferRef.current = remainder;
+    if (!ready.length) return;
+    directTtsQueueRef.current.push(...ready);
+    void processDirectTtsQueue();
   };
 
   useEffect(() => {
@@ -931,6 +1017,9 @@ export default function VoicePage() {
         if (message.type === 'stt.final') setLiveTranscript(String(message.text || ''));
         if (message.type === 'agent.reply.start') {
           setAgentReply('');
+          lastDirectTtsTextRef.current = '';
+          directTtsBufferRef.current = '';
+          directTtsQueueRef.current = [];
           const now = Date.now();
           replyStartedAtRef.current = now;
           if (turnCommittedAtRef.current) {
@@ -943,15 +1032,20 @@ export default function VoicePage() {
         if (message.type === 'agent.reply.delta') {
           if (message.fullText) setAgentReply(String(message.fullText || ''));
           else if (message.text) setAgentReply((prev) => `${prev}${prev ? ' ' : ''}${String(message.text || '')}`);
+          if (directElevenLabsMedia && autoTts && message.text) {
+            enqueueDirectTtsFromText(String(message.text || ''), false);
+          }
         }
         if (message.type === 'agent.reply.complete') setAgentReply(String(message.text || ''));
         if (message.type === 'agent.reply.complete' && directElevenLabsMedia && autoTts) {
-          void synthesizeDirectTts(String(message.text || ''));
+          if (!directTtsQueueRef.current.length && !directTtsWorkerActiveRef.current && !directTtsBufferRef.current.trim()) {
+            enqueueDirectTtsFromText(String(message.text || ''), true);
+          } else {
+            enqueueDirectTtsFromText('', true);
+          }
         }
         if (message.type === 'agent.reply') setAgentReply(String(message.text || ''));
-        if (message.type === 'agent.reply' && directElevenLabsMedia && autoTts) {
-          void synthesizeDirectTts(String(message.text || ''));
-        }
+        if (message.type === 'agent.reply' && directElevenLabsMedia && autoTts) enqueueDirectTtsFromText('', true);
         if (message.type === 'voice.busy') setStatusNote(String(message.message || 'The runtime is still processing the previous utterance.'));
         if (message.type === 'voice.progress' && message.text) {
           setVoiceProgress((prev) => [
