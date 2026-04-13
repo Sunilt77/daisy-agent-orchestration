@@ -961,7 +961,7 @@ export default function VoicePage() {
     setRuntimeTtsFallbackEnabled(false);
     setError('');
     setStatusNote('');
-    const runtimeAutoTts = autoTts && !directElevenLabsMedia;
+    const runtimeAutoTts = autoTts;
     const url = new URL(`${window.location.origin.replace(/^http/, 'ws')}/ws/voice`);
     url.searchParams.set('targetType', targetType);
     url.searchParams.set('targetId', String(targetId));
@@ -992,7 +992,10 @@ export default function VoicePage() {
     ws.onmessage = (event) => {
       try {
         const message = JSON.parse(String(event.data || '{}'));
-        const shouldIgnoreRuntimeTts = directElevenLabsMedia && !runtimeTtsFallbackEnabled;
+        const shouldIgnoreRuntimeTts =
+          directElevenLabsMedia &&
+          !runtimeTtsFallbackEnabled &&
+          directTtsActiveRef.current;
         pushEvent(message.type || 'message', message);
         if (message.type === 'session.started') setSessionId(String(message.sessionId || ''));
         if (message.type === 'session.started') setSessionAttachments(Array.isArray(message.attachments) ? message.attachments : []);
@@ -1382,7 +1385,7 @@ export default function VoicePage() {
     processorRef.current = processor;
     analyserRef.current = analyser;
 
-    sendRuntimeSessionUpdate(autoTts && !directElevenLabsMedia);
+    sendRuntimeSessionUpdate(autoTts);
 
     processor.onaudioprocess = (event) => {
       if (pushToTalk && !pushToTalkPressedRef.current) return;
@@ -1492,6 +1495,7 @@ export default function VoicePage() {
 
   useEffect(() => {
     if (!lastAudioSrc || !audioRef.current) return;
+    audioRef.current.src = lastAudioSrc;
     audioRef.current.play().catch(() => undefined);
   }, [lastAudioSrc]);
 
@@ -2104,15 +2108,16 @@ export default function VoicePage() {
                   </div>
                   <div className="mt-2 text-sm text-slate-800 whitespace-pre-wrap min-h-[100px]">{agentReply || 'Waiting for agent response...'}</div>
                 </div>
-                {lastAudioSrc ? (
-                  <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3">
-                    <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-700">
-                      <Volume2 size={12} />
-                      Synthesized Audio
-                    </div>
-                    <audio ref={audioRef} className="mt-3 w-full" controls src={lastAudioSrc} />
+                <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3">
+                  <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-700">
+                    <Volume2 size={12} />
+                    Synthesized Audio
                   </div>
-                ) : null}
+                  <audio ref={audioRef} className="mt-3 w-full" controls />
+                  {!lastAudioSrc ? (
+                    <div className="mt-2 text-xs text-violet-800/80">Waiting for the next TTS chunk…</div>
+                  ) : null}
+                </div>
               </div>
             ) : (
               <div className="rounded-2xl border border-slate-200 bg-slate-950 text-slate-100 p-4">

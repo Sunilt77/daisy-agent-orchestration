@@ -132,9 +132,10 @@ const MCP_MANIFEST_CACHE_TTL_MS = Math.max(10_000, Number(process.env.MCP_MANIFE
 const MCP_MANIFEST_PREWARM_ENABLED = String(process.env.MCP_MANIFEST_PREWARM_ENABLED || 'true').trim().toLowerCase() !== 'false';
 const MCP_MANIFEST_PREWARM_INTERVAL_MS = Math.max(10_000, Number(process.env.MCP_MANIFEST_PREWARM_INTERVAL_MS || 60_000));
 const MCP_MANIFEST_PREWARM_MAX_ENDPOINTS = Math.max(1, Number(process.env.MCP_MANIFEST_PREWARM_MAX_ENDPOINTS || 40));
+const MCP_EAGER_MANIFEST_RESOLVE_ON_RUN = String(process.env.MCP_EAGER_MANIFEST_RESOLVE_ON_RUN || 'false').trim().toLowerCase() === 'true';
 const AGENT_ACTIVITY_EXPOSE_THOUGHTS = String(process.env.AGENT_ACTIVITY_EXPOSE_THOUGHTS || 'false').trim().toLowerCase() === 'true';
 const MCP_CLIENT_POOL_ENABLED = String(process.env.MCP_CLIENT_POOL_ENABLED || 'true').trim().toLowerCase() !== 'false';
-const MCP_CLIENT_IDLE_TTL_MS = Math.max(15_000, Number(process.env.MCP_CLIENT_IDLE_TTL_MS || 300_000));
+const MCP_CLIENT_IDLE_TTL_MS = Math.max(15_000, Number(process.env.MCP_CLIENT_IDLE_TTL_MS || 900_000));
 const MCP_CLIENT_POOL_MAX = Math.max(1, Number(process.env.MCP_CLIENT_POOL_MAX || 100));
 
 type PooledMcpClientEntry = {
@@ -147,6 +148,7 @@ type PooledMcpClientEntry = {
 };
 const mcpClientPool = new Map<string, PooledMcpClientEntry>();
 const mcpClientPoolConnectInFlight = new Map<string, Promise<PooledMcpClientEntry>>();
+const mcpManifestDeferredPrewarmInFlight = new Map<string, Promise<void>>();
 
 // Test suites import `app` without calling `startServer()`, so the local mirror
 // schema must be ready at module load time as well.
@@ -516,6 +518,22 @@ async function prewarmMcpManifestForTool(tool: any): Promise<{ cacheHit: boolean
   } catch {
     return { cacheHit: false, toolCount: 0 };
   }
+}
+
+function queueMcpManifestDeferredPrewarm(tool: any) {
+  try {
+    const parsedConfig = tool?.config ? JSON.parse(String(tool.config)) : {};
+    const cacheKey = buildMcpManifestCacheKey(String(tool?.name || ''), parsedConfig);
+    if (!cacheKey || mcpManifestDeferredPrewarmInFlight.has(cacheKey)) return;
+    const task = (async () => {
+      try {
+        await prewarmMcpManifestForTool(tool);
+      } catch {}
+    })().finally(() => {
+      mcpManifestDeferredPrewarmInFlight.delete(cacheKey);
+    });
+    mcpManifestDeferredPrewarmInFlight.set(cacheKey, task);
+  } catch {}
 }
 
 async function collectMcpToolsForPrewarm(): Promise<any[]> {
@@ -11970,16 +11988,16 @@ async function runAgent(
             }
         }
 
-        const mcpSetupResults = await Promise.all(
-          scopedTools
-            .filter((tool) => tool.type === 'mcp')
-            .map(async (tool) => {
-              try {
-                const prefix = tool.name.toLowerCase().replace(/[^a-z0-9]/g, '_');
-                const parsedConfig = tool?.config ? JSON.parse(String(tool.config)) : {};
-                const cacheKey = buildMcpManifestCacheKey(String(tool.name || ''), parsedConfig);
-                const cachedManifest = readMcpManifestCache(cacheKey);
-                if (cachedManifest) {
+	        const mcpSetupResults = await Promise.all(
+	          scopedTools
+	            .filter((tool) => tool.type === 'mcp')
+	            .map(async (tool) => {
+	              try {
+	                const prefix = tool.name.toLowerCase().replace(/[^a-z0-9]/g, '_');
+	                const parsedConfig = tool?.config ? JSON.parse(String(tool.config)) : {};
+	                const cacheKey = buildMcpManifestCacheKey(String(tool.name || ''), parsedConfig);
+	                const cachedManifest = readMcpManifestCache(cacheKey);
+	                if (cachedManifest) {
                   const mcpDescriptions: string[] = [];
                   for (const cachedTool of cachedManifest.tools) {
                     const aliasedName = `${prefix}_${cachedTool.name}`;
@@ -11994,14 +12012,34 @@ async function runAgent(
                         inputSchema,
                       ),
                     );
-                  }
-                  return { mcpDescriptions, mcpToolCount: cachedManifest.tools.length, cacheHit: true };
-                }
+	                  }
+	                  return { mcpDescriptions, mcpToolCount: cachedManifest.tools.length, cacheHit: true };
+	                }
+	                if (!MCP_EAGER_MANIFEST_RESOLVE_ON_RUN) {
+	                  queueMcpManifestDeferredPrewarm(tool);
+	                  const wildcardSchema = normalizeToolInputSchema({
+	                    type: 'object',
+	                    properties: {},
+	                    additionalProperties: true,
+	                  });
+	                  const deferredDescription = `MCP endpoint "${tool.name}" is warming in background. Call as "${prefix}_<method_name>" when method name is known.`;
+	                  return {
+	                    mcpDescriptions: [
+	                      describeToolForPrompt(
+	                        { name: `${prefix}_<method_name>`, description: deferredDescription },
+	                        wildcardSchema,
+	                      ),
+	                    ],
+	                    mcpToolCount: 0,
+	                    cacheHit: false,
+	                    deferred: true,
+	                  };
+	                }
 
-                const { client, config, transportType, resolvedTransport, release } = await acquireMcpClientForTool(tool);
-                mcpClients.set(prefix, client);
-                mcpClientReleases.set(prefix, release);
-                const mcpTools = await withTimeout(client.listTools(), 8000, 'MCP listTools');
+	                const { client, config, transportType, resolvedTransport, release } = await acquireMcpClientForTool(tool);
+	                mcpClients.set(prefix, client);
+	                mcpClientReleases.set(prefix, release);
+	                const mcpTools = await withTimeout(client.listTools(), 8000, 'MCP listTools');
                 const mcpDescriptions: string[] = [];
                 const manifestTools: Array<{ name: string; description?: string; inputSchema?: any }> = [];
                 for (const mcpTool of mcpTools.tools) {
@@ -12032,14 +12070,14 @@ async function runAgent(
                     db.prepare('UPDATE tools SET config = ? WHERE id = ?').run(JSON.stringify(nextConfig), tool.id);
                   } catch {}
                 }
-                return { mcpDescriptions, mcpToolCount: mcpTools.tools.length, cacheHit: false };
-              } catch (e: any) {
-                const detail = e?.code ? ` (HTTP ${e.code})` : '';
-                console.error(`Failed to connect to MCP tool ${tool.name}${detail}:`, e?.message || e);
-                return { mcpDescriptions: [] as string[], mcpToolCount: 0, cacheHit: false };
-              }
-            }),
-        );
+	                return { mcpDescriptions, mcpToolCount: mcpTools.tools.length, cacheHit: false, deferred: false };
+	              } catch (e: any) {
+	                const detail = e?.code ? ` (HTTP ${e.code})` : '';
+	                console.error(`Failed to connect to MCP tool ${tool.name}${detail}:`, e?.message || e);
+	                return { mcpDescriptions: [] as string[], mcpToolCount: 0, cacheHit: false, deferred: false };
+	              }
+	            }),
+	        );
         mcpToolDescriptions = mcpSetupResults.flatMap((result) => result.mcpDescriptions).join('\n');
         const ensureMcpClient = async (requestedToolName: string): Promise<Client | null> => {
           const prefix = Array.from(mcpToolByPrefix.keys()).find((p) => requestedToolName.startsWith(p + '_')) || null;
@@ -12108,19 +12146,21 @@ async function runAgent(
             ? buildDelegationRosterContext(agent)
             : '';
         const prepDurationMs = Date.now() - prepStartedAt;
-        const mcpEndpointCount = scopedTools.filter((tool) => tool.type === 'mcp').length;
-        const mcpExposedToolCount = mcpSetupResults.reduce((sum, result) => sum + Number(result.mcpToolCount || 0), 0);
-        const mcpManifestCacheHits = mcpSetupResults.reduce((sum, result) => sum + (result.cacheHit ? 1 : 0), 0);
-        span.setAttribute('tool_prep.duration_ms', prepDurationMs);
-        span.setAttribute('tool_prep.scoped_tool_count', scopedTools.length);
-        span.setAttribute('tool_prep.mcp_endpoint_count', mcpEndpointCount);
-        span.setAttribute('tool_prep.mcp_exposed_tool_count', mcpExposedToolCount);
-        span.setAttribute('tool_prep.mcp_manifest_cache_hits', mcpManifestCacheHits);
-        logCallback({
-          type: 'status',
-          agent: agent.name,
-          message: `Tools ready in ${prepDurationMs}ms (${scopedTools.length} total, ${mcpEndpointCount} MCP endpoints, ${mcpExposedToolCount} MCP methods, ${mcpManifestCacheHits} manifest cache hits)`,
-        });
+	        const mcpEndpointCount = scopedTools.filter((tool) => tool.type === 'mcp').length;
+	        const mcpExposedToolCount = mcpSetupResults.reduce((sum, result) => sum + Number(result.mcpToolCount || 0), 0);
+	        const mcpManifestCacheHits = mcpSetupResults.reduce((sum, result) => sum + (result.cacheHit ? 1 : 0), 0);
+	        const mcpDeferredManifestCount = mcpSetupResults.reduce((sum, result) => sum + ((result as any).deferred ? 1 : 0), 0);
+	        span.setAttribute('tool_prep.duration_ms', prepDurationMs);
+	        span.setAttribute('tool_prep.scoped_tool_count', scopedTools.length);
+	        span.setAttribute('tool_prep.mcp_endpoint_count', mcpEndpointCount);
+	        span.setAttribute('tool_prep.mcp_exposed_tool_count', mcpExposedToolCount);
+	        span.setAttribute('tool_prep.mcp_manifest_cache_hits', mcpManifestCacheHits);
+	        span.setAttribute('tool_prep.mcp_manifest_deferred', mcpDeferredManifestCount);
+	        logCallback({
+	          type: 'status',
+	          agent: agent.name,
+	          message: `Tools ready in ${prepDurationMs}ms (${scopedTools.length} total, ${mcpEndpointCount} MCP endpoints, ${mcpExposedToolCount} MCP methods, ${mcpManifestCacheHits} manifest cache hits, ${mcpDeferredManifestCount} deferred MCP manifests)`,
+	        });
 
         const basePrompt = `
             Your current task is: ${task.description}
