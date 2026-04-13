@@ -306,7 +306,7 @@ export default function VoicePage() {
 
   const appendIncomingAudioChunk = (base64: string) => {
     if (!base64) return;
-    if (sourceBufferRef.current && typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && mediaSourceRef.current) {
       const binary = window.atob(base64);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
@@ -700,8 +700,16 @@ export default function VoicePage() {
       await done;
     } catch (e: any) {
       directTtsPlayingRef.current = false;
-      setStatusNote('Direct ElevenLabs TTS is unavailable. Reply text remains available.');
+      sendRuntimeSessionUpdate(autoTts);
+      setStatusNote('Direct ElevenLabs TTS is unavailable. Switched to server speech fallback.');
       pushEvent('tts.socket.error.direct', { message: e?.message || 'Failed to synthesize direct TTS' });
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window && content) {
+        try {
+          const utterance = new SpeechSynthesisUtterance(content);
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(utterance);
+        } catch {}
+      }
     }
   };
 
@@ -1164,6 +1172,31 @@ export default function VoicePage() {
     if (textInput.trim()) setTextInput('');
   };
 
+  const sendRuntimeSessionUpdate = (runtimeAutoTts: boolean) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({
+      type: 'session.update',
+      audioMimeType: 'audio/pcm',
+      voiceId,
+      ttsModelId,
+      sttModelId,
+      outputFormat,
+      sampleRate,
+      languageCode,
+      autoTts: runtimeAutoTts,
+      vadEnabled,
+      vadSilenceThresholdSecs,
+      vadThreshold,
+      minSpeechDurationMs,
+      minSilenceDurationMs,
+      maxTokensToRecompute,
+      browserNoiseSuppression,
+      browserEchoCancellation,
+      browserAutoGainControl,
+      pushToTalk,
+    }));
+  };
+
   const saveProfile = async () => {
     if (!targetId) return;
     const basePath = targetType === 'crew' ? '/api/voice/crews' : '/api/voice/agents';
@@ -1342,27 +1375,7 @@ export default function VoicePage() {
     processorRef.current = processor;
     analyserRef.current = analyser;
 
-    wsRef.current.send(JSON.stringify({
-      type: 'session.update',
-      audioMimeType: 'audio/pcm',
-      voiceId,
-      ttsModelId,
-      sttModelId,
-      outputFormat,
-      sampleRate,
-      languageCode,
-      autoTts: autoTts && !directElevenLabsMedia,
-      vadEnabled,
-      vadSilenceThresholdSecs,
-      vadThreshold,
-      minSpeechDurationMs,
-      minSilenceDurationMs,
-      maxTokensToRecompute,
-      browserNoiseSuppression,
-      browserEchoCancellation,
-      browserAutoGainControl,
-      pushToTalk,
-    }));
+    sendRuntimeSessionUpdate(autoTts && !directElevenLabsMedia);
 
     processor.onaudioprocess = (event) => {
       if (pushToTalk && !pushToTalkPressedRef.current) return;
