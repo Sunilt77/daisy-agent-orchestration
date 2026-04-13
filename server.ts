@@ -7413,6 +7413,7 @@ app.get('/api/agent-executions', requireUser, async (req, res) => {
         ...row,
         created_at: row.createdAt,
         agent_name: row.agent?.name || 'Unknown Agent',
+        task_display: buildExecutionTaskDisplay(row.task),
       })),
       total,
       page,
@@ -11622,6 +11623,38 @@ function formatExecutionError(error: any, fallback = 'Execution failed'): string
   return raw;
 }
 
+function extractLikelyUserMessage(rawValue: any): string {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return '';
+
+  // Structured wrapper often sent by external orchestrators.
+  const customerMessageMatch = raw.match(
+    /Customer message:\s*([\s\S]*?)(?:\n\s*Respond ONLY as valid JSON|\n\s*Context:|\n\s*Recent conversation:|$)/i,
+  );
+  if (customerMessageMatch?.[1]) {
+    const candidate = String(customerMessageMatch[1]).trim();
+    if (candidate) return candidate;
+  }
+
+  // Fallback to the most recent inbound/user line when present.
+  const turnRegex = /(?:^|\n)\s*(?:inbound|user)\s*:\s*(.+)/ig;
+  let turnMatch: RegExpExecArray | null = null;
+  let lastTurn = '';
+  while ((turnMatch = turnRegex.exec(raw)) !== null) {
+    const candidate = String(turnMatch[1] || '').trim();
+    if (candidate) lastTurn = candidate;
+  }
+  if (lastTurn) return lastTurn;
+
+  return raw;
+}
+
+function buildExecutionTaskDisplay(rawValue: any, maxChars = 320): string {
+  const extracted = extractLikelyUserMessage(rawValue);
+  if (extracted.length <= maxChars) return extracted;
+  return `${extracted.slice(0, Math.max(40, maxChars - 1)).trimEnd()}…`;
+}
+
 function mergeMaxMetricsTags(existingTags: any, max: { [k: string]: number }) {
   const base = existingTags && typeof existingTags === 'object' ? { ...(existingTags as any) } : {};
   const metrics = base.metrics && typeof base.metrics === 'object' ? { ...(base.metrics as any) } : {};
@@ -12626,14 +12659,22 @@ async function runAgent(
         if (sessionId) {
           const nowIso = new Date().toISOString();
           const messages = Array.isArray(sessionConversation) ? [...sessionConversation] : [];
-          messages.push({
-            role: 'user',
-            content: String(invocation?.userMessage || task.description),
-            ts: nowIso,
-            ...(invocationAttachments.length ? { attachments: invocationAttachments } : {}),
-          });
+          const rawUserMessage = String(invocation?.userMessage || task.description || '');
+          const normalizedUserMessage = extractLikelyUserMessage(rawUserMessage) || rawUserMessage;
+          const lastMessage = messages.length ? messages[messages.length - 1] : null;
+          if (!(lastMessage && lastMessage.role === 'user' && String(lastMessage.content || '').trim() === normalizedUserMessage)) {
+            messages.push({
+              role: 'user',
+              content: normalizedUserMessage,
+              ts: nowIso,
+              ...(invocationAttachments.length ? { attachments: invocationAttachments } : {}),
+            });
+          }
           const assistantText = finalOutput || runError?.message || 'Error';
-          messages.push({ role: 'assistant', content: String(assistantText), ts: nowIso });
+          const nextLastMessage = messages.length ? messages[messages.length - 1] : null;
+          if (!(nextLastMessage && nextLastMessage.role === 'assistant' && String(nextLastMessage.content || '').trim() === String(assistantText).trim())) {
+            messages.push({ role: 'assistant', content: String(assistantText), ts: nowIso });
+          }
           const effectiveWindow = Math.max(2, Number(memoryWindow) || 12);
           const overflowCount = Math.max(0, messages.length - effectiveWindow);
           const overflow = overflowCount > 0 ? messages.slice(0, overflowCount) : [];
@@ -13861,7 +13902,8 @@ app.get('/api/agent-executions/:id/stream', async (req, res) => {
     }));
     const delegations = await getDelegationRows(execId);
     const orchestration = await buildDelegationOrchestrationEvents(execId, delegations, String(exec.status || 'running'));
-    res.write(`event: update\ndata: ${JSON.stringify({ execution: exec, tools, delegations, orchestration })}\n\n`);
+    const executionWithDisplay = exec ? { ...exec, task_display: buildExecutionTaskDisplay((exec as any).task) } : exec;
+    res.write(`event: update\ndata: ${JSON.stringify({ execution: executionWithDisplay, tools, delegations, orchestration })}\n\n`);
     if (exec.status !== 'running') {
       res.write(`event: done\ndata: ${JSON.stringify({ status: exec.status })}\n\n`);
       res.end();
@@ -13934,7 +13976,8 @@ app.get('/api/agent-executions/:id/timeline', async (req, res) => {
     })),
     { stage: 'finished', status: exec.status, at: exec.created_at },
   ];
-  res.json({ execution: exec, timeline, delegations: delegationRows, tools: toolRows, orchestration });
+  const executionWithDisplay = { ...exec, task_display: buildExecutionTaskDisplay((exec as any).task) };
+  res.json({ execution: executionWithDisplay, timeline, delegations: delegationRows, tools: toolRows, orchestration });
 });
 
 app.post('/api/agent-executions/:id/retry', async (req, res) => {

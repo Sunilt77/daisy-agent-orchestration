@@ -2944,7 +2944,7 @@ type AgentOptionalConfig =
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Memory Window (Optional)</label>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Context Window Size (Messages)</label>
                   <input
                     type="number"
                     min="2"
@@ -2952,8 +2952,27 @@ type AgentOptionalConfig =
                     className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
                     value={formData.memory_window}
                     onChange={e => setFormData({...formData, memory_window: e.target.value})}
-                    placeholder="e.g. 12 messages"
+                    placeholder="e.g. 5 (last 5 messages)"
                   />
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    {[5, 8, 12, 20].map((size) => (
+                      <button
+                        key={`memory-window-${size}`}
+                        type="button"
+                        onClick={() => setFormData({ ...formData, memory_window: String(size) })}
+                        className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
+                          String(formData.memory_window || '') === String(size)
+                            ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                            : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+                        }`}
+                      >
+                        Last {size}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Controls how many recent chat messages are kept in active context. Lower values reduce prompt size/cost.
+                  </p>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">Reasoning Step Limit (Optional)</label>

@@ -14,6 +14,8 @@ type Execution = {
   total_cost?: number;
   input?: string | null;
   output?: string | null;
+  task?: string | null;
+  task_display?: string | null;
   created_at: string;
 };
 
@@ -227,6 +229,11 @@ export default function AgentExecutionPage() {
               </Link>
             ) : null}
           </div>
+          {execution?.task_display ? (
+            <div className="mt-3 max-w-4xl text-sm text-slate-200">
+              <span className="font-semibold text-slate-100">User Message:</span> {execution.task_display}
+            </div>
+          ) : null}
         </div>
         <button
           onClick={() => setLive((v) => !v)}

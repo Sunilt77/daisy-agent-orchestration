@@ -460,7 +460,7 @@ export default function ToolsPage() {
     name: '',
     description: '',
     category: 'General',
-    type: 'custom',
+    type: 'http',
     config: '{}'
   });
 
@@ -1146,7 +1146,7 @@ export default function ToolsPage() {
 
   const handleCreateNew = () => {
       setSelectedToolId('new');
-      setFormData({ name: '', description: '', category: 'General', type: 'custom', config: '{}' });
+      setFormData({ name: '', description: '', category: 'General', type: 'http', config: '{}' });
       setPythonCode('result = "Hello World"');
       setJavascriptPackages('');
       setJsPackagesNotice(null);
@@ -1938,7 +1938,33 @@ export default function ToolsPage() {
                       
                       <div className="flex-1 overflow-y-auto p-6">
                           <form id="tool-form" onSubmit={handleSubmit} className="space-y-6">
-                              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 xl:gap-6">
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 xl:gap-6">
+                                  <div>
+                                      <label className="block text-sm font-medium text-slate-700 mb-1">Type</label>
+                                      <select
+                                          className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white"
+                                          value={formData.type}
+                                          onChange={e => setFormData({...formData, type: e.target.value})}
+                                      >
+                                          <option value="http">HTTP Request</option>
+                                          <option value="custom">Custom Function</option>
+                                          <option value="javascript">JavaScript Code</option>
+                                          <option value="mcp">MCP Server</option>
+                                          <option value="mcp_stdio_proxy">Local MCP Runtime Tool</option>
+                                      </select>
+                                  </div>
+                                  <div>
+                                      <label className="block text-sm font-medium text-slate-700 mb-1">Category</label>
+                                      <input
+                                          className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                                          value={formData.category}
+                                          onChange={e => setFormData({...formData, category: e.target.value})}
+                                          placeholder="e.g. Analysis, Web, etc."
+                                      />
+                                  </div>
+                              </div>
+
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 xl:gap-6">
                                   <div>
                                       <label className="block text-sm font-medium text-slate-700 mb-1">Name</label>
                                       <input
@@ -1950,39 +1976,15 @@ export default function ToolsPage() {
                                       />
                                   </div>
                                   <div>
-                                      <label className="block text-sm font-medium text-slate-700 mb-1">Category</label>
+                                      <label className="block text-sm font-medium text-slate-700 mb-1">Description</label>
                                       <input
+                                          required
                                           className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
-                                          value={formData.category}
-                                          onChange={e => setFormData({...formData, category: e.target.value})}
-                                          placeholder="e.g. Analysis, Web, etc."
+                                          value={formData.description}
+                                          onChange={e => setFormData({...formData, description: e.target.value})}
+                                          placeholder="Explain exactly what this tool does so the LLM knows when to use it"
                                       />
                                   </div>
-                                  <div>
-                                      <label className="block text-sm font-medium text-slate-700 mb-1">Type</label>
-                                      <select
-                                          className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white"
-                                          value={formData.type}
-                                          onChange={e => setFormData({...formData, type: e.target.value})}
-                                      >
-                                          <option value="custom">Custom Function</option>
-                                          <option value="javascript">JavaScript Code</option>
-                                          <option value="http">HTTP Request</option>
-                                          <option value="mcp">MCP Server</option>
-                                          <option value="mcp_stdio_proxy">Local MCP Runtime Tool</option>
-                                      </select>
-                                  </div>
-                              </div>
-                              
-                              <div>
-                                  <label className="block text-sm font-medium text-slate-700 mb-1">Description</label>
-                                  <input
-                                      required
-                                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
-                                      value={formData.description}
-                                      onChange={e => setFormData({...formData, description: e.target.value})}
-                                      placeholder="Explain exactly what this tool does so the LLM knows when to use it"
-                                  />
                               </div>
 
                               {selectedTool && isBuiltInTool(selectedTool) && (

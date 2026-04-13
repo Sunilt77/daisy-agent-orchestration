@@ -12,6 +12,7 @@ type AgentExecutionRow = {
   executionKind?: string;
   execution_kind?: string;
   task?: string | null;
+  task_display?: string | null;
   promptTokens?: number;
   prompt_tokens?: number;
   completionTokens?: number;
@@ -271,7 +272,7 @@ export default function AgentExecutionsPage() {
                 const completion = Number(row.completion_tokens ?? row.completionTokens ?? 0);
                 const cost = Number(row.total_cost ?? row.totalCost ?? 0);
                 const createdAt = String(row.created_at ?? row.createdAt ?? '');
-                const task = String(row.task || '').trim();
+                const task = String(row.task_display || row.task || '').trim();
                 const kind = String(row.execution_kind ?? row.executionKind ?? 'standard');
                 return (
                   <tr key={row.id} className="hover:bg-slate-50">
