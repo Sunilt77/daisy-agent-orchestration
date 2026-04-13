@@ -2813,6 +2813,7 @@ type VoiceSocketContext = {
   turnState?: 'idle' | 'listening' | 'thinking' | 'speaking';
   activeTtsAbort?: AbortController | null;
   activeProgressTtsAbort?: AbortController | null;
+  mediaSequence?: number;
 };
 
 const DEFAULT_VOICE_ID = process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'JBFqnCBsd6RMkjVDRZzb';
@@ -3153,6 +3154,7 @@ async function persistUploadedAttachment(params: {
   crewId?: number | null;
   uploaderUserId?: string | null;
   uploaderOrgId?: string | null;
+  storagePathPrefix?: string | null;
 }) {
   ensureAttachmentTables();
   if (!isAttachmentStorageConfigured()) {
@@ -3170,6 +3172,7 @@ async function persistUploadedAttachment(params: {
       buffer: fileBuffer,
       originalName: String(file.originalname || 'upload.bin'),
       mimeType: file.mimetype ? String(file.mimetype) : undefined,
+      keyPrefix: params.storagePathPrefix ? String(params.storagePathPrefix) : undefined,
     });
     const resolvedFileUrl = stored.fileUrl || `/api/attachments/${attachmentId}/content`;
     const kind = inferAttachmentKind(file.mimetype);
@@ -3208,6 +3211,76 @@ async function persistUploadedAttachment(params: {
   } finally {
     await unlink(file.path).catch(() => undefined);
   }
+}
+
+function inferAudioExtensionFromMimeType(mimeType?: string | null) {
+  const normalized = String(mimeType || '').toLowerCase();
+  if (normalized.includes('wav')) return 'wav';
+  if (normalized.includes('ogg')) return 'ogg';
+  if (normalized.includes('webm')) return 'webm';
+  if (normalized.includes('pcm')) return 'pcm';
+  return 'mp3';
+}
+
+async function persistVoiceGeneratedAudioAttachment(params: {
+  ctx: VoiceSocketContext;
+  mimeType: string;
+  buffer: Buffer;
+  speaker?: 'assistant' | 'progress';
+  transcriptText?: string;
+}) {
+  if (!params.buffer?.length) return null;
+  if (!isAttachmentStorageConfigured()) return null;
+  ensureAttachmentTables();
+
+  const speaker = params.speaker || 'assistant';
+  const attachmentId = randomUUID();
+  const turnIndex = (params.ctx.mediaSequence || 0) + 1;
+  params.ctx.mediaSequence = turnIndex;
+  const extension = inferAudioExtensionFromMimeType(params.mimeType);
+  const originalName = `${speaker}-turn-${String(turnIndex).padStart(4, '0')}.${extension}`;
+  const stored = await uploadAttachmentBuffer({
+    attachmentId,
+    buffer: params.buffer,
+    originalName,
+    mimeType: params.mimeType,
+    keyPrefix: `voice-sessions/${params.ctx.sessionId}/generated-audio`,
+  });
+  const resolvedFileUrl = stored.fileUrl || `/api/attachments/${attachmentId}/content`;
+  db.prepare(`
+    INSERT INTO attachments (
+      id, scope_type, scope_id, agent_id, crew_id, uploader_user_id, uploader_org_id,
+      kind, original_name, mime_type, size_bytes, storage_provider, storage_key, file_url, local_path, metadata
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    attachmentId,
+    'voice_session',
+    params.ctx.sessionId,
+    params.ctx.agentId || null,
+    params.ctx.targetType === 'crew' ? params.ctx.targetId : null,
+    null,
+    null,
+    'audio',
+    originalName,
+    params.mimeType || 'audio/mpeg',
+    params.buffer.length,
+    stored.provider,
+    stored.storageKey,
+    resolvedFileUrl,
+    stored.localPath || null,
+    JSON.stringify({
+      source: 'voice_runtime_tts',
+      speaker,
+      turn_index: turnIndex,
+      transcript_preview: String(params.transcriptText || '').slice(0, 280) || null,
+    }),
+  );
+  const row = db.prepare(`
+    SELECT id, kind, original_name, mime_type, size_bytes, storage_key, file_url, local_path, created_at
+    FROM attachments
+    WHERE id = ?
+  `).get(attachmentId) as any;
+  return normalizeAttachmentRow(row);
 }
 
 async function transcribeVoiceAudio(buffer: Buffer, mimeType: string, sttModelId: string) {
@@ -3822,6 +3895,7 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
         outputFormat: current.outputFormat,
       });
       let totalBytes = 0;
+      const persistedAudioChunks: Buffer[] = [];
       const ttsChunks = replyChunks.length ? replyChunks : [reply];
       for (let index = 0; index < ttsChunks.length; index += 1) {
         const ttsChunk = ttsChunks[index];
@@ -3832,6 +3906,7 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
         });
         await streamSynthesizeVoiceAudio(ttsChunk, current.voiceId, current.ttsModelId, current.outputFormat, (chunk) => {
           totalBytes += chunk.length;
+          persistedAudioChunks.push(chunk);
           sendVoiceSocketEvent(ws, 'tts.chunk', {
             sessionId: current.sessionId,
             audio: chunk.toString('base64'),
@@ -3856,6 +3931,31 @@ async function executeVoiceTargetFromTranscript(ws: WebSocket, current: VoiceSoc
         outputFormat: current.outputFormat,
         bytes: totalBytes,
       });
+      try {
+        const persisted = await persistVoiceGeneratedAudioAttachment({
+          ctx: current,
+          mimeType,
+          buffer: Buffer.concat(persistedAudioChunks),
+          speaker: 'assistant',
+          transcriptText: reply,
+        });
+        if (persisted) {
+          current.attachments = [...(current.attachments || []), persisted];
+          appendVoiceSessionEvent(current.sessionId, 'attachments.updated', {
+            source: 'voice_tts',
+            attachments: [persisted],
+          });
+          sendVoiceSocketEvent(ws, 'attachments.updated', {
+            sessionId: current.sessionId,
+            source: 'voice_tts',
+            attachments: [persisted],
+          });
+        }
+      } catch (error: any) {
+        appendVoiceSessionEvent(current.sessionId, 'voice.media.error', {
+          message: error?.message || 'Failed to persist synthesized voice audio',
+        });
+      }
     }
 
     updateVoiceSession(current.sessionId, { status: 'completed' });
@@ -8161,6 +8261,110 @@ app.get('/api/voice/targets', requireUser, async (req, res) => {
   });
 });
 
+app.post('/api/voice/elevenlabs/realtime-token', requireUser, async (req, res) => {
+  try {
+    const targetType = req.body?.targetType === 'crew' ? 'crew' : 'agent';
+    const targetId = Number(req.body?.targetId || 0);
+    if (!Number.isFinite(targetId) || targetId <= 0) {
+      return res.status(400).json({ error: 'Valid targetId is required' });
+    }
+
+    const scope = await resolveOrchestratorAccessScope(req);
+    if (targetType === 'crew') {
+      requireVisibleCrewId(scope, targetId);
+    } else {
+      requireVisibleAgentId(scope, targetId);
+    }
+
+    const apiKey = getVoiceCredentialApiKey();
+    if (!apiKey) {
+      return res.status(400).json({ error: 'ElevenLabs voice credential is not configured.' });
+    }
+
+    const modelId = String(req.body?.model_id || req.body?.modelId || DEFAULT_STT_MODEL).trim() || DEFAULT_STT_MODEL;
+    const requestedTtl = Number(req.body?.ttl_secs || req.body?.ttlSecs || 300);
+    const ttlSecs = Math.round(clampNumber(requestedTtl, 300, 60, 900));
+    const upstream = await fetch('https://api.elevenlabs.io/v1/speech-to-text/get-realtime-token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'xi-api-key': apiKey,
+      },
+      body: JSON.stringify({
+        model_id: modelId,
+        ttl_secs: ttlSecs,
+      }),
+    });
+    const data: any = await upstream.json().catch(() => ({}));
+    if (!upstream.ok) {
+      const detail = String(data?.detail || data?.error || data?.message || '').trim();
+      return res.status(upstream.status).json({
+        error: `Failed to create ElevenLabs realtime token${detail ? `: ${detail}` : ''}`,
+      });
+    }
+    const token = String(data?.token || '').trim();
+    if (!token) {
+      return res.status(502).json({ error: 'ElevenLabs realtime token response did not include a token.' });
+    }
+    res.json({
+      token,
+      model_id: modelId,
+      ttl_secs: ttlSecs,
+      expires_at: data?.expires_at || null,
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to create ElevenLabs realtime token' });
+  }
+});
+
+app.post('/api/voice/elevenlabs/single-use-token', requireUser, async (req, res) => {
+  try {
+    const targetType = req.body?.targetType === 'crew' ? 'crew' : 'agent';
+    const targetId = Number(req.body?.targetId || 0);
+    if (!Number.isFinite(targetId) || targetId <= 0) {
+      return res.status(400).json({ error: 'Valid targetId is required' });
+    }
+
+    const scope = await resolveOrchestratorAccessScope(req);
+    if (targetType === 'crew') {
+      requireVisibleCrewId(scope, targetId);
+    } else {
+      requireVisibleAgentId(scope, targetId);
+    }
+
+    const apiKey = getVoiceCredentialApiKey();
+    if (!apiKey) {
+      return res.status(400).json({ error: 'ElevenLabs voice credential is not configured.' });
+    }
+
+    const requestedTokenType = String(req.body?.tokenType || '').trim();
+    const tokenType = requestedTokenType === 'tts_websocket' ? 'tts_websocket' : 'realtime_scribe';
+    const upstream = await fetch(`https://api.elevenlabs.io/v1/single-use-token/${tokenType}`, {
+      method: 'POST',
+      headers: {
+        'xi-api-key': apiKey,
+      },
+    });
+    const data: any = await upstream.json().catch(() => ({}));
+    if (!upstream.ok) {
+      const detail = String(data?.detail || data?.error || data?.message || '').trim();
+      return res.status(upstream.status).json({
+        error: `Failed to create ElevenLabs single-use token${detail ? `: ${detail}` : ''}`,
+      });
+    }
+    const token = String(data?.token || '').trim();
+    if (!token) {
+      return res.status(502).json({ error: 'ElevenLabs single-use token response did not include a token.' });
+    }
+    res.json({
+      token,
+      tokenType,
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to create ElevenLabs single-use token' });
+  }
+});
+
 app.get('/api/voice/exposed', (req, res) => {
   const origin = `${req.protocol}://${req.get('host')}`;
   const exposedAgents = db.prepare('SELECT id, name, role, provider, model, status, is_exposed FROM agents WHERE is_exposed = 1 ORDER BY id ASC').all() as any[];
@@ -8369,6 +8573,7 @@ app.post('/api/voice/sessions/:id/attachments', requireUser, async (req, res, ne
           crewId: targetType === 'crew' && Number.isFinite(targetId) && targetId > 0 ? targetId : null,
           uploaderUserId: req.user?.id ?? null,
           uploaderOrgId: req.user?.orgId ?? null,
+          storagePathPrefix: `voice-sessions/${sessionId}/user-uploads`,
         })));
         appendVoiceSessionEvent(sessionId, 'attachments.updated', { attachments });
         res.json({ attachments });
@@ -14056,6 +14261,7 @@ function initializeVoiceWebSocketServer(server: import('http').Server) {
       browserAutoGainControl: initialBrowserAutoGainControl,
       pushToTalk: initialPushToTalk,
       attachments: [],
+      mediaSequence: 0,
       sttSocket: null,
       lastVoiceProgressAt: 0,
       lastVoiceProgressText: '',

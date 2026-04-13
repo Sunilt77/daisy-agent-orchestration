@@ -188,6 +188,7 @@ export default function VoicePage() {
   const [targetSearch, setTargetSearch] = useState('');
   const [eventSearch, setEventSearch] = useState('');
   const [eventTypeFilter, setEventTypeFilter] = useState<'all' | string>('all');
+  const [directElevenLabsMedia, setDirectElevenLabsMedia] = useState(true);
   const [latencyMetrics, setLatencyMetrics] = useState<{
     sttToReplyMs: number | null;
     replyToTtsMs: number | null;
@@ -217,6 +218,13 @@ export default function VoicePage() {
   const pushToTalkPressedRef = useRef(false);
   const turnCommittedAtRef = useRef<number | null>(null);
   const replyStartedAtRef = useRef<number | null>(null);
+  const directSttSocketRef = useRef<WebSocket | null>(null);
+  const directSttActiveRef = useRef(false);
+  const lastDirectCommittedTranscriptRef = useRef('');
+  const directTtsSocketRef = useRef<WebSocket | null>(null);
+  const directTtsActiveRef = useRef(false);
+  const directTtsPlayingRef = useRef(false);
+  const lastDirectTtsTextRef = useRef('');
 
   const stopMicVisualization = () => {
     if (animationFrameRef.current != null && typeof window !== 'undefined') {
@@ -403,6 +411,236 @@ export default function VoicePage() {
       replyToTtsMs: null,
       turnTotalMs: null,
     });
+  };
+
+  const closeDirectSttSocket = () => {
+    directSttActiveRef.current = false;
+    lastDirectCommittedTranscriptRef.current = '';
+    try {
+      directSttSocketRef.current?.close();
+    } catch {}
+    directSttSocketRef.current = null;
+  };
+
+  const closeDirectTtsSocket = () => {
+    directTtsActiveRef.current = false;
+    directTtsPlayingRef.current = false;
+    try {
+      directTtsSocketRef.current?.close();
+    } catch {}
+    directTtsSocketRef.current = null;
+  };
+
+  const requestSingleUseToken = async (tokenType: 'realtime_scribe' | 'tts_websocket') => {
+    const res = await fetch('/api/voice/elevenlabs/single-use-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        targetType,
+        targetId: Number(targetId || 0),
+        tokenType,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(String(data?.error || `Failed to create ${tokenType} token`));
+    const token = String(data?.token || '').trim();
+    if (!token) throw new Error(`${tokenType} token missing in response`);
+    return token;
+  };
+
+  const requestDirectSttToken = async () => {
+    return await requestSingleUseToken('realtime_scribe');
+  };
+
+  const connectDirectSttSocket = async () => {
+    if (!directElevenLabsMedia) return false;
+    if (!targetId) return false;
+    if (directSttSocketRef.current && (
+      directSttSocketRef.current.readyState === WebSocket.OPEN ||
+      directSttSocketRef.current.readyState === WebSocket.CONNECTING
+    )) {
+      return directSttSocketRef.current.readyState === WebSocket.OPEN;
+    }
+
+    const token = await requestDirectSttToken();
+    const params = new URLSearchParams({
+      model_id: sttModelId || 'scribe_v2_realtime',
+      sample_rate: String(sampleRate || 16000),
+      audio_format: `pcm_${sampleRate || 16000}`,
+      token,
+    });
+    if (vadEnabled === false) {
+      params.set('commit_strategy', 'manual');
+    } else {
+      params.set('commit_strategy', 'vad');
+      params.set('vad_silence_threshold_secs', String(vadSilenceThresholdSecs));
+      params.set('vad_threshold', String(vadThreshold));
+      params.set('min_speech_duration_ms', String(minSpeechDurationMs));
+      params.set('min_silence_duration_ms', String(minSilenceDurationMs));
+      params.set('max_tokens_to_recompute', String(maxTokensToRecompute));
+    }
+    if (languageCode) params.set('language_code', languageCode);
+
+    const sttSocket = new WebSocket(`wss://api.elevenlabs.io/v1/speech-to-text/realtime?${params.toString()}`);
+    directSttSocketRef.current = sttSocket;
+
+    return await new Promise<boolean>((resolve, reject) => {
+      let settled = false;
+      const settle = (ok: boolean, err?: Error) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutId) window.clearTimeout(timeoutId);
+        if (ok) resolve(true);
+        else reject(err || new Error('Direct STT connection failed'));
+      };
+      const timeoutId = window.setTimeout(() => {
+        settle(false, new Error('Timed out connecting to ElevenLabs realtime STT'));
+      }, 10000);
+      sttSocket.onopen = () => {
+        pushEvent('stt.socket.open.direct', { provider: 'elevenlabs' });
+        setTurnState('listening');
+        settle(true);
+      };
+      sttSocket.onerror = () => {
+        if (directSttSocketRef.current === sttSocket) directSttSocketRef.current = null;
+        settle(false, new Error('Direct ElevenLabs STT socket error'));
+      };
+      sttSocket.onclose = () => {
+        if (directSttSocketRef.current === sttSocket) directSttSocketRef.current = null;
+        pushEvent('stt.socket.closed.direct', {});
+        settle(false, new Error('Direct STT socket closed before becoming ready'));
+      };
+      sttSocket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(String(event.data || '{}'));
+          const partial = String(payload?.text || payload?.transcript || '').trim();
+          const messageType = String(payload?.message_type || '');
+          const speechStarted = messageType === 'speech_started' || messageType === 'speech_start';
+          const speechStopped = messageType === 'speech_stopped' || messageType === 'speech_end';
+          if (speechStarted || (partial && turnState !== 'speaking')) {
+            setStatusNote('Listening…');
+            setTurnState('listening');
+          }
+          if (speechStopped) {
+            setStatusNote('Speech committed. Sending to the runtime…');
+          }
+          const normalizedType =
+            messageType === 'committed_transcript' || messageType === 'committed_transcript_with_timestamps' || payload?.is_final || payload?.final
+              ? 'stt.final'
+              : messageType === 'partial_transcript'
+                ? 'stt.partial'
+                : 'stt.event';
+          if (!partial) return;
+          if (normalizedType === 'stt.final') {
+            if (lastDirectCommittedTranscriptRef.current === partial) return;
+            lastDirectCommittedTranscriptRef.current = partial;
+            setLiveTranscript(partial);
+            startTurnTiming();
+            wsRef.current?.send(JSON.stringify({ type: 'transcript.commit', text: partial }));
+            pushEvent('stt.final.direct', { text: partial });
+          } else if (normalizedType === 'stt.partial') {
+            setLiveTranscript(partial);
+          }
+        } catch {}
+      };
+    });
+  };
+
+  const connectDirectTtsSocket = async () => {
+    if (!directElevenLabsMedia || !autoTts) return false;
+    if (!targetId) return false;
+    if (directTtsSocketRef.current && (
+      directTtsSocketRef.current.readyState === WebSocket.OPEN ||
+      directTtsSocketRef.current.readyState === WebSocket.CONNECTING
+    )) {
+      return directTtsSocketRef.current.readyState === WebSocket.OPEN;
+    }
+
+    const token = await requestSingleUseToken('tts_websocket');
+    const params = new URLSearchParams({
+      single_use_token: token,
+      model_id: ttsModelId || 'eleven_multilingual_v2',
+      output_format: outputFormat || 'mp3_44100_128',
+    });
+    if (languageCode) params.set('language_code', languageCode);
+    params.set('auto_mode', 'true');
+    const socket = new WebSocket(`wss://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream-input?${params.toString()}`);
+    directTtsSocketRef.current = socket;
+
+    return await new Promise<boolean>((resolve, reject) => {
+      let settled = false;
+      const settle = (ok: boolean, err?: Error) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutId) window.clearTimeout(timeoutId);
+        if (ok) resolve(true);
+        else reject(err || new Error('Direct TTS connection failed'));
+      };
+      const timeoutId = window.setTimeout(() => {
+        settle(false, new Error('Timed out connecting to ElevenLabs realtime TTS'));
+      }, 10000);
+      socket.onopen = () => {
+        socket.send(JSON.stringify({
+          text: ' ',
+          voice_settings: {
+            speed: 1,
+            stability: 0.5,
+            similarity_boost: 0.8,
+          },
+        }));
+        directTtsActiveRef.current = true;
+        pushEvent('tts.socket.open.direct', { provider: 'elevenlabs' });
+        settle(true);
+      };
+      socket.onerror = () => {
+        if (directTtsSocketRef.current === socket) directTtsSocketRef.current = null;
+        directTtsActiveRef.current = false;
+        settle(false, new Error('Direct ElevenLabs TTS socket error'));
+      };
+      socket.onclose = () => {
+        if (directTtsSocketRef.current === socket) directTtsSocketRef.current = null;
+        directTtsActiveRef.current = false;
+        pushEvent('tts.socket.closed.direct', {});
+      };
+      socket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(String(event.data || '{}'));
+          const audio = String(payload?.audio || '');
+          if (audio) {
+            appendIncomingAudioChunk(audio);
+          }
+          if (payload?.isFinal === true) {
+            finishIncomingAudioStream();
+            directTtsPlayingRef.current = false;
+            setTurnState('idle');
+          }
+        } catch {}
+      };
+    });
+  };
+
+  const synthesizeDirectTts = async (text: string) => {
+    const content = String(text || '').trim();
+    if (!content || !directElevenLabsMedia || !autoTts) return;
+    if (lastDirectTtsTextRef.current === content) return;
+    if (directTtsPlayingRef.current) return;
+
+    try {
+      if (!directTtsActiveRef.current || !directTtsSocketRef.current || directTtsSocketRef.current.readyState !== WebSocket.OPEN) {
+        await connectDirectTtsSocket();
+      }
+      if (!directTtsSocketRef.current || directTtsSocketRef.current.readyState !== WebSocket.OPEN) return;
+      lastDirectTtsTextRef.current = content;
+      directTtsPlayingRef.current = true;
+      setTurnState('speaking');
+      startIncomingAudioStream(outputFormat.startsWith('mp3') ? 'audio/mpeg' : 'audio/mpeg');
+      directTtsSocketRef.current.send(JSON.stringify({ text: `${content} `, try_trigger_generation: true }));
+      directTtsSocketRef.current.send(JSON.stringify({ text: '' }));
+    } catch (e: any) {
+      directTtsPlayingRef.current = false;
+      setStatusNote('Direct ElevenLabs TTS is unavailable. Reply text remains available.');
+      pushEvent('tts.socket.error.direct', { message: e?.message || 'Failed to synthesize direct TTS' });
+    }
   };
 
   useEffect(() => {
@@ -621,8 +859,11 @@ export default function VoicePage() {
 
   const connect = () => {
     if (!targetId) return;
+    closeDirectSttSocket();
+    closeDirectTtsSocket();
     setError('');
     setStatusNote('');
+    const runtimeAutoTts = autoTts && !directElevenLabsMedia;
     const url = new URL(`${window.location.origin.replace(/^http/, 'ws')}/ws/voice`);
     url.searchParams.set('targetType', targetType);
     url.searchParams.set('targetId', String(targetId));
@@ -632,7 +873,7 @@ export default function VoicePage() {
     url.searchParams.set('outputFormat', outputFormat);
     url.searchParams.set('sampleRate', String(sampleRate));
     url.searchParams.set('languageCode', languageCode);
-    url.searchParams.set('autoTts', autoTts ? 'true' : 'false');
+    url.searchParams.set('autoTts', runtimeAutoTts ? 'true' : 'false');
     url.searchParams.set('vadEnabled', vadEnabled ? 'true' : 'false');
     url.searchParams.set('vadSilenceThresholdSecs', String(vadSilenceThresholdSecs));
     url.searchParams.set('vadThreshold', String(vadThreshold));
@@ -656,6 +897,22 @@ export default function VoicePage() {
         pushEvent(message.type || 'message', message);
         if (message.type === 'session.started') setSessionId(String(message.sessionId || ''));
         if (message.type === 'session.started') setSessionAttachments(Array.isArray(message.attachments) ? message.attachments : []);
+        if (message.type === 'attachments.updated') {
+          const updated = Array.isArray(message.attachments) ? message.attachments : [];
+          if (updated.length) {
+            setSessionAttachments((prev) => {
+              const seen = new Set(prev.map((item) => String(item.id || '')));
+              const merged = [...prev];
+              for (const item of updated) {
+                const id = String(item?.id || '');
+                if (!id || seen.has(id)) continue;
+                seen.add(id);
+                merged.push(item);
+              }
+              return merged;
+            });
+          }
+        }
         if (message.type === 'session.started') setStatusNote('Connected. Start speaking and committed speech will invoke the selected runtime automatically.');
         if (message.type === 'turn.state') {
           const next = String(message.state || 'idle');
@@ -688,7 +945,13 @@ export default function VoicePage() {
           else if (message.text) setAgentReply((prev) => `${prev}${prev ? ' ' : ''}${String(message.text || '')}`);
         }
         if (message.type === 'agent.reply.complete') setAgentReply(String(message.text || ''));
+        if (message.type === 'agent.reply.complete' && directElevenLabsMedia && autoTts) {
+          void synthesizeDirectTts(String(message.text || ''));
+        }
         if (message.type === 'agent.reply') setAgentReply(String(message.text || ''));
+        if (message.type === 'agent.reply' && directElevenLabsMedia && autoTts) {
+          void synthesizeDirectTts(String(message.text || ''));
+        }
         if (message.type === 'voice.busy') setStatusNote(String(message.message || 'The runtime is still processing the previous utterance.'));
         if (message.type === 'voice.progress' && message.text) {
           setVoiceProgress((prev) => [
@@ -697,6 +960,7 @@ export default function VoicePage() {
           ].slice(0, 20));
         }
         if (message.type === 'tts.start') {
+          if (directElevenLabsMedia) return;
           const now = Date.now();
           if (replyStartedAtRef.current) {
             setLatencyMetrics((prev) => ({
@@ -707,18 +971,23 @@ export default function VoicePage() {
           startIncomingAudioStream(String(message.mimeType || 'audio/mpeg'));
         }
         if (message.type === 'tts.chunk' && message.audio) {
+          if (directElevenLabsMedia) return;
           appendIncomingAudioChunk(String(message.audio || ''));
         }
         if (message.type === 'tts.complete') {
+          if (directElevenLabsMedia) return;
           finishIncomingAudioStream();
         }
         if (message.type === 'voice.progress.audio.start') {
+          if (directElevenLabsMedia) return;
           startIncomingAudioStream(String(message.mimeType || 'audio/mpeg'));
         }
         if (message.type === 'voice.progress.audio.chunk' && message.audio) {
+          if (directElevenLabsMedia) return;
           appendIncomingAudioChunk(String(message.audio || ''));
         }
         if (message.type === 'voice.progress.audio.complete') {
+          if (directElevenLabsMedia) return;
           finishIncomingAudioStream();
         }
         if (message.type === 'tts.interrupted') {
@@ -747,6 +1016,8 @@ export default function VoicePage() {
     };
     ws.onerror = () => setError('Voice socket error');
     ws.onclose = () => {
+      closeDirectSttSocket();
+      closeDirectTtsSocket();
       wsRef.current = null;
       setIsConnected(false);
       setIsRecording(false);
@@ -766,6 +1037,8 @@ export default function VoicePage() {
   };
 
   const disconnect = () => {
+    closeDirectSttSocket();
+    closeDirectTtsSocket();
     wsRef.current?.send(JSON.stringify({ type: 'session.stop' }));
     wsRef.current?.close();
     wsRef.current = null;
@@ -943,6 +1216,17 @@ export default function VoicePage() {
   const startRecording = async () => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     setError('');
+    directSttActiveRef.current = false;
+    if (directElevenLabsMedia) {
+      try {
+        const isOpen = await connectDirectSttSocket();
+        directSttActiveRef.current = Boolean(isOpen);
+      } catch (e: any) {
+        directSttActiveRef.current = false;
+        setStatusNote('Direct ElevenLabs STT is unavailable, using server relay mode.');
+        pushEvent('stt.socket.error.direct', { message: e?.message || 'Failed to open direct STT socket' });
+      }
+    }
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
@@ -973,7 +1257,7 @@ export default function VoicePage() {
       outputFormat,
       sampleRate,
       languageCode,
-      autoTts,
+      autoTts: autoTts && !directElevenLabsMedia,
       vadEnabled,
       vadSilenceThresholdSecs,
       vadThreshold,
@@ -995,10 +1279,17 @@ export default function VoicePage() {
         pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
       }
       const base64 = toBase64(pcm.buffer);
-      wsRef.current?.send(JSON.stringify({
-        type: 'audio.stream',
-        chunk: base64,
-      }));
+      if (directSttActiveRef.current && directSttSocketRef.current?.readyState === WebSocket.OPEN) {
+        directSttSocketRef.current.send(JSON.stringify({
+          message_type: 'input_audio_chunk',
+          audio_base_64: base64,
+        }));
+      } else {
+        wsRef.current?.send(JSON.stringify({
+          type: 'audio.stream',
+          chunk: base64,
+        }));
+      }
     };
 
     const levelBuffer = new Uint8Array(analyser.frequencyBinCount);
@@ -1027,6 +1318,8 @@ export default function VoicePage() {
   };
 
   const stopRecording = () => {
+    closeDirectSttSocket();
+    closeDirectTtsSocket();
     stopMicVisualization();
     processorRef.current?.disconnect();
     sourceRef.current?.disconnect();
@@ -1076,11 +1369,19 @@ export default function VoicePage() {
   }, [pushToTalk, isConnected, isRecording]);
 
   useEffect(() => {
+    if (directElevenLabsMedia) return;
+    closeDirectSttSocket();
+    closeDirectTtsSocket();
+  }, [directElevenLabsMedia]);
+
+  useEffect(() => {
     if (!lastAudioSrc || !audioRef.current) return;
     audioRef.current.play().catch(() => undefined);
   }, [lastAudioSrc]);
 
   useEffect(() => () => {
+    closeDirectSttSocket();
+    closeDirectTtsSocket();
     resetAudioStream();
     stopMicVisualization();
   }, []);
@@ -1131,6 +1432,23 @@ export default function VoicePage() {
             {latencyMetrics.turnTotalMs != null ? ` • Total ${latencyMetrics.turnTotalMs}ms` : ''}
           </div>
         </div>
+      </div>
+
+      <div className="rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-cyan-900">
+        <label className="flex items-start gap-3 text-sm">
+          <input
+            type="checkbox"
+            className="mt-1 h-4 w-4 rounded border-cyan-400 text-cyan-600 focus:ring-cyan-500"
+            checked={directElevenLabsMedia}
+            onChange={(event) => setDirectElevenLabsMedia(event.target.checked)}
+          />
+          <span>
+            <span className="font-semibold">Direct ElevenLabs Media Plane</span>
+            <span className="block text-xs text-cyan-800/90">
+              Streams microphone audio directly to ElevenLabs realtime STT from the browser and only sends committed transcript turns to your orchestration runtime.
+            </span>
+          </span>
+        </label>
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] gap-6">
